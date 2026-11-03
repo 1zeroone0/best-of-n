@@ -165,16 +165,17 @@ pub open spec fn complete(s: Search) -> bool {
     forall|i: int| 0 <= i < s.n ==> s.results.contains_key(i)
 }
 
-/// Code: at least two verified, and every verified pair prints the same. (intent 4)
-/// Compaction: at least one verified, and every verified candidate prints the
-/// same as the goal, so the goal is the second. (intent 17)
+/// At least two verified candidates, and every verified pair prints the same.
+/// (intent 4) Compaction also measures them against its goal: every
+/// verified candidate prints the same as the goal. The goal never votes; it is
+/// measured. (intent 17)
 pub open spec fn agree(s: Search) -> bool {
     complete(s) && match s.kind {
         Kind::Code { .. } =>
             (exists|i: int, j: int| i != j && verified_at(s, i) && verified_at(s, j))
             && forall|i: int, j: int| verified_at(s, i) && verified_at(s, j) ==> at(s, i).out == at(s, j).out,
         Kind::Compaction { out, .. } =>
-            (exists|i: int| verified_at(s, i))
+            (exists|i: int, j: int| i != j && verified_at(s, i) && verified_at(s, j))
             && forall|i: int| verified_at(s, i) ==> at(s, i).out == out,
         _ => false,
     }
@@ -192,7 +193,7 @@ pub open spec fn selected(s: Search, i: int) -> bool {
 }
 
 /// What a counterexample's test runs on: t's verified candidates, and for a
-/// compaction search its goal, as index -1.
+/// compaction search its goal, as index -1. The goal is measured, not a voter.
 pub open spec fn member(t: Search, j: int) -> bool {
     verified_at(t, j) || (t.kind is Compaction && j == -1)
 }
