@@ -1,8 +1,9 @@
-The map is append-only: one intent per line.
-Candidates are sibling commits of one base, written without access to git or to the checks.
-A candidate is verified when every check passes and the spec is unchanged.
-Nothing is proposed unless all verified candidates agree, meaning they print the same output for every agree check.
-Among the agreeing candidates, the highest rank wins, with ties going to the smallest diff.
-The human accepts or denies, and accepting puts exactly the verified candidate on trunk.
-Agreement needs at least two verified candidates.
-Candidates run as their own POSIX user: they can read and run the verification and testing suites, but cannot change them or reach git.
+The map holds the current intents, one per line; git history records how they changed.
+Candidates are sibling commits of one base.
+The checks are Verus (the spec and proofs) and the tests; a candidate is verified when every check passes and it changes no check.
+A proposal needs at least two verified candidates, and every verified candidate prints the same output for each agree check.
+Among the verified candidates, the highest rank wins; ties go to the smallest diff.
+engineer accepts or denies a proposal; accepting fast-forwards trunk to exactly the verified candidate.
+Each candidate is written by one process running as user agent in its own working directory, holding one capability.
+agent has read and execute permission on the checks and no permission on the repository.
+No capability is granted until isolation is confirmed.
