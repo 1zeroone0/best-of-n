@@ -10,3 +10,5 @@ No capability is granted until isolation is confirmed.
 Each new transcript becomes a proposal: candidates change only the map, each new intent cites its cue, a cue is agreed when at least two verified candidates cite it, and the shortest wording is selected.
 Exec code uses the spec's names: each exec type views the spec type of the same name, and the gates are a trait in the spec.
 Each trace records every transition under its spec name.
+After agreement and before selection, a counterexample search asks other harnesses for a verified candidate and a test that tells it apart from the agreed ones; if one is found, nothing is selected and the test is proposed to engineer.
+Each trace records, for every agent process, its harness, model, tokens, cost and time, and for every check its time and exit status.
