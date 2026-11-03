@@ -4,3 +4,5 @@ A candidate is verified when every check passes and the spec is unchanged.
 Nothing is proposed unless all verified candidates agree, meaning they print the same output for every agree check.
 Among the agreeing candidates, the highest rank wins, with ties going to the smallest diff.
 The human accepts or denies, and accepting puts exactly the verified candidate on trunk.
+Agreement needs at least two verified candidates.
+Candidates run as their own POSIX user: they can read and run the verification and testing suites, but cannot change them or reach git.
