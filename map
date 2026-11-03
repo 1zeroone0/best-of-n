@@ -1,9 +1,9 @@
 The map holds the current intents, one per line; git history records how they changed.
 Candidates are sibling commits of one base.
 The checks are Verus (the spec and proofs) and the tests; a candidate is verified when every check passes and it changes no check.
-A proposal needs at least two verified candidates, and every verified candidate prints the same output for each agree check.
-Among the verified candidates, the highest rank wins; ties go to the smallest diff.
-engineer accepts or denies a proposal; accepting fast-forwards trunk to exactly the verified candidate.
+A search selects a candidate only when at least two candidates are verified and every verified candidate prints the same output for each agree check.
+Among the verified candidates, the highest rank is selected; ties go to the smallest diff.
+Trunk fast-forwards to exactly the selected candidate; engineer decides by committing the map and the checks, not by accepting candidates.
 Each candidate is written by one process running as user agent in its own working directory, holding one capability.
 agent has read and execute permission on the checks and no permission on the repository.
 No capability is granted until isolation is confirmed.
