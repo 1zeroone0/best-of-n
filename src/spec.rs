@@ -11,8 +11,8 @@ verus! {
 
 // ── types ───────────────────────────────────────────────
 
-/// A git commit, as an opaque id. (TCB: git)
-pub type Commit = nat;
+/// A git commit, by its hash. (TCB: git)
+pub type Commit = Seq<char>;
 
 /// A path in a commit's tree, as git reports it. (TCB: git)
 pub type Path = Seq<char>;
@@ -64,10 +64,12 @@ pub struct Candidate {
     pub diff: nat,
 }
 
-/// The authority to write one candidate for one search, as agent.
+/// A process running as agent that writes one candidate: index `index` of the
+/// n in search `search`. (OSTEP: process)
+pub struct AgentProcess { pub search: int, pub index: int }
+
+/// The authority an agent process holds to write one candidate.
 pub struct Capability {
-    pub search: int,
-    pub index: int,
     pub base: Commit,
     /// The paths this capability may change, attenuated by the search's kind at grant.
     pub authority: ISet<Path>,
@@ -184,12 +186,14 @@ pub open spec fn proposed(s: Search, q: Cue, w: Seq<char>) -> bool {
             w.len() < at(s, j).intents[q].len() || (w.len() == at(s, j).intents[q].len() && i <= j)
 }
 
-/// The capabilities grant adds: one per index, all with the search's authority.
-pub open spec fn granted(k: int, n: nat, base: Commit, a: ISet<Path>) -> Map<(int, int), Capability> {
-    Map::new(
-        Seq::new(n, |i: int| (k, i)).to_set(),
-        |kj: (int, int)| Capability { search: k, index: kj.1, base, authority: a },
-    )
+/// The agent processes of search k: one per index.
+pub open spec fn agent_processes(k: int, n: nat) -> Seq<AgentProcess> {
+    Seq::new(n, |i: int| AgentProcess { search: k, index: i })
+}
+
+/// The capabilities grant adds: one per agent process, all with the search's authority.
+pub open spec fn granted(k: int, n: nat, base: Commit, a: ISet<Path>) -> Map<AgentProcess, Capability> {
+    Map::new(agent_processes(k, n).to_set(), |p: AgentProcess| Capability { base, authority: a })
 }
 
 } // verus!
@@ -207,10 +211,11 @@ tokenized_state_machine!{ bon {
         /// The git author of each trunk commit, in step with trunk.
         #[sharding(variable)] pub authors: Seq<User>,
         #[sharding(variable)] pub searches: Seq<Search>,
-        /// Outstanding capabilities, keyed by (search, index). Each is a Verus token:
-        /// the token is how Verus represents a capability; capability is the term.
-        /// An agent process holds exactly one, and exercising it consumes it. (intent 7)
-        #[sharding(map)] pub capability: Map<(int, int), Capability>,
+        /// Outstanding capabilities, keyed by the agent process that holds each.
+        /// Each is a Verus token: the token is how Verus represents a capability;
+        /// capability is the term. An agent process holds exactly one, and waiting
+        /// on it consumes it. (intent 7)
+        #[sharding(map)] pub capability: Map<AgentProcess, Capability>,
     }
 
     // ── init ────────────────────────────────────────────
@@ -244,13 +249,14 @@ tokenized_state_machine!{ bon {
         add capability += (granted(k, n, base, a));
     }}
 
-    /// An agent process returns, consuming its capability. (intents 2, 7)
-    transition!{ exercise(cap: Capability, result: Option<Candidate>) {
-        remove capability -= [(cap.search, cap.index) => cap];
+    /// The bon process waits on an agent process and records what it returned,
+    /// consuming its capability. (OSTEP: wait) (intents 2, 7)
+    transition!{ wait(p: AgentProcess, cap: Capability, result: Option<Candidate>) {
+        remove capability -= [p => cap];
         require result matches Some(c) ==> c.base == cap.base;
-        let s = pre.searches[cap.search];
-        update searches = pre.searches.update(cap.search,
-            Search { results: s.results.insert(cap.index, result), ..s });
+        let s = pre.searches[p.search];
+        update searches = pre.searches.update(p.search,
+            Search { results: s.results.insert(p.index, result), ..s });
     }}
 
     /// Code: trunk fast-forwards to the selected candidate, if trunk hasn't moved. (intent 6)
@@ -277,26 +283,26 @@ tokenized_state_machine!{ bon {
         self.trunk.len() > 0 && self.authors.len() == self.trunk.len()
     }
 
-    /// Each capability is for one open index of one search, from its base,
-    /// with its authority. (intent 7)
+    /// Each capability is held by an agent process for one open index of one
+    /// search, with that search's base and authority. (intent 7)
     #[invariant]
     pub fn capability_open(&self) -> bool {
-        forall|kj: (int, int)| #[trigger] self.capability.contains_key(kj) ==> {
-            let c = self.capability[kj];
-            c.search == kj.0 && c.index == kj.1
-            && 0 <= c.search < self.searches.len()
-            && 0 <= c.index < self.searches[c.search].n
-            && !self.searches[c.search].results.contains_key(c.index)
-            && c.base == self.searches[c.search].base
-            && c.authority == self.searches[c.search].authority
+        forall|p: AgentProcess| #[trigger] self.capability.contains_key(p) ==> {
+            let c = self.capability[p];
+            0 <= p.search < self.searches.len()
+            && 0 <= p.index < self.searches[p.search].n
+            && !self.searches[p.search].results.contains_key(p.index)
+            && c.base == self.searches[p.search].base
+            && c.authority == self.searches[p.search].authority
         }
     }
 
-    /// Every index of every search is either returned or held by a capability.
+    /// Every agent process of every search has either returned or still holds its capability.
     #[invariant]
     pub fn accounted(&self) -> bool {
         forall|k: int, i: int| 0 <= k < self.searches.len() && 0 <= i < self.searches[k].n
-            ==> self.searches[k].results.contains_key(i) || self.capability.contains_key((k, i))
+            ==> self.searches[k].results.contains_key(i)
+                || self.capability.contains_key(AgentProcess { search: k, index: i })
     }
 
     /// Candidates of a search are siblings of its base. (intent 2)
@@ -329,11 +335,12 @@ tokenized_state_machine!{ bon {
     #[inductive(grant)]
     fn grant_inductive(pre: Self, post: Self, kind: Kind, n: nat, observed: Map<File, Permission>) {
         let k = pre.searches.len() as int;
-        let ids = Seq::new(n, |j: int| (k, j));
-        // The new search's indices are each held by a capability.
-        assert forall|i: int| 0 <= i < n implies #[trigger] post.capability.contains_key((k, i)) by {
-            assert(ids[i] == (k, i));
-            assert(ids.contains((k, i)));
+        let ps = agent_processes(k, n);
+        // Each agent process of the new search holds a capability.
+        assert forall|i: int| 0 <= i < n implies
+            #[trigger] post.capability.contains_key(AgentProcess { search: k, index: i }) by {
+            assert(ps[i] == AgentProcess { search: k, index: i });
+            assert(ps.contains(AgentProcess { search: k, index: i }));
         }
         // Earlier searches are unchanged, so their witnesses still hold.
         assert forall|t: int| 1 <= t < post.trunk.len() && post.authors[t] == User::agent implies
@@ -349,20 +356,19 @@ tokenized_state_machine!{ bon {
         }
     }
 
-    #[inductive(exercise)]
-    fn exercise_inductive(pre: Self, post: Self, cap: Capability, result: Option<Candidate>) {
-        let key = (cap.search, cap.index);
-        assert(pre.capability.contains_key(key) && pre.capability[key] == cap);
+    #[inductive(wait)]
+    fn wait_inductive(pre: Self, post: Self, p: AgentProcess, cap: Capability, result: Option<Candidate>) {
+        assert(pre.capability.contains_key(p) && pre.capability[p] == cap);
         // The returned candidate, if any, has the capability's base, which is the search's.
         assert forall|kk: int, ii: int| 0 <= kk < post.searches.len()
             && post.searches[kk].results.contains_key(ii) && post.searches[kk].results[ii] is Some
             implies #[trigger] at(post.searches[kk], ii).base == post.searches[kk].base by {
-            if kk == cap.search && ii == cap.index {
+            if kk == p.search && ii == p.index {
                 assert(post.searches[kk].results[ii] == result);
                 assert(cap.base == pre.searches[kk].base);
                 assert(post.searches[kk].base == pre.searches[kk].base);
                 assert(at(post.searches[kk], ii) == result->Some_0);
-            } else if kk == cap.search {
+            } else if kk == p.search {
                 assert(post.searches[kk].results[ii] == pre.searches[kk].results[ii]);
                 assert(post.searches[kk].base == pre.searches[kk].base);
                 assert(at(post.searches[kk], ii) == at(pre.searches[kk], ii));
@@ -371,7 +377,7 @@ tokenized_state_machine!{ bon {
             }
         }
         // A selected search is complete, so it holds no capability: the one
-        // exercised here belongs to a search that is not selected.
+        // waited on here belongs to a search that is not selected.
         assert forall|t: int| 1 <= t < post.trunk.len() && post.authors[t] == User::agent implies
             exists|kk: int, ii: int| 0 <= kk < post.searches.len()
                 && selected(post.searches[kk], ii)
@@ -382,7 +388,7 @@ tokenized_state_machine!{ bon {
                 && pre.searches[kk].base == pre.trunk[t - 1]
                 && at(pre.searches[kk], ii).commit == pre.trunk[t];
             assert(complete(pre.searches[kk]));
-            assert(kk != cap.search);
+            assert(kk != p.search);
             assert(post.searches[kk] == pre.searches[kk]);
         }
     }

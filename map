@@ -8,3 +8,5 @@ Each candidate is written by one process running as user agent in its own workin
 agent has read and execute permission on the checks, read permission on the transcripts, and no permission on the repository.
 No capability is granted until isolation is confirmed.
 Each new transcript becomes a proposal: candidates change only the map, each new intent cites its cue, a cue is agreed when at least two verified candidates cite it, and the shortest wording is selected.
+Exec code uses the spec's names: each exec type views the spec type of the same name, and the gates are a trait in the spec.
+Each trace records every transition under its spec name.
