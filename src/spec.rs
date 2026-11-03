@@ -1,8 +1,8 @@
 //! bon's spec: types, predicates, then the state machine (state, init,
 //! transitions, properties, invariants, proofs). Every term is from OSTEP,
 //! object capabilities, Verus or Rust, or a TCB component's own terms (git,
-//! WebVTT); bon's own nouns are intent, map, candidate, check, search and
-//! proposal.
+//! WebVTT); bon's own nouns are intent, map, transcript, candidate, check,
+//! search, counterexample and proposal.
 
 use vstd::prelude::*;
 use verus_state_machines_macros::tokenized_state_machine;
@@ -17,6 +17,12 @@ pub type Commit = Seq<char>;
 /// A path in a commit's tree, as git reports it. (TCB: git)
 pub type Path = Seq<char>;
 
+/// One line of the map: what is wanted.
+pub type Intent = Seq<char>;
+
+/// A WebVTT file, one per recorded call. (TCB: WebVTT)
+pub type Transcript = Path;
+
 /// A WebVTT cue, by its start time in milliseconds. (TCB: WebVTT)
 pub type Cue = nat;
 
@@ -28,7 +34,7 @@ pub enum User { engineer, agent }
 pub enum File {
     /// Verus (the spec and proofs) and the tests. Owner: engineer.
     Checks,
-    /// WebVTT files, one per recorded call. Owner: engineer.
+    /// The transcripts. Owner: engineer.
     Transcripts,
     /// One per agent process. Owner: agent.
     WorkingDirectory,
@@ -39,12 +45,20 @@ pub enum File {
 /// POSIX permission bits.
 pub struct Permission { pub read: bool, pub write: bool, pub execute: bool }
 
-/// What a search is for.
+/// A process running as agent that writes one candidate: index `index` of the
+/// n in search `search`. (OSTEP: process)
+pub struct AgentProcess { pub search: int, pub index: int }
+
+/// What a search is for: its kind, carrying its goal. Each kind's goal has its own type.
+#[allow(inconsistent_fields)]
 pub enum Kind {
-    /// Code for one intent in the map. A selection fast-forwards trunk.
-    Code { intent: Seq<char> },
-    /// Intents from one transcript. The selection is a proposal to engineer.
-    Map { transcript: Path },
+    /// The goal is an intent in the map. Ends in fast_forward.
+    Code { goal: Intent },
+    /// The goal is a transcript. Ends in a proposal to engineer.
+    Map { goal: Transcript },
+    /// The goal is the agent process whose candidate it attacks: the selected
+    /// candidate of a code search. Clears or blocks that fast-forward.
+    Counterexample { goal: AgentProcess },
 }
 
 /// One generated change, as trusted code observed it after its agent process exited.
@@ -58,21 +72,22 @@ pub struct Candidate {
     /// Code: a hash of each agree check's output, in manifest order.
     pub out: Seq<nat>,
     /// Map: each new intent, by the cue it cites.
-    pub intents: Map<Cue, Seq<char>>,
+    pub intents: Map<Cue, Intent>,
+    /// Counterexample: whether this candidate's test passes on each candidate
+    /// of the goal's search, by index. (TCB: trusted code ran it)
+    pub test_passes: Map<int, bool>,
     pub rank: int,
     /// Lines changed against base.
     pub diff: nat,
 }
 
-/// A process running as agent that writes one candidate: index `index` of the
-/// n in search `search`. (OSTEP: process)
-pub struct AgentProcess { pub search: int, pub index: int }
-
-/// The authority an agent process holds to write one candidate.
+/// What an agent process holds to write one candidate.
 pub struct Capability {
     pub base: Commit,
-    /// The paths this capability may change, attenuated by the search's kind at grant.
+    /// The paths it may change, attenuated by the search's kind at grant.
     pub authority: ISet<Path>,
+    /// The cost it may spend, reserved from the bon process's limit at grant.
+    pub limit: nat,
 }
 
 /// One search: n agent processes from one base.
@@ -82,6 +97,8 @@ pub struct Search {
     pub n: nat,
     /// The authority every capability of this search carries.
     pub authority: ISet<Path>,
+    /// The limit every capability of this search carries.
+    pub limit: nat,
     /// index -> what that agent process returned; None if it produced no candidate.
     pub results: Map<int, Option<Candidate>>,
 }
@@ -104,8 +121,8 @@ pub open spec fn protected(checks: Set<Path>, p: Path) -> bool {
 /// Attenuation at grant: what a capability for this kind may change. (intents 3, 10)
 pub open spec fn authority(kind: Kind, checks: Set<Path>) -> ISet<Path> {
     match kind {
-        Kind::Code { .. } => ISet::new(|p: Path| !protected(checks, p)),
         Kind::Map { .. } => ISet::new(|p: Path| p == map_path()),
+        _ => ISet::new(|p: Path| !protected(checks, p)),
     }
 }
 
@@ -161,6 +178,24 @@ pub open spec fn selected(s: Search, i: int) -> bool {
     && forall|j: int| j != i && verified_at(s, j) ==> beats(at(s, i), i, at(s, j), j)
 }
 
+/// Counterexample: x's test splits the verified candidates of t. A test with no
+/// result on a verified candidate counts as splitting. (intent 13)
+pub open spec fn splits(t: Search, x: Candidate) -> bool {
+    exists|j1: int, j2: int| verified_at(t, j1) && verified_at(t, j2)
+        && !(x.test_passes.contains_key(j1) && x.test_passes.contains_key(j2)
+             && x.test_passes[j1] == x.test_passes[j2])
+}
+
+/// Counterexample: some verified candidate of x splits t.
+pub open spec fn found(x: Search, t: Search) -> bool {
+    complete(x) && exists|i: int| verified_at(x, i) && splits(t, at(x, i))
+}
+
+/// Counterexample: every agent process of x returned, and no verified test splits t.
+pub open spec fn cleared(x: Search, t: Search) -> bool {
+    complete(x) && forall|i: int| verified_at(x, i) ==> !splits(t, at(x, i))
+}
+
 /// Map: verified candidate i cites cue q.
 pub open spec fn cites(s: Search, i: int, q: Cue) -> bool {
     verified_at(s, i) && at(s, i).intents.contains_key(q)
@@ -179,7 +214,7 @@ pub open spec fn contested(s: Search, q: Cue) -> bool {
 
 /// Map: w is the proposal's wording for q: the shortest among the citing
 /// candidates, ties to the earliest. (intent 10)
-pub open spec fn proposed(s: Search, q: Cue, w: Seq<char>) -> bool {
+pub open spec fn proposed(s: Search, q: Cue, w: Intent) -> bool {
     s.kind is Map && agreed(s, q)
     && exists|i: int| cites(s, i, q) && at(s, i).intents[q] == w
         && forall|j: int| cites(s, j, q) ==>
@@ -191,9 +226,10 @@ pub open spec fn agent_processes(k: int, n: nat) -> Seq<AgentProcess> {
     Seq::new(n, |i: int| AgentProcess { search: k, index: i })
 }
 
-/// The capabilities grant adds: one per agent process, all with the search's authority.
-pub open spec fn granted(k: int, n: nat, base: Commit, a: ISet<Path>) -> Map<AgentProcess, Capability> {
-    Map::new(agent_processes(k, n).to_set(), |p: AgentProcess| Capability { base, authority: a })
+/// The capabilities grant adds: one per agent process, each with the search's
+/// authority and limit.
+pub open spec fn granted(k: int, n: nat, base: Commit, a: ISet<Path>, l: nat) -> Map<AgentProcess, Capability> {
+    Map::new(agent_processes(k, n).to_set(), |p: AgentProcess| Capability { base, authority: a, limit: l })
 }
 
 } // verus!
@@ -201,9 +237,10 @@ pub open spec fn granted(k: int, n: nat, base: Commit, a: ISet<Path>) -> Map<Age
 tokenized_state_machine!{ bon {
 
     // ── state ───────────────────────────────────────────
+
     fields {
         /// The current intents: the map at trunk's head. (intent 1)
-        #[sharding(variable)] pub map: Set<Seq<char>>,
+        #[sharding(variable)] pub map: Set<Intent>,
         /// The check paths the manifest declares at trunk's head.
         #[sharding(variable)] pub checks: Set<Path>,
         /// Trunk's history; last() is the head.
@@ -211,6 +248,10 @@ tokenized_state_machine!{ bon {
         /// The git author of each trunk commit, in step with trunk.
         #[sharding(variable)] pub authors: Seq<User>,
         #[sharding(variable)] pub searches: Seq<Search>,
+        /// The bon process's limit, and what it has spent and reserved against it. (intent 16)
+        #[sharding(variable)] pub limit: nat,
+        #[sharding(variable)] pub spent: nat,
+        #[sharding(variable)] pub reserved: nat,
         /// Outstanding capabilities, keyed by the agent process that holds each.
         /// Each is a Verus token: the token is how Verus represents a capability;
         /// capability is the term. An agent process holds exactly one, and waiting
@@ -219,50 +260,70 @@ tokenized_state_machine!{ bon {
     }
 
     // ── init ────────────────────────────────────────────
-    init!{ initialize(root: Commit, intents: Set<Seq<char>>, checks: Set<Path>) {
+
+    init!{ initialize(root: Commit, intents: Set<Intent>, checks: Set<Path>, limit: nat) {
         init map = intents;
         init checks = checks;
         init trunk = Seq::empty().push(root);
         init authors = Seq::empty().push(User::engineer);
         init searches = Seq::empty();
+        init limit = limit;
+        init spent = 0;
+        init reserved = 0;
         init capability = Map::empty();
     }}
 
     // ── transitions ─────────────────────────────────────
 
     /// engineer committed to trunk, e.g. the map or the checks. (intent 6)
-    transition!{ advance(c: Commit, intents: Set<Seq<char>>, checks: Set<Path>) {
+    transition!{ advance(c: Commit, intents: Set<Intent>, checks: Set<Path>) {
         update map = intents;
         update checks = checks;
         update trunk = pre.trunk.push(c);
         update authors = pre.authors.push(User::engineer);
     }}
 
-    /// Open a search and grant one capability per agent process. (intents 2, 7, 9, 10)
-    transition!{ grant(kind: Kind, n: nat, observed: Map<File, Permission>) {
-        require kind matches Kind::Code { intent } ==> pre.map.contains(intent);
+    /// Open a search and grant one capability per agent process, reserving each
+    /// one's limit. One search runs at a time; its agent processes run in parallel.
+    /// (intents 2, 7, 9, 10, 13, 16)
+    transition!{ grant(kind: Kind, n: nat, l: nat, observed: Map<File, Permission>) {
         require isolated(observed);
+        require forall|k: int| 0 <= k < pre.searches.len() ==> complete(#[trigger] pre.searches[k]);
+        require pre.spent + pre.reserved + l * n <= pre.limit;
+        require kind matches Kind::Code { goal } ==> pre.map.contains(goal);
+        require kind matches Kind::Counterexample { goal } ==>
+            0 <= goal.search < pre.searches.len()
+            && selected(pre.searches[goal.search], goal.index)
+            && pre.searches[goal.search].base == pre.trunk.last();
         let k = pre.searches.len() as int;
         let base = pre.trunk.last();
         let a = authority(kind, pre.checks);
-        update searches = pre.searches.push(Search { kind, base, n, authority: a, results: Map::empty() });
-        add capability += (granted(k, n, base, a));
+        update searches = pre.searches.push(Search { kind, base, n, authority: a, limit: l, results: Map::empty() });
+        update reserved = pre.reserved + l * n;
+        add capability += (granted(k, n, base, a, l));
     }}
 
-    /// The bon process waits on an agent process and records what it returned,
-    /// consuming its capability. (OSTEP: wait) (intents 2, 7)
-    transition!{ wait(p: AgentProcess, cap: Capability, result: Option<Candidate>) {
+    /// The bon process waits on an agent process and records what it returned and
+    /// what it cost, consuming its capability and settling its limit. (OSTEP: wait)
+    /// (intents 2, 7, 16)
+    transition!{ wait(p: AgentProcess, cap: Capability, result: Option<Candidate>, cost: nat) {
         remove capability -= [p => cap];
         require result matches Some(c) ==> c.base == cap.base;
+        require cost <= cap.limit;
         let s = pre.searches[p.search];
         update searches = pre.searches.update(p.search,
             Search { results: s.results.insert(p.index, result), ..s });
+        update spent = pre.spent + cost;
+        update reserved = (pre.reserved - cap.limit) as nat;
     }}
 
-    /// Code: trunk fast-forwards to the selected candidate, if trunk hasn't moved. (intent 6)
-    transition!{ fast_forward(k: int, i: int) {
-        require 0 <= k < pre.searches.len();
+    /// Code: trunk fast-forwards to the selected candidate, if a counterexample
+    /// search on it cleared and trunk hasn't moved. (intents 6, 13)
+    transition!{ fast_forward(k: int, i: int, x: int) {
+        require 0 <= k < pre.searches.len() && 0 <= x < pre.searches.len();
         require selected(pre.searches[k], i);
+        require pre.searches[x].kind == Kind::Counterexample { goal: AgentProcess { search: k, index: i } };
+        require cleared(pre.searches[x], pre.searches[k]);
         require pre.searches[k].base == pre.trunk.last();
         update trunk = pre.trunk.push(at(pre.searches[k], i).commit);
         update authors = pre.authors.push(User::agent);
@@ -283,17 +344,18 @@ tokenized_state_machine!{ bon {
         self.trunk.len() > 0 && self.authors.len() == self.trunk.len()
     }
 
-    /// Each capability is held by an agent process for one open index of one
-    /// search, with that search's base and authority. (intent 7)
+    /// Each capability is held by an agent process for one open index of the
+    /// running search, with that search's base, authority and limit. (intent 7)
     #[invariant]
     pub fn capability_open(&self) -> bool {
         forall|p: AgentProcess| #[trigger] self.capability.contains_key(p) ==> {
             let c = self.capability[p];
-            0 <= p.search < self.searches.len()
+            p.search == self.searches.len() - 1
             && 0 <= p.index < self.searches[p.search].n
             && !self.searches[p.search].results.contains_key(p.index)
             && c.base == self.searches[p.search].base
             && c.authority == self.searches[p.search].authority
+            && c.limit == self.searches[p.search].limit
         }
     }
 
@@ -305,6 +367,16 @@ tokenized_state_machine!{ bon {
                 || self.capability.contains_key(AgentProcess { search: k, index: i })
     }
 
+    /// Nothing spends past its limit: what is reserved is exactly the limits of
+    /// the outstanding capabilities. (intent 16)
+    #[invariant]
+    pub fn within_limit(&self) -> bool {
+        self.spent + self.reserved <= self.limit
+        && (self.searches.len() == 0 ==> self.capability.dom().len() == 0 && self.reserved == 0)
+        && (self.searches.len() > 0 ==>
+            self.reserved == self.searches.last().limit * self.capability.dom().len())
+    }
+
     /// Candidates of a search are siblings of its base. (intent 2)
     #[invariant]
     pub fn siblings(&self) -> bool {
@@ -314,12 +386,14 @@ tokenized_state_machine!{ bon {
     }
 
     /// Every trunk commit authored by agent is exactly the selected candidate of a
-    /// code search on the previous head. (intents 3–6)
+    /// code search on the previous head, cleared by a counterexample search. (intents 3–6, 13)
     #[invariant]
     pub fn trunk_exact(&self) -> bool {
         forall|t: int| 1 <= t < self.trunk.len() && self.authors[t] == User::agent ==>
-            exists|k: int, i: int| 0 <= k < self.searches.len()
+            exists|k: int, i: int, x: int| 0 <= k < self.searches.len() && 0 <= x < self.searches.len()
                 && selected(self.searches[k], i)
+                && self.searches[x].kind == (Kind::Counterexample { goal: AgentProcess { search: k, index: i } })
+                && cleared(self.searches[x], self.searches[k])
                 && self.searches[k].base == self.trunk[t - 1]
                 && at(self.searches[k], i).commit == self.trunk[t]
     }
@@ -327,38 +401,69 @@ tokenized_state_machine!{ bon {
     // ── proofs ──────────────────────────────────────────
 
     #[inductive(initialize)]
-    fn initialize_inductive(post: Self, root: Commit, intents: Set<Seq<char>>, checks: Set<Path>) {}
+    fn initialize_inductive(post: Self, root: Commit, intents: Set<Intent>, checks: Set<Path>, limit: nat) {}
 
     #[inductive(advance)]
-    fn advance_inductive(pre: Self, post: Self, c: Commit, intents: Set<Seq<char>>, checks: Set<Path>) {}
+    fn advance_inductive(pre: Self, post: Self, c: Commit, intents: Set<Intent>, checks: Set<Path>) {}
 
     #[inductive(grant)]
-    fn grant_inductive(pre: Self, post: Self, kind: Kind, n: nat, observed: Map<File, Permission>) {
+    fn grant_inductive(pre: Self, post: Self, kind: Kind, n: nat, l: nat, observed: Map<File, Permission>) {
         let k = pre.searches.len() as int;
         let ps = agent_processes(k, n);
-        // Each agent process of the new search holds a capability.
+        // Every earlier search is complete, so no capability is outstanding.
+        assert(pre.capability.dom() =~= Set::empty()) by {
+            assert forall|p: AgentProcess| !pre.capability.contains_key(p) by {
+                if pre.capability.contains_key(p) {
+                    assert(complete(pre.searches[p.search]));
+                }
+            }
+        }
+        // The new capabilities are exactly the new search's n agent processes.
+        assert(ps.no_duplicates());
+        ps.unique_seq_to_set();
+        assert(post.capability.dom() =~= ps.to_set());
         assert forall|i: int| 0 <= i < n implies
             #[trigger] post.capability.contains_key(AgentProcess { search: k, index: i }) by {
             assert(ps[i] == AgentProcess { search: k, index: i });
             assert(ps.contains(AgentProcess { search: k, index: i }));
         }
+        assert forall|p: AgentProcess| #[trigger] post.capability.contains_key(p) implies
+            p.search == k && 0 <= p.index < n by {
+            assert(ps.to_set().contains(p));
+            assert(ps.contains(p));
+        }
+        assert(post.reserved == post.searches.last().limit * post.capability.dom().len()) by(nonlinear_arith)
+            requires post.reserved == l * n, post.searches.last().limit == l, post.capability.dom().len() == n;
         // Earlier searches are unchanged, so their witnesses still hold.
         assert forall|t: int| 1 <= t < post.trunk.len() && post.authors[t] == User::agent implies
-            exists|kk: int, ii: int| 0 <= kk < post.searches.len()
+            exists|kk: int, ii: int, x: int| 0 <= kk < post.searches.len() && 0 <= x < post.searches.len()
                 && selected(post.searches[kk], ii)
+                && post.searches[x].kind == (Kind::Counterexample { goal: AgentProcess { search: kk, index: ii } })
+                && cleared(post.searches[x], post.searches[kk])
                 && post.searches[kk].base == post.trunk[t - 1]
                 && at(post.searches[kk], ii).commit == post.trunk[t] by {
-            let (kk, ii) = choose|kk: int, ii: int| 0 <= kk < pre.searches.len()
+            let (kk, ii, x) = choose|kk: int, ii: int, x: int| 0 <= kk < pre.searches.len() && 0 <= x < pre.searches.len()
                 && selected(pre.searches[kk], ii)
+                && pre.searches[x].kind == (Kind::Counterexample { goal: AgentProcess { search: kk, index: ii } })
+                && cleared(pre.searches[x], pre.searches[kk])
                 && pre.searches[kk].base == pre.trunk[t - 1]
                 && at(pre.searches[kk], ii).commit == pre.trunk[t];
             assert(post.searches[kk] == pre.searches[kk]);
+            assert(post.searches[x] == pre.searches[x]);
         }
     }
 
     #[inductive(wait)]
-    fn wait_inductive(pre: Self, post: Self, p: AgentProcess, cap: Capability, result: Option<Candidate>) {
+    fn wait_inductive(pre: Self, post: Self, p: AgentProcess, cap: Capability, result: Option<Candidate>, cost: nat) {
+        broadcast use vstd::set::lemma_set_remove_len;
         assert(pre.capability.contains_key(p) && pre.capability[p] == cap);
+        // Settling: one capability fewer, its limit released, its cost spent.
+        assert(post.capability.dom() =~= pre.capability.dom().remove(p));
+        assert(post.capability.dom().len() + 1 == pre.capability.dom().len());
+        let m = pre.searches.last().limit;
+        let d = pre.capability.dom().len();
+        assert(m * d == m * (d - 1) + m) by(nonlinear_arith) requires d >= 1;
+        assert(post.searches.last().limit == m);
         // The returned candidate, if any, has the capability's base, which is the search's.
         assert forall|kk: int, ii: int| 0 <= kk < post.searches.len()
             && post.searches[kk].results.contains_key(ii) && post.searches[kk].results[ii] is Some
@@ -376,23 +481,30 @@ tokenized_state_machine!{ bon {
                 assert(post.searches[kk] == pre.searches[kk]);
             }
         }
-        // A selected search is complete, so it holds no capability: the one
-        // waited on here belongs to a search that is not selected.
+        // Selected and cleared searches are complete, so they hold no capability:
+        // the one waited on here belongs to neither.
         assert forall|t: int| 1 <= t < post.trunk.len() && post.authors[t] == User::agent implies
-            exists|kk: int, ii: int| 0 <= kk < post.searches.len()
+            exists|kk: int, ii: int, x: int| 0 <= kk < post.searches.len() && 0 <= x < post.searches.len()
                 && selected(post.searches[kk], ii)
+                && post.searches[x].kind == (Kind::Counterexample { goal: AgentProcess { search: kk, index: ii } })
+                && cleared(post.searches[x], post.searches[kk])
                 && post.searches[kk].base == post.trunk[t - 1]
                 && at(post.searches[kk], ii).commit == post.trunk[t] by {
-            let (kk, ii) = choose|kk: int, ii: int| 0 <= kk < pre.searches.len()
+            let (kk, ii, x) = choose|kk: int, ii: int, x: int| 0 <= kk < pre.searches.len() && 0 <= x < pre.searches.len()
                 && selected(pre.searches[kk], ii)
+                && pre.searches[x].kind == (Kind::Counterexample { goal: AgentProcess { search: kk, index: ii } })
+                && cleared(pre.searches[x], pre.searches[kk])
                 && pre.searches[kk].base == pre.trunk[t - 1]
                 && at(pre.searches[kk], ii).commit == pre.trunk[t];
             assert(complete(pre.searches[kk]));
+            assert(complete(pre.searches[x]));
             assert(kk != p.search);
+            assert(x != p.search);
             assert(post.searches[kk] == pre.searches[kk]);
+            assert(post.searches[x] == pre.searches[x]);
         }
     }
 
     #[inductive(fast_forward)]
-    fn fast_forward_inductive(pre: Self, post: Self, k: int, i: int) {}
+    fn fast_forward_inductive(pre: Self, post: Self, k: int, i: int, x: int) {}
 }}
