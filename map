@@ -1,6 +1,6 @@
 The map holds the current intents, one per line; git history records how they changed.
 Candidates are sibling commits of one base.
-The checks are Verus (the spec and proofs) and the tests; a candidate is verified when every check passes and it changes no check.
+The checks are Verus (the spec and proofs) and the tests; a candidate is verified when every check passes and it changes neither the checks nor the map.
 A search selects a candidate only when at least two candidates are verified and every verified candidate prints the same output for each agree check.
 Among the verified candidates, the highest rank is selected; ties go to the smallest diff.
 Trunk fast-forwards to exactly the selected candidate; engineer decides by committing the map and the checks, not by accepting candidates.
