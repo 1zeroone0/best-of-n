@@ -57,8 +57,12 @@ pub enum Kind {
     /// The goal is a transcript. Ends in a proposal to engineer.
     Map { goal: Transcript },
     /// The goal is the agent process whose candidate it attacks: the selected
-    /// candidate of a code search. Clears or blocks that fast-forward.
+    /// candidate of a code or compaction search. Clears or blocks that fast-forward.
     Counterexample { goal: AgentProcess },
+    /// The goal is trunk's head, to remove or simplify code without changing
+    /// behavior. `out` is the goal's agree-check outputs, as trusted code
+    /// observed them. Ends in fast_forward. (intent 17)
+    Compaction { goal: Commit, out: Seq<nat> },
 }
 
 /// One generated change, as trusted code observed it after its agent process exited.
@@ -74,7 +78,8 @@ pub struct Candidate {
     /// Map: each new intent, by the cue it cites.
     pub intents: Map<Cue, Intent>,
     /// Counterexample: whether this candidate's test passes on each candidate
-    /// of the goal's search, by index. (TCB: trusted code ran it)
+    /// of the goal's search, by index; index -1 is a compaction search's goal.
+    /// (TCB: trusted code ran it)
     pub test_passes: Map<int, bool>,
     pub rank: int,
     /// Lines changed against base.
@@ -161,10 +166,18 @@ pub open spec fn complete(s: Search) -> bool {
 }
 
 /// Code: at least two verified, and every verified pair prints the same. (intent 4)
+/// Compaction: at least one verified, and every verified candidate prints the
+/// same as the goal, so the goal is the second. (intent 17)
 pub open spec fn agree(s: Search) -> bool {
-    complete(s)
-    && (exists|i: int, j: int| i != j && verified_at(s, i) && verified_at(s, j))
-    && forall|i: int, j: int| verified_at(s, i) && verified_at(s, j) ==> at(s, i).out == at(s, j).out
+    complete(s) && match s.kind {
+        Kind::Code { .. } =>
+            (exists|i: int, j: int| i != j && verified_at(s, i) && verified_at(s, j))
+            && forall|i: int, j: int| verified_at(s, i) && verified_at(s, j) ==> at(s, i).out == at(s, j).out,
+        Kind::Compaction { out, .. } =>
+            (exists|i: int| verified_at(s, i))
+            && forall|i: int| verified_at(s, i) ==> at(s, i).out == out,
+        _ => false,
+    }
 }
 
 /// a at index ai outranks b at index bi: rank, then smaller diff, then earlier. (intent 5)
@@ -172,16 +185,22 @@ pub open spec fn beats(a: Candidate, ai: int, b: Candidate, bi: int) -> bool {
     a.rank > b.rank || (a.rank == b.rank && (a.diff < b.diff || (a.diff == b.diff && ai < bi)))
 }
 
-/// Code: index i is selected. (intents 4, 5)
+/// Code or compaction: index i is selected. (intents 4, 5, 17)
 pub open spec fn selected(s: Search, i: int) -> bool {
-    s.kind is Code && agree(s) && verified_at(s, i)
+    agree(s) && verified_at(s, i)
     && forall|j: int| j != i && verified_at(s, j) ==> beats(at(s, i), i, at(s, j), j)
 }
 
-/// Counterexample: x's test splits the verified candidates of t. A test with no
-/// result on a verified candidate counts as splitting. (intent 13)
+/// What a counterexample's test runs on: t's verified candidates, and for a
+/// compaction search its goal, as index -1.
+pub open spec fn member(t: Search, j: int) -> bool {
+    verified_at(t, j) || (t.kind is Compaction && j == -1)
+}
+
+/// Counterexample: x's test splits the members of t. A test with no result on
+/// a member counts as splitting. (intents 13, 17)
 pub open spec fn splits(t: Search, x: Candidate) -> bool {
-    exists|j1: int, j2: int| verified_at(t, j1) && verified_at(t, j2)
+    exists|j1: int, j2: int| member(t, j1) && member(t, j2)
         && !(x.test_passes.contains_key(j1) && x.test_passes.contains_key(j2)
              && x.test_passes[j1] == x.test_passes[j2])
 }
@@ -285,12 +304,13 @@ tokenized_state_machine!{ bon {
 
     /// Open a search and grant one capability per agent process, reserving each
     /// one's limit. One search runs at a time; its agent processes run in parallel.
-    /// (intents 2, 7, 9, 10, 13, 16)
+    /// (intents 2, 7, 9, 10, 13, 16, 17)
     transition!{ grant(kind: Kind, n: nat, l: nat, observed: Map<File, Permission>) {
         require isolated(observed);
         require forall|k: int| 0 <= k < pre.searches.len() ==> complete(#[trigger] pre.searches[k]);
         require pre.spent + pre.reserved + l * n <= pre.limit;
         require kind matches Kind::Code { goal } ==> pre.map.contains(goal);
+        require kind matches Kind::Compaction { goal, .. } ==> goal == pre.trunk.last();
         require kind matches Kind::Counterexample { goal } ==>
             0 <= goal.search < pre.searches.len()
             && selected(pre.searches[goal.search], goal.index)
@@ -317,7 +337,7 @@ tokenized_state_machine!{ bon {
         update reserved = (pre.reserved - cap.limit) as nat;
     }}
 
-    /// Code: trunk fast-forwards to the selected candidate, if a counterexample
+    /// Code or compaction: trunk fast-forwards to the selected candidate, if a counterexample
     /// search on it cleared and trunk hasn't moved. (intents 6, 13)
     transition!{ fast_forward(k: int, i: int, x: int) {
         require 0 <= k < pre.searches.len() && 0 <= x < pre.searches.len();

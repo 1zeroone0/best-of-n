@@ -14,3 +14,4 @@ After agreement and before fast-forward, a counterexample search asks other harn
 Each trace records, for every agent process, its harness, model, tokens, cost and time, and for every check its time and exit status, so that cost per verified candidate = (Σ_c (g(c) + k(c)) + r·t) / v, with r the rate in bon.toml and t the search's wall time.
 A blocked search reruns until it reaches a limit; reaching a limit is the only thing that goes to engineer.
 Limits nest like the process tree: each agent process's limit is reserved from its search's, and each search's from the bon process's; wait returns what was unused, and nothing spends past its limit.
+A compaction search asks for candidates that remove or simplify code at trunk's head; every verified candidate must print the same as trunk's head on each agree check, and the highest rank is selected.
