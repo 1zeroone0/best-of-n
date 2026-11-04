@@ -540,6 +540,18 @@
         "value": "src/main.rs"
       },
       {
+        "name": "bon:trusted-file",
+        "value": "src/view.rs"
+      },
+      {
+        "name": "bon:trusted-file",
+        "value": "src/wire.rs"
+      },
+      {
+        "name": "bon:trusted-file",
+        "value": "src/wasm.rs"
+      },
+      {
         "name": "bon:trusted-functions",
         "value": "Manifest,manifest,limit,agent_process_limit,checks,width,attempts,Tests,no_tests,scrub_test_path,scrub_attempts,require,record_scrub,carry,head,on_trunk,intents,observe,run,fast_forward,Clock,clock,report,record_selected,record,agree_outputs"
       }

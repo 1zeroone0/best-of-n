@@ -1,6 +1,6 @@
 //! Trusted code. Every function the verified code calls from here is
-//! `#[verifier::external_body]`: Verus does not check it. The TCB is this file
-//! plus what it runs: git, sudo, tar, chmod, the harnesses (`claude`, `codex`)
+//! `#[verifier::external_body]`: Verus does not check it. The TCB is this file,
+//! main.rs, view.rs, wire.rs and wasm.rs, plus what they run: git, sudo, tar, chmod, the harnesses (`claude`, `codex`)
 //! and the checks the manifest declares.
 //!
 //! It observes and reports facts; it decides nothing. Every decision is a gate.
@@ -734,7 +734,8 @@ pub fn clock() -> Clock { Clock { at: Instant::now() } }
 /// rate; t is the search's wall time; v is how many candidates the verified gate
 /// passed. (intent 14)
 #[verifier::external_body]
-pub fn report(m: &Manifest, _index: usize, n: usize, verified: usize, generation: u64, started: Clock) {
+pub fn report(m: &Manifest, _index: usize, s: &Search, verified: usize, generation: u64, started: Clock) {
+    let n = s.n;
     let search = RUNS.load(std::sync::atomic::Ordering::SeqCst).saturating_sub(1);
     let hours = started.at.elapsed().as_secs_f64() / 3600.0;
     let generation = generation as f64 / 1_000_000.0;
@@ -758,6 +759,9 @@ pub fn report(m: &Manifest, _index: usize, n: usize, verified: usize, generation
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(d.join("searches.jsonl")) {
         let _ = writeln!(f, "{summary}");
     }
+    // The search as the gates saw it, for the view to re-derive its selection.
+    let _ = std::fs::create_dir_all(d.join(search.to_string()));
+    let _ = std::fs::write(d.join(search.to_string()).join("search.json"), crate::wire::search(s).to_string());
 }
 
 /// Record which candidate of the latest search was selected. (intent 14)

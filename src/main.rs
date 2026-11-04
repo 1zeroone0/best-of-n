@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use best_of_n::exec;
+use best_of_n::process;
 
 mod view;
 
@@ -44,9 +44,9 @@ fn dispatch(root: &str, args: &[String]) -> Result<(), String> {
         Some("code") => {
             let intent = args[1..].join(" ");
             if intent.is_empty() { fail("which intent? bon code \"<intent>\"") }
-            exec::land(&root, Some(intent.chars().collect()), best_of_n::trusted::no_tests()).map(|_| println!("trunk fast-forwarded"))
+            process::land(&root, Some(intent.chars().collect()), best_of_n::trusted::no_tests()).map(|_| println!("trunk fast-forwarded"))
         }
-        Some("compaction") => exec::land(&root, None, best_of_n::trusted::no_tests()).map(|_| println!("trunk fast-forwarded")),
+        Some("compaction") => process::land(&root, None, best_of_n::trusted::no_tests()).map(|_| println!("trunk fast-forwarded")),
         Some("scrub") => {
             let intent = args[1..].join(" ");
             if intent.is_empty() { fail("which intent? bon scrub \"<intent>\"") }
@@ -86,14 +86,14 @@ fn running(root: &str) {
 /// bon scrub, and if the intent is broken, the code search that carries its test.
 fn scrub(root: &str, intent: &str) -> Result<(), String> {
     let goal: Vec<char> = intent.chars().collect();
-    match exec::scrub(root, goal.clone())? {
+    match process::scrub(root, goal.clone())? {
         None => { println!("holds: its test is retained on trunk"); Ok(()) }
         Some(carried) => {
             println!("broken: the agreed test fails on trunk; searching for code that passes it");
-            exec::land(root, Some(goal.clone()), carried)?;
+            process::land(root, Some(goal.clone()), carried)?;
             println!("trunk fast-forwarded; scrubbing again on the new trunk");
             // The fix landed: a scrub of the new trunk retains a test for the intent.
-            match exec::scrub(root, goal)? {
+            match process::scrub(root, goal)? {
                 None => { println!("holds: its test is retained on trunk"); Ok(()) }
                 Some(_) => Err("still broken after the fix landed; see .bon/traces".into()),
             }
@@ -143,7 +143,7 @@ fn background(root: &str) -> Result<(), String> {
         Some(intent) => { println!("scrub ({} commits stale): {intent}", stalest.0); scrub(root, &intent) }
         None => {
             println!("compaction ({} commits stale)", stalest.0);
-            exec::land(root, None, best_of_n::trusted::no_tests()).map(|_| println!("trunk fast-forwarded"))
+            process::land(root, None, best_of_n::trusted::no_tests()).map(|_| println!("trunk fast-forwarded"))
         }
     }
 }
@@ -221,7 +221,7 @@ fn map(root: &str) -> Result<(), String> {
         if cited.lines().any(|l| l.trim() == rel) { continue; }
         any = true;
         println!("{rel}: searching");
-        let (agreed, contested) = exec::map(root, rel.chars().collect())?;
+        let (agreed, contested) = process::map(root, rel.chars().collect())?;
         let head = git(r, &["rev-parse", "HEAD"])?;
         let mut text = git(r, &["show", "HEAD:map"])?;
         if !text.is_empty() && !text.ends_with('\n') { text.push('\n'); }
@@ -415,6 +415,9 @@ fn sbom(root: &str, check: bool) -> Result<(), String> {
             "properties": [
                 { "name": "bon:trusted-file", "value": "src/trusted.rs" },
                 { "name": "bon:trusted-file", "value": "src/main.rs" },
+                { "name": "bon:trusted-file", "value": "src/view.rs" },
+                { "name": "bon:trusted-file", "value": "src/wire.rs" },
+                { "name": "bon:trusted-file", "value": "src/wasm.rs" },
                 { "name": "bon:trusted-functions", "value": trusted.join(",") },
             ],
         },

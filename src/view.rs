@@ -13,6 +13,8 @@ use serde_json::{json, Value};
 const INDEX: &str = include_str!("../view/dist/index.html");
 const APP: &str = include_str!("../view/dist/app.js");
 const STYLE: &str = include_str!("../view/dist/app.css");
+/// The verified gates, compiled to WebAssembly (`npm run gates` in view/ builds it).
+const GATES: &[u8] = include_bytes!("../view/dist/gates.wasm");
 
 pub fn serve(root: &str, port: u16, open: bool) -> Result<(), String> {
     let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|e| format!("port {port}: {e}"))?;
@@ -33,6 +35,8 @@ fn respond(root: &Path, mut stream: TcpStream) -> std::io::Result<()> {
     let target = line.split_whitespace().nth(1).unwrap_or("/");
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let (status, kind, body) = match path {
+        "/gates.wasm" => ("200 OK", "application/wasm", GATES.to_vec()),
+        _ => { let (status, kind, body) = match path {
         "/" => ("200 OK", "text/html; charset=utf-8", INDEX.to_string()),
         "/app.js" => ("200 OK", "text/javascript; charset=utf-8", APP.to_string()),
         "/app.css" => ("200 OK", "text/css; charset=utf-8", STYLE.to_string()),
@@ -42,8 +46,10 @@ fn respond(root: &Path, mut stream: TcpStream) -> std::io::Result<()> {
             None => ("404 Not Found", "text/plain", "no such log".into()),
         },
         _ => ("404 Not Found", "text/plain", "not found".into()),
+        }; (status, kind, body.into_bytes()) }
     };
-    write!(stream, "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n{body}", body.len())
+    write!(stream, "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", body.len())?;
+    stream.write_all(&body)
 }
 
 fn git(root: &Path, args: &[&str]) -> String {
@@ -147,6 +153,9 @@ pub fn state(root: &Path) -> Value {
             });
             list.push(json!({
                 "search": n, "summary": summary, "selected": selected,
+                // The search as the gates saw it (wire.rs); null in older traces.
+                "gates": std::fs::read_to_string(rdir.join("search.json")).ok()
+                    .and_then(|t| serde_json::from_str::<Value>(&t).ok()),
                 "candidates": candidates.into_iter().map(|(_, c)| c).collect::<Vec<_>>(),
             }));
         }

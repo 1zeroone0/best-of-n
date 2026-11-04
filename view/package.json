@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "build": "tsc --noEmit && esbuild src/main.ts --bundle --format=esm --target=es2022 --minify --outfile=dist/app.js && cp src/app.css dist/app.css && cp src/index.html dist/index.html",
-    "check": "tsc --noEmit"
+    "check": "tsc --noEmit",
+    "gates": "cd .. && cargo rustc -q --lib --target wasm32-unknown-unknown --release --crate-type cdylib && cp target/wasm32-unknown-unknown/release/best_of_n.wasm view/dist/gates.wasm"
   },
   "devDependencies": {
     "esbuild": "0.25.10",
