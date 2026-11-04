@@ -3,6 +3,7 @@
 use vstd::prelude::*;
 use crate::spec;
 use crate::gates::*;
+use crate::trusted;
 
 verus! {
 
@@ -886,6 +887,327 @@ pub fn contested(s: &Search) -> (r: Vec<Cue>)
         }
     }
     r
+}
+
+// ── driving the state machine ───────────────────────────
+
+/// a and b are the same text.
+fn eq(a: &Vec<char>, b: &Vec<char>) -> (r: bool)
+    ensures r == (a@ == b@),
+{
+    if a.len() != b.len() { return false; }
+    let mut i = 0;
+    while i < a.len()
+        invariant a.len() == b.len(), 0 <= i <= a.len(), forall|j: int| 0 <= j < i ==> a@[j] == b@[j],
+        decreases a.len() - i,
+    {
+        if a[i] != b[i] { return false; }
+        i += 1;
+    }
+    assert(a@ =~= b@);
+    true
+}
+
+/// The spec's map: the set of its intents.
+pub open spec fn intent_set(s: Seq<Intent>) -> Set<spec::Intent> {
+    s.map_values(|i: Intent| i@).to_set()
+}
+
+fn contains(xs: &Vec<Intent>, x: &Intent) -> (r: bool)
+    ensures r == intent_set(xs@).contains(x@),
+{
+    let mut i = 0;
+    while i < xs.len()
+        invariant 0 <= i <= xs.len(), forall|j: int| 0 <= j < i ==> xs@[j]@ != x@,
+        decreases xs.len() - i,
+    {
+        if eq(&xs[i], x) {
+            proof { assert(xs@.map_values(|i: Intent| i@)[i as int] == x@); }
+            return true;
+        }
+        i += 1;
+    }
+    proof {
+        if intent_set(xs@).contains(x@) {
+            let m = xs@.map_values(|i: Intent| i@);
+            assert(m.contains(x@));
+            let j = choose|j: int| 0 <= j < m.len() && m[j] == x@;
+            assert(xs@[j]@ == x@);
+        }
+    }
+    false
+}
+
+/// A copy of a list of paths.
+fn copy(v: &Vec<Path>) -> (r: Vec<Path>)
+    ensures r@.len() == v@.len(), forall|i: int| 0 <= i < v@.len() ==> r@[i]@ == v@[i]@, paths(r@) == paths(v@),
+{
+    let mut r: Vec<Path> = Vec::new();
+    let mut i = 0;
+    while i < v.len()
+        invariant 0 <= i <= v.len(), r@.len() == i, forall|j: int| 0 <= j < i ==> r@[j]@ == v@[j]@,
+        decreases v.len() - i,
+    {
+        let mut p: Vec<char> = Vec::new();
+        let mut j = 0;
+        while j < v[i].len()
+            invariant i < v.len(), 0 <= j <= v@[i as int].len(), p@ == v@[i as int]@.take(j as int),
+            decreases v@[i as int].len() - j,
+        {
+            p.push(v[i][j]);
+            proof { assert(p@ =~= v@[i as int]@.take(j as int + 1)); }
+            j += 1;
+        }
+        proof { assert(p@ =~= v@[i as int]@); }
+        r.push(p);
+        i += 1;
+    }
+    proof { assert(r@.map_values(|p: Path| p@) =~= v@.map_values(|p: Path| p@)); }
+    r
+}
+
+/// The tokens the bon process holds: one per field of the state machine.
+pub struct Tokens {
+    pub instance: spec::bon::Instance,
+    pub map: spec::bon::map,
+    pub checks: spec::bon::checks,
+    pub trunk: spec::bon::trunk,
+    pub authors: spec::bon::authors,
+    pub searches: spec::bon::searches,
+    pub limit: spec::bon::limit,
+    pub spent: spec::bon::spent,
+    pub reserved: spec::bon::reserved,
+}
+
+impl Tokens {
+    pub open spec fn wf(&self) -> bool {
+        &&& self.map.instance_id() == self.instance.id()
+        &&& self.checks.instance_id() == self.instance.id()
+        &&& self.trunk.instance_id() == self.instance.id()
+        &&& self.authors.instance_id() == self.instance.id()
+        &&& self.searches.instance_id() == self.instance.id()
+        &&& self.limit.instance_id() == self.instance.id()
+        &&& self.spent.instance_id() == self.instance.id()
+        &&& self.reserved.instance_id() == self.instance.id()
+    }
+}
+
+/// What agent process i returned, as the spec sees it.
+pub open spec fn returned(r: Option<Candidate>) -> Option<spec::Candidate> {
+    match r { Some(c) => Some(c@), None => None }
+}
+
+/// One search: grant a capability per agent process, run them, and wait on
+/// each, consuming its capability. (intents 2, 7, 9, 16)
+#[verifier::rlimit(100)]
+fn search(
+    m: &trusted::Manifest, index: usize, kind: Kind, start: Commit, checks: &Vec<Path>, l: u64, limit: u64,
+    spent: &mut u64, target: Option<&Search>, Ghost(observed): Ghost<Map<File, Permission>>,
+    Tracked(t): Tracked<&mut Tokens>,
+) -> (r: Result<Search, String>)
+    requires
+        old(t).wf(),
+        index as int == old(t).searches.value().len(),
+        spec::isolated(observed),
+        forall|k: int| 0 <= k < old(t).searches.value().len() ==> spec::complete(#[trigger] old(t).searches.value()[k]),
+        old(t).checks.value() == paths(checks@),
+        old(t).limit.value() == limit as nat,
+        old(t).spent.value() == *old(spent) as nat,
+        old(t).reserved.value() == 0,
+        start@ == spec::start(kind@, old(t).searches.value(), old(t).trunk.value().last()),
+        kind@ matches spec::Kind::Code { goal } ==> old(t).map.value().contains(goal),
+        kind@ matches spec::Kind::Compaction { goal, .. } ==> goal == old(t).trunk.value().last(),
+        kind@ matches spec::Kind::Counterexample { goal } ==>
+            0 <= goal.search < old(t).searches.value().len()
+            && spec::selected(old(t).searches.value()[goal.search], goal.index)
+            && old(t).searches.value()[goal.search].base == old(t).trunk.value().last(),
+    ensures
+        final(t).wf(),
+        final(t).instance == old(t).instance,
+        final(t).map.value() == old(t).map.value(),
+        final(t).checks.value() == old(t).checks.value(),
+        final(t).trunk.value() == old(t).trunk.value(),
+        final(t).authors.value() == old(t).authors.value(),
+        final(t).limit.value() == old(t).limit.value(),
+        r matches Ok(s) ==> {
+            &&& s.results.len() == s.n
+            &&& s@.kind == kind@
+            &&& s@.base == spec::start(kind@, old(t).searches.value(), old(t).trunk.value().last())
+            &&& final(t).searches.value() == old(t).searches.value().push(s@)
+            &&& spec::complete(s@)
+            &&& final(t).reserved.value() == 0
+            &&& final(t).spent.value() == *final(spent) as nat
+        },
+{
+    let n = trusted::width(m, &kind);
+    let reserve = match l.checked_mul(n as u64) { Some(x) => x, None => { return Err("limit overflow".into()); } };
+    if reserve > limit || *spent > limit - reserve {
+        return Err("the search would pass the bon process's limit".into());
+    }
+    let ghost k = t.searches.value().len() as int;
+    let ghost before = t.searches.value();
+    let tracked mut capability = t.instance.grant(kind@, n as nat, l as nat, observed,
+        &t.map, &t.checks, &t.trunk, &mut t.searches, &t.limit, &t.spent, &mut t.reserved);
+    trusted::record(m, "grant");
+    let mut results = trusted::run(m, &kind, index, &start, target);
+    if results.len() != n {
+        return Err("trusted code returned the wrong number of agent processes".into());
+    }
+    let mut s = Search { kind, base: start, n, checks: copy(checks), limit: l, results: Vec::new() };
+    proof {
+        assert(s@.results =~= Map::empty());
+        assert(s@.authority == spec::authority(kind@, paths(checks@)));
+        assert(t.searches.value()[k] == s@);
+        let ps = spec::agent_processes(k, n as nat);
+        assert forall|j: int| 0 <= j < n implies #[trigger] capability.dom().contains(spec::AgentProcess { search: k, index: j }) by {
+            assert(ps[j] == spec::AgentProcess { search: k, index: j });
+            assert(ps.contains(spec::AgentProcess { search: k, index: j }));
+        }
+    }
+    let mut i: usize = 0;
+    while i < n
+        invariant
+            t.wf(), t.instance == old(t).instance,
+            t.map.value() == old(t).map.value(), t.checks.value() == old(t).checks.value(),
+            t.trunk.value() == old(t).trunk.value(), t.authors.value() == old(t).authors.value(),
+            t.limit.value() == old(t).limit.value(),
+            capability.instance_id() == t.instance.id(),
+            k == before.len(), t.searches.value().len() == k + 1,
+            t.searches.value().take(k) == before,
+            t.searches.value()[k] == s@,
+            s.n == n, s.results.len() == i, i <= n, results.len() == n - i, s@.kind == kind@,
+            s.base@ == start@, s.limit == l,
+            forall|j: int| i <= j < n ==> #[trigger] capability.dom().contains(spec::AgentProcess { search: k, index: j })
+                && capability[spec::AgentProcess { search: k, index: j }] == (spec::Capability {
+                    base: start@, authority: s@.authority, limit: l as nat }),
+            t.reserved.value() == l as nat * (n - i) as nat,
+            t.spent.value() == *spent as nat,
+            *spent as nat + l as nat * (n - i) as nat <= limit as nat,
+        decreases n - i,
+    {
+        let (r, cost) = results.remove(0);
+        if cost > l { return Err("an agent process spent past its limit".into()); }
+        match &r {
+            Some(c) => { if !eq(&c.base, &s.base) { return Err("a candidate does not start from its base".into()); } }
+            None => {}
+        }
+        let ghost p = spec::AgentProcess { search: k, index: i as int };
+        proof {
+            assert(capability.dom().contains(spec::AgentProcess { search: k, index: i as int }));
+            assert(capability.dom().contains(p) && capability[p].limit == l as nat);
+            let tracked cap = capability.remove(p);
+            assert(cap.value().limit == l as nat);
+            assert(l as nat * (n - i) as nat == l as nat * (n - i - 1) as nat + l as nat) by(nonlinear_arith)
+                requires i < n;
+            t.instance.wait(p, cap.value(), returned(r), cost as nat, &mut t.searches, &mut t.spent, &mut t.reserved, cap);
+            assert(t.reserved.value() == l as nat * (n - (i + 1)) as nat);
+        }
+        let ghost old_s = s@;
+        s.results.push(r);
+        *spent = *spent + cost;
+        proof {
+            assert(s@.results =~= old_s.results.insert(i as int, returned(r)));
+            assert(s@.authority == old_s.authority);
+            assert(t.searches.value()[k] =~= s@);
+            assert(t.searches.value().take(k) =~= before);
+            assert forall|j: int| i + 1 <= j < n implies #[trigger] capability.dom().contains(spec::AgentProcess { search: k, index: j })
+                && capability[spec::AgentProcess { search: k, index: j }] == (spec::Capability {
+                    base: start@, authority: s@.authority, limit: l as nat }) by {
+                assert(spec::AgentProcess { search: k, index: j } != p);
+            }
+        }
+        trusted::record(m, "wait");
+        i += 1;
+    }
+    proof {
+        assert(s.results.len() == s.n);
+        assert(t.searches.value() =~= before.push(s@));
+        assert forall|j: int| 0 <= j < s.n implies s@.results.contains_key(j) by { result_at(&s, j); }
+        assert(spec::complete(s@));
+        assert(t.reserved.value() == 0) by(nonlinear_arith) requires t.reserved.value() == l as nat * (n - n) as nat;
+    }
+    Ok(s)
+}
+
+
+/// bon code: search for code that makes one intent of the map hold, and
+/// fast-forward trunk to the selected candidate once a counterexample search
+/// clears it. (intents 2–9, 13, 16)
+pub fn code(root: &str, goal: Intent) -> (r: Result<(), String>) {
+    let head = trusted::head(root)?;
+    let m = trusted::manifest(root, &head)?;
+    trusted::on_trunk(&m)?;
+    let intents = trusted::intents(&m, &head);
+    if !contains(&intents, &goal) {
+        return Err("that intent is not in the map at trunk's head".into());
+    }
+    let checks = trusted::checks(&m);
+    let limit = trusted::limit(&m);
+    let l = trusted::agent_process_limit(&m);
+    let (pc, pt, pw, pr) = trusted::observe(&m, &head)?;
+    if !isolated(pc, pt, pw, pr) {
+        return Err("agent is not isolated: its permissions differ from the policy; run bon setup".into());
+    }
+    let ghost observed = observed(pc, pt, pw, pr);
+    let tracked (Tracked(instance), Tracked(map), Tracked(checks_t), Tracked(trunk), Tracked(authors),
+                 Tracked(searches), Tracked(limit_t), Tracked(spent_t), Tracked(reserved), Tracked(capability))
+        = spec::bon::Instance::initialize(head@, intent_set(intents@), paths(checks@), limit as nat);
+    let tracked mut t = Tokens { instance, map, checks: checks_t, trunk, authors, searches, limit: limit_t, spent: spent_t, reserved };
+    let mut spent: u64 = 0;
+    trusted::record(&m, "initialize");
+    proof { assert(t.trunk.value().last() == head@); }
+
+    let s0 = search(&m, 0, Kind::Code { goal }, copy_text(&head), &checks, l, limit, &mut spent, None,
+                    Ghost(observed), Tracked(&mut t))?;
+    let i = match selected(&s0) {
+        Some(i) => i,
+        None => {
+            trusted::record(&m, "blocked: no selection");
+            return Err("blocked: fewer than two verified candidates, or they disagree".into());
+        }
+    };
+    let start = copy_text(&candidate(&s0, i).commit);
+    proof {
+        assert(t.searches.value()[0] == s0@);
+        assert(s0@.base == head@);
+    }
+    let s1 = search(&m, 1, Kind::Counterexample { goal: AgentProcess { search: 0, index: i } }, start, &checks,
+                    l, limit, &mut spent, Some(&s0), Ghost(observed), Tracked(&mut t))?;
+    if !cleared(&s1, &s0) {
+        trusted::record(&m, "blocked: a counterexample split the agreed candidates");
+        return Err("blocked: a counterexample's test split the agreed candidates".into());
+    }
+    let now = trusted::head(root)?;
+    if !eq(&now, &head) {
+        trusted::record(&m, "blocked: trunk moved");
+        return Err("blocked: trunk moved during the search; run it again".into());
+    }
+    proof {
+        assert(t.searches.value()[0] == s0@ && t.searches.value()[1] == s1@);
+        assert(t.trunk.value().last() == head@);
+        t.instance.fast_forward(0, i as int, 1, &mut t.trunk, &mut t.authors, &t.searches);
+    }
+    trusted::fast_forward(&m, &candidate(&s0, i).commit)?;
+    trusted::record(&m, "fast_forward");
+    Ok(())
+}
+
+/// A copy of some text.
+fn copy_text(v: &Vec<char>) -> (r: Vec<char>)
+    ensures r@ == v@,
+{
+    let mut p: Vec<char> = Vec::new();
+    let mut j = 0;
+    while j < v.len()
+        invariant 0 <= j <= v.len(), p@ == v@.take(j as int),
+        decreases v.len() - j,
+    {
+        p.push(v[j]);
+        proof { assert(p@ =~= v@.take(j as int + 1)); }
+        j += 1;
+    }
+    proof { assert(p@ =~= v@); }
+    p
 }
 
 // ── the gates ───────────────────────────────────────────
