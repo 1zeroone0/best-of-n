@@ -162,6 +162,13 @@ fn setup(dry_run: bool, user: Option<String>) -> Result<(), String> {
     steps.push(vec!["sh".into(), "-c".into(), format!(
         "f=$(mktemp) && printf '%s ALL=(agent) NOPASSWD: ALL\\n' {me} > \"$f\" && visudo -cf \"$f\" && install -m 0440 -o root -g wheel \"$f\" /etc/sudoers.d/bon; r=$?; rm -f \"$f\"; exit $r")]);
     steps.push(s(&["sh", "-c", "mkdir -p /tmp/bon && chmod 1777 /tmp/bon"]));
+    // The device file: written once, then edited by hand (with sudo) as models and prices change.
+    if !std::path::Path::new(best_of_n::trusted::DEVICE).exists() {
+        let draft = std::env::temp_dir().join(format!("bon-device-{}.toml", std::process::id()));
+        if !dry_run { std::fs::write(&draft, DEVICE_TEMPLATE).map_err(|e| e.to_string())?; }
+        steps.push(vec!["sh".into(), "-c".into(), format!(
+            "mkdir -p /etc/bon && install -m 0644 -o root -g wheel {} {}", draft.display(), best_of_n::trusted::DEVICE)]);
+    }
     for step in &steps {
         let shown: Vec<&str> = step.iter().map(|x| if x.len() > 40 && !x.contains(' ') { "<random>" } else { x.as_str() }).collect();
         println!("sudo {}", shown.join(" "));
@@ -180,6 +187,22 @@ fn setup(dry_run: bool, user: Option<String>) -> Result<(), String> {
     println!("Then log the harnesses in as agent: sudo -u agent -i claude, and sudo -u agent -i codex login");
     Ok(())
 }
+
+/// The device file `bon setup` writes: where agent's tools live, and the prices
+/// of the models in use. Traces record the prices they were costed at.
+const DEVICE_TEMPLATE: &str = r#"# bon's device file: facts about this machine, not about any repository.
+# Owned by root; edit with sudo. Every trace records the prices it was costed at.
+
+# PATH for agent processes and checks. Nothing else is inherited.
+path = ["/Users/agent/.local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+
+# Dollars per million tokens, API list prices, by canonical model id. Keep only
+# the models in use. cache_write is the shorter TTL (Claude 5m, OpenAI 30m),
+# cache_write_long the longer (Claude 1h, OpenAI 12h). As of 2026-11-03.
+[prices]
+"claude-haiku-5-5" = { input = 0.10, cached_input = 0.01, output = 0.50, cache_write = 0.125, cache_write_long = 0.20 }
+"gpt-6.1-sol" = { input = 2.00, cached_input = 0.10, output = 10.00, cache_write = 2.50, cache_write_long = 5.00 }
+"#;
 
 /// The SBOM, as CycloneDX: every crate in Cargo.lock, the toolchain, the TCB
 /// tools, the services the harnesses call, and the trusted code. (intent 18)

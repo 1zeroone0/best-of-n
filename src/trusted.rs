@@ -34,13 +34,27 @@ pub struct Config {
     pub rate: f64,
     #[serde(default)]
     pub transcripts: Option<String>,
-    /// PATH for agent processes and checks. Nothing is inherited.
+    /// PATH for agent processes and checks, from the device file. Nothing is inherited.
+    #[serde(skip)]
     pub path: Vec<String>,
     pub agent_process: AgentProcessConfig,
     pub checks: Checks,
     pub harness: Vec<Harness>,
     pub counterexample: Counterexample,
+    /// Prices by canonical model, from the device file.
+    #[serde(skip)]
     pub prices: HashMap<String, Price>,
+}
+
+/// What is true of this machine rather than of a repository, written by
+/// `bon setup` and owned by root: where agent's tools live, and model prices.
+pub const DEVICE: &str = "/etc/bon/device.toml";
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Device {
+    path: Vec<String>,
+    prices: HashMap<String, Price>,
 }
 
 fn trunk_default() -> String { "main".into() }
@@ -92,7 +106,7 @@ pub struct Counterexample {
 }
 
 /// Dollars per million tokens.
-#[derive(Deserialize, Clone)]
+#[derive(Deserialize, serde::Serialize, Clone, Debug, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Price {
     pub input: f64,
@@ -271,7 +285,7 @@ fn harness_argv(h: &Harness, config: &Config, dir: &std::path::Path) -> Vec<Stri
 /// Claude: the final `result` event's `modelUsage`, per model, with 5-minute and
 /// 1-hour cache writes apart. Codex: the last `turn.completed`, whose usage is a
 /// running total; cached and cache-write tokens are part of `input_tokens`.
-fn cost(h: &Harness, config: &Config, stdout: &str) -> Result<(u64, Option<u64>), String> {
+fn cost(h: &Harness, config: &Config, stdout: &str) -> Result<(u64, Option<u64>, HashMap<String, Price>), String> {
     let price = |model: &str| config.prices.get(model).ok_or(format!("no price for model {model}"));
     let rate = |p: &Price, input: f64, cached: f64, output: f64, write: f64, write_long: f64| {
         (input * p.input + cached * p.cached_input + output * p.output + write * p.cache_write + write_long * p.cache_write_long) / 1_000_000.0
@@ -281,20 +295,23 @@ fn cost(h: &Harness, config: &Config, stdout: &str) -> Result<(u64, Option<u64>)
         let Some(r) = events.iter().rev().find(|v| v["type"] == "result") else { return Err("no result event".into()) };
         let mut ours = 0.0;
         let mut theirs = 0.0;
+        let mut used = HashMap::new();
         for (model, u) in r["modelUsage"].as_object().cloned().unwrap_or_default() {
+            used.insert(model.clone(), price(&model)?.clone());
             let n = |k: &str| u[k].as_f64().unwrap_or(0.0);
             let (w5, w1) = (n("cacheCreationEphemeral5mInputTokens"), n("cacheCreationEphemeral1hInputTokens"));
             let w5 = if w5 + w1 == 0.0 { n("cacheCreationInputTokens") } else { w5 };
             ours += rate(price(&model)?, n("inputTokens"), n("cacheReadInputTokens"), n("outputTokens"), w5, w1);
             theirs += n("costUSD");
         }
-        Ok((micro(ours), Some(micro(theirs))))
+        Ok((micro(ours), Some(micro(theirs)), used))
     } else {
         let Some(t) = events.iter().rev().find(|v| v["type"] == "turn.completed") else { return Err("no turn.completed event".into()) };
         let n = |k: &str| t["usage"][k].as_f64().unwrap_or(0.0);
         let (cached, write) = (n("cached_input_tokens"), n("cache_write_input_tokens"));
         let input = (n("input_tokens") - cached - write).max(0.0);
-        Ok((micro(rate(price(&h.model)?, input, cached, n("output_tokens"), write, 0.0)), None))
+        let p = price(&h.model)?;
+        Ok((micro(rate(p, input, cached, n("output_tokens"), write, 0.0)), None, HashMap::from([(h.model.clone(), p.clone())])))
     }
 }
 
@@ -331,10 +348,14 @@ pub fn manifest(root: &str, commit: &Commit) -> (r: Result<Manifest, String>) {
     let root = PathBuf::from(root);
     let c: String = commit.iter().collect();
     let text = git(&root, &["show", &format!("{c}:bon.toml")]).map_err(|_| "no bon.toml at trunk's head; commit one".to_string())?;
-    let config: Config = toml::from_str(&text).map_err(|e| format!("bon.toml: {e}"))?;
+    let mut config: Config = toml::from_str(&text).map_err(|e| format!("bon.toml: {e}"))?;
+    let device: Device = toml::from_str(&std::fs::read_to_string(DEVICE).map_err(|_| format!("no {DEVICE}; run bon setup"))?)
+        .map_err(|e| format!("{DEVICE}: {e}"))?;
+    config.path = device.path;
+    config.prices = device.prices;
     for h in config.harness.iter().chain(config.counterexample.harness.iter()) {
         if !config.prices.contains_key(&h.model) {
-            return Err(format!("bon.toml: no [prices] entry for {}; use the canonical model id", h.model));
+            return Err(format!("{DEVICE}: no price for {}; bon.toml must name canonical model ids", h.model));
         }
     }
     Ok(Manifest { config, root })
@@ -494,7 +515,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
     let c = as_agent(config, &dir, &[], &argv);
     let (_, stdout, killed) = supervise(c, Some(text), Duration::from_secs(config.agent_process.time), &trace.join("harness"));
     // Without token counts there is no measured cost: charge the whole limit.
-    let (spent, harness_cost) = cost(h, config, &stdout).unwrap_or((micro(config.agent_process.limit), None));
+    let (spent, harness_cost, prices) = cost(h, config, &stdout).unwrap_or((micro(config.agent_process.limit), None, HashMap::new()));
     if killed { let _ = std::fs::write(trace.join("killed"), "time limit"); }
     let candidate = capture(m, kind, search, index, start, &dir, target, trace).map_err(|e| {
         let _ = std::fs::write(trace.join("error"), &e);
@@ -506,6 +527,8 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
     let facts = serde_json::json!({
         "harness": h.name, "model": h.model, "cost_microdollars": spent, "killed": killed,
         "harness_cost_microdollars": harness_cost,
+        // The prices this cost was computed at, so the trace stays true when the device's prices change.
+        "prices": prices,
         // The harness's own figure differs from bon's by more than 5%: the price table or the harness is stale.
         "price_mismatch": harness_cost.is_some_and(|c| (c as f64 - spent as f64).abs() > 0.05 * (c.max(spent).max(1) as f64)),
         "over_limit": spent > micro(config.agent_process.limit),
@@ -661,18 +684,29 @@ mod tests {
     }
 
     fn config() -> Config {
-        toml::from_str(r#"
+        let mut c: Config = toml::from_str(r#"
             limit = 5.0
             rate = 150
-            path = ["/usr/bin"]
             agent_process = { limit = 0.5, time = 60 }
             checks = { paths = ["checks/"], verify = ["true"] }
             harness = [{ name = "claude", model = "claude-haiku-5-5", n = 2 }]
             counterexample = { harness = [{ name = "codex", model = "gpt-6.1-sol", n = 1 }], path = "c.sh", test = "sh c.sh" }
+        "#).unwrap();
+        let d: Device = toml::from_str(r#"
+            path = ["/usr/bin"]
             [prices]
             "claude-haiku-5-5" = { input = 0.10, cached_input = 0.01, output = 0.50, cache_write = 0.125, cache_write_long = 0.20 }
             "gpt-6.1-sol" = { input = 2.00, cached_input = 0.10, output = 10.00, cache_write = 2.50, cache_write_long = 5.00 }
-        "#).unwrap()
+        "#).unwrap();
+        c.path = d.path;
+        c.prices = d.prices;
+        c
+    }
+
+    #[test]
+    fn device_facts_are_refused_in_bon_toml() {
+        assert!(toml::from_str::<Config>("limit = 1.0\nrate = 1\npath = [\"/usr/bin\"]").is_err());
+        assert!(toml::from_str::<Config>("limit = 1.0\nrate = 1\n[prices]").is_err());
     }
 
     #[test]
@@ -680,7 +714,9 @@ mod tests {
         // The modelUsage of the first end-to-end run; Claude Code reported $0.00245213.
         let c = config();
         let out = r#"{"type":"result","total_cost_usd":0.00245213,"modelUsage":{"claude-haiku-5-5":{"inputTokens":6,"outputTokens":527,"cacheReadInputTokens":49463,"cacheCreationInputTokens":8467,"cacheCreationEphemeral5mInputTokens":0,"cacheCreationEphemeral1hInputTokens":8467,"costUSD":0.00245213}}}"#;
-        assert_eq!(cost(&c.harness[0], &c, out), Ok((2452, Some(2452))));
+        let (ours, theirs, prices) = cost(&c.harness[0], &c, out).unwrap();
+        assert_eq!((ours, theirs), (2452, Some(2452)));
+        assert_eq!(prices["claude-haiku-5-5"], c.prices["claude-haiku-5-5"]);
     }
 
     #[test]
@@ -690,7 +726,9 @@ mod tests {
         let out = r#"{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}
 {"type":"turn.completed","usage":{"input_tokens":1000000,"cached_input_tokens":500000,"cache_write_input_tokens":0,"output_tokens":100000}}"#;
         // 500k input at $2, 500k cached at $0.10, 100k output at $10.
-        assert_eq!(cost(h, &c, out), Ok((2_050_000, None)));
+        let (ours, theirs, prices) = cost(h, &c, out).unwrap();
+        assert_eq!((ours, theirs), (2_050_000, None));
+        assert!(prices.contains_key("gpt-6.1-sol"));
     }
 
     #[test]

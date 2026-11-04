@@ -34,20 +34,26 @@ sudo -u agent -i codex login
 | `bon sbom [--check]` | write `sbom.json`, or fail if it differs from this machine |
 | `bon setup [--dry-run] [--for <user>]` | create agent and group bon |
 
-## bon.toml
+## Configuration
 
-Each repository that uses bon commits a `bon.toml` at its root. bon reads it
-from trunk's head, never the working tree. Two parts worth knowing:
+Two files, by what they are about.
 
-- `remote` (default `origin`) and `trunk` (default `main`): the remote's trunk
-  is the golden trunk. bon refuses to start unless local trunk matches it, and
-  pushes every fast-forward to it (fast-forward only; refused if it moved).
-- `[prices]`: dollars per million tokens, keyed by the canonical model id each
-  harness runs (`claude-haiku-5-5`, `gpt-6.1-sol`), with `input`,
-  `cached_input`, `output`, `cache_write` and `cache_write_long`. bon computes
-  every cost from token counts and these prices, as an API-equivalent figure
-  (on a subscription nothing is billed per token), and flags any run where
-  Claude Code's own figure differs by more than 5%.
+**`/etc/bon/device.toml`, about this machine.** `bon setup` writes it once and
+you edit it with sudo afterwards. It holds `path`, where agent's tools live,
+and `[prices]`: dollars per million tokens, keyed by canonical model id
+(`claude-haiku-5-5`, `gpt-6.1-sol`), with `input`, `cached_input`, `output`,
+`cache_write` and `cache_write_long`. Keep only the models in use. bon
+computes every cost from token counts and these prices, as an API-equivalent
+figure (on a subscription nothing is billed per token). Each trace records the
+prices it was costed at, so changing them never rewrites history. A run where
+Claude Code's own figure differs by more than 5% is flagged.
+
+**`bon.toml`, about one repository,** committed at its root and read from
+trunk's head, never the working tree: the checks, harnesses and widths, limits,
+rate, and `remote` (default `origin`) and `trunk` (default `main`). The
+remote's trunk is the golden trunk: bon refuses to start unless local trunk
+matches it, and pushes every fast-forward to it (fast-forward only; refused if
+it moved). It may not contain `path` or `prices`.
 
 ## SBOM
 
