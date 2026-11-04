@@ -97,7 +97,7 @@ fn map(root: &str) -> Result<(), String> {
             text.push_str(&format!("{}\t{rel}#{}\n", intent.iter().collect::<String>(), timestamp(*cue)));
         }
         let commit = proposal(r, &head, &text, &rel)?;
-        let name = p.file_stem().unwrap().to_string_lossy().to_string();
+        let name = p.file_stem().unwrap().to_string_lossy();
         git(r, &["update-ref", &format!("refs/bon/proposal/{name}"), &commit])?;
         println!("{} agreed, {} contested", agreed.len(), contested.len());
         for c in &contested { println!("  contested cue {}", timestamp(*c)); }
