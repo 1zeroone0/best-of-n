@@ -896,17 +896,7 @@ pub fn contested(s: &Search) -> (r: Vec<Cue>)
 fn eq(a: &Vec<char>, b: &Vec<char>) -> (r: bool)
     ensures r == (a@ == b@),
 {
-    if a.len() != b.len() { return false; }
-    let mut i = 0;
-    while i < a.len()
-        invariant a.len() == b.len(), 0 <= i <= a.len(), forall|j: int| 0 <= j < i ==> a@[j] == b@[j],
-        decreases a.len() - i,
-    {
-        if a[i] != b[i] { return false; }
-        i += 1;
-    }
-    assert(a@ =~= b@);
-    true
+    a.len() == b.len() && is_prefix_of(a, b)
 }
 
 /// The spec's map: the set of its intents.
@@ -943,26 +933,7 @@ fn contains(xs: &Vec<Intent>, x: &Intent) -> (r: bool)
 fn copy(v: &Vec<Path>) -> (r: Vec<Path>)
     ensures r@.len() == v@.len(), forall|i: int| 0 <= i < v@.len() ==> r@[i]@ == v@[i]@, paths(r@) == paths(v@),
 {
-    let mut r: Vec<Path> = Vec::new();
-    let mut i = 0;
-    while i < v.len()
-        invariant 0 <= i <= v.len(), r@.len() == i, forall|j: int| 0 <= j < i ==> r@[j]@ == v@[j]@,
-        decreases v.len() - i,
-    {
-        let mut p: Vec<char> = Vec::new();
-        let mut j = 0;
-        while j < v[i].len()
-            invariant i < v.len(), 0 <= j <= v@[i as int].len(), p@ == v@[i as int]@.take(j as int),
-            decreases v@[i as int].len() - j,
-        {
-            p.push(v[i][j]);
-            proof { assert(p@ =~= v@[i as int]@.take(j as int + 1)); }
-            j += 1;
-        }
-        proof { assert(p@ =~= v@[i as int]@); }
-        r.push(p);
-        i += 1;
-    }
+    let r = v.clone();
     proof { assert(r@.map_values(|p: Path| p@) =~= v@.map_values(|p: Path| p@)); }
     r
 }
@@ -1198,11 +1169,11 @@ pub fn land(root: &str, goal: Option<Intent>) -> (r: Result<(), String>) {
     {
         if index > usize::MAX - 2 { return Err("too many searches".into()); }
         let kind = match &goal {
-            Some(g) => Kind::Code { goal: copy_text(g) },
-            None => Kind::Compaction { goal: copy_text(&head), out: trusted::agree_outputs(&m, &head, &tests)? },
+            Some(g) => Kind::Code { goal: g.clone() },
+            None => Kind::Compaction { goal: head.clone(), out: trusted::agree_outputs(&m, &head, &tests)? },
         };
         let ghost before = t.searches.value();
-        let s0 = search(&m, index, a, kind, copy_text(&head), &checks, l, limit, &mut spent, None, &tests,
+        let s0 = search(&m, index, a, kind, head.clone(), &checks, l, limit, &mut spent, None, &tests,
                         Ghost(observed), Tracked(&mut t))?;
         proof {
             assert(t.searches.value()[index as int] == s0@);
@@ -1216,7 +1187,7 @@ pub fn land(root: &str, goal: Option<Intent>) -> (r: Result<(), String>) {
                 index = index + 1;
             }
             Some(i) => {
-                let start = copy_text(&candidate(&s0, i).commit);
+                let start = candidate(&s0, i).commit.clone();
                 let ghost before1 = t.searches.value();
                 let s1 = search(&m, index + 1, a, Kind::Counterexample { goal: AgentProcess { search: index, index: i } }, start,
                                 &checks, l, limit, &mut spent, Some(&s0), &tests, Ghost(observed), Tracked(&mut t))?;
@@ -1271,28 +1242,10 @@ pub fn map(root: &str, transcript: Transcript) -> (r: Result<(Vec<(Cue, Intent)>
     let tracked mut t = Tokens { instance, map, checks: checks_t, trunk, authors, searches, limit: limit_t, spent: spent_t, reserved };
     let mut spent: u64 = 0;
     trusted::record(&m, "initialize");
-    let s = search(&m, 0, 0, Kind::Map { goal: transcript }, copy_text(&head), &checks, l, limit, &mut spent, None, &trusted::no_tests(),
+    let s = search(&m, 0, 0, Kind::Map { goal: transcript }, head.clone(), &checks, l, limit, &mut spent, None, &trusted::no_tests(),
                    Ghost(observed), Tracked(&mut t))?;
     trusted::record(&m, "proposal");
     Ok((proposed(&s), contested(&s)))
-}
-
-/// A copy of some text.
-fn copy_text(v: &Vec<char>) -> (r: Vec<char>)
-    ensures r@ == v@,
-{
-    let mut p: Vec<char> = Vec::new();
-    let mut j = 0;
-    while j < v.len()
-        invariant 0 <= j <= v.len(), p@ == v@.take(j as int),
-        decreases v.len() - j,
-    {
-        p.push(v[j]);
-        proof { assert(p@ =~= v@.take(j as int + 1)); }
-        j += 1;
-    }
-    proof { assert(p@ =~= v@); }
-    p
 }
 
 // ── the gates ───────────────────────────────────────────
