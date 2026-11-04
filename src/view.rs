@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use best_of_n::exec::Kernel;
-use best_of_n::gates::Encoding;
+use best_of_n::gates::{Encoding, Gates};
 use serde_json::{json, Value};
 
 const INDEX: &str = include_str!("../view/dist/index.html");
@@ -172,12 +172,16 @@ pub fn state(root: &Path) -> Value {
                 let (s, i) = rest.split_once(' ')?;
                 (s.parse::<usize>().ok()? == n).then(|| i.parse::<usize>().ok()).flatten()
             });
+            let kernel = read_words(&rdir.join("search.words")).as_ref().and_then(|w| Kernel::decode(w));
+            for (i, candidate) in &mut candidates {
+                candidate["verified"] = json!(kernel.as_ref().and_then(|s| s.results.get(*i))
+                    .and_then(|r| r.as_ref()).is_some_and(|c| Kernel::verified(kernel.as_ref().unwrap(), c)));
+            }
             list.push(json!({
                 "search": n, "summary": summary, "selected": selected,
                 // The search as the gates saw it, emitted by the kernel in the
                 // spec's names; null in traces recorded before the kernel wrote words.
-                "kernel": read_words(&rdir.join("search.words")).as_ref().and_then(|w| Kernel::decode(w))
-                    .and_then(|k| serde_json::from_str::<Value>(&Kernel::emit(&k).into_iter().collect::<String>()).ok()),
+                "kernel": kernel.as_ref().and_then(|k| serde_json::from_str::<Value>(&Kernel::emit(&k).into_iter().collect::<String>()).ok()),
                 "candidates": candidates.into_iter().map(|(_, c)| c).collect::<Vec<_>>(),
             }));
         }

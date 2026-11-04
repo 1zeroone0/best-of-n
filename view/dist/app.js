@@ -1,1 +1,647 @@
-var _=document.querySelector("#app"),f={},q=!1,E=!0,W=!1,K="",v=null,x=12,T=new Set,F=new Set,c=e=>String(e??"").replace(/[&<>"']/g,t=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[t]),le=new Intl.NumberFormat("en-US",{maximumFractionDigits:1}),H=e=>e==null?"\u2014":le.format(e),U=e=>e==null||!Number.isFinite(e)?"\u2014":"$"+e.toFixed(e!==0&&e<.01?4:2),j=e=>e?e.slice(0,8):"\u2014",me=e=>'"'+e.replace(/["\\$`]/g,"\\$&")+'"',M=e=>e.facts?.candidate?.checks_pass===!0,ue=(e,t)=>`${e.pid}/${t.search}`;function se(e){if(!e)return"not recorded";let t=Math.max(0,(f.repo?.now??Date.now()/1e3)-e);return t<60?"just now":t<3600?`${Math.floor(t/60)}m ago`:t<86400?`${Math.floor(t/3600)}h ago`:`${Math.floor(t/86400)}d ago`}function A(e){return`<time ${e?`datetime="${new Date(e*1e3).toISOString()}" title="${c(new Date(e*1e3).toLocaleString())}"`:""}>${se(e)}</time>`}function S(e,t=16){let n={branch:'<circle cx="6" cy="4" r="2"/><circle cx="6" cy="20" r="2"/><circle cx="18" cy="5" r="2"/><path d="M6 6v12m0-3c0-7 12-2 12-8"/>',search:'<circle cx="6" cy="5" r="2"/><circle cx="18" cy="12" r="2"/><circle cx="6" cy="19" r="2"/><path d="M6 7v10m2-12h3a7 7 0 0 1 7 5M8 19h3a7 7 0 0 0 7-5"/>',arrow:'<path d="M5 12h14m-5-5 5 5-5 5"/>',chevron:'<path d="m9 5 7 7-7 7"/>',copy:'<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 8V3H3v13h5"/>'};return`<svg width="${t}" height="${t}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${n[e]??n.search}</svg>`}var pe={granted:"grant",returned:"wait","agent processes returned":"wait",retained:"retain",landed:"fast_forward",built:"map",open:"map",broken:"broken",candidate:"Candidate",candidates:"Candidate",intent:"Intent",selected:"selected",verified:"verified",agreed:"agreed",checks_pass:"verified"};function p(e,t=e){return`<span class="word" tabindex="0" data-word="${c(e)}" aria-describedby="spec-tip">${c(t)}</span>`}function fe(e,t){return`<span class="pill ${t}"><i></i>${p(e)}</span>`}function he(e){return`<button class="command" data-copy="${c(e)}" title="Copy command"><code>${c(e)}</code>${S("copy",14)}<span class="sr-only">Copy command</span></button>`}var b=new Map,C=[],w={count:0,verified:0,cost:0},Y=0,ae=-1;function ge(){b=new Map,w={count:0,verified:0,cost:0};let e=new Map((f.trunk??[]).map(n=>[n.commit,n])),t=new Set;for(let n of f.processes??[]){let s=[];for(let a of n.transitions??[])/^grant(?: |$)/.test(a)&&s.push([]),s.at(-1)?.push(a);for(let[a,i]of(n.searches??[]).entries()){let o=i.candidates??[],d=s.length===n.searches?.length?s[a]??[]:[],m=o.filter(M).length,r=i.summary?.generation_dollars??(o.some($=>$.facts?.cost_microdollars!=null)?o.reduce(($,O)=>$+(O.facts?.cost_microdollars??0)/1e6,0):void 0),l=r==null&&i.summary?.time_dollars==null?void 0:(r??0)+(i.summary?.time_dollars??0),h=(f.trunk??[]).find($=>$.trace?.replace(/^\.bon\/traces\//,"").startsWith(`${n.pid}/${i.search}/`))??o.map($=>e.get($.facts?.candidate?.commit??"")).find(Boolean);h&&t.add(h.commit);let g={key:ue(n,i),p:n,s:i,trace:d,children:[],landed:h,selected:i.selected??o.find($=>$.facts?.candidate?.commit===h?.commit&&h)?.index,count:o.length,v:m,cost:l,outcome:"returned",tone:"neutral",reason:"Agent processes returned. No further transition recorded.",time:i.summary?.time??n.modified??0};b.set(g.key,g),w.count+=o.length,w.verified+=m,w.cost+=l??0}}for(let n of b.values())if(n.s.summary?.kind==="counterexample"){let s=/^search (\d+) candidate/.exec(n.s.summary.goal??"")?.[1],a=b.get(`${n.p.pid}/${s}`);a&&a!==n&&(a.children.push(n),n.parent=a)}for(let n of b.values())ye(n);C=[...b.values()].filter(n=>!n.parent).map(n=>({key:n.key,entry:n,time:Math.max(n.time,...n.children.map(s=>s.time))}));for(let n of f.trunk??[])(!n.by_agent||!t.has(n.commit))&&C.push({key:`commit-${n.commit}`,commit:n,time:n.time??0});C.sort((n,s)=>s.time-n.time||(s.entry?.s.search??-1)-(n.entry?.s.search??-1)),ae=Y}function ye(e){let{s:t,p:n,trace:s}=e,a=s.find(i=>/^(blocked|broken)/.test(i));if(a)e.outcome=a.startsWith("broken")?"broken":"blocked",e.tone=e.outcome==="broken"?"red":"yellow",e.reason=a.replace(/^(blocked|broken):?\s*/,"")+". "+(e.outcome==="broken"?"bon starts a code search carrying the test.":"bon reruns wider, as the width list allows.");else if(t.summary?.kind==="counterexample"){let i=(e.parent?.s.candidates??[]).filter(M).map(m=>m.index);e.parent?.s.summary?.kind==="compaction"&&i.push(-1);let o=(t.candidates??[]).filter(M).some(m=>{let r=new Map(m.facts?.candidate?.test_passes??[]),l=i.length?i:[...r.keys()];return l.some(u=>!r.has(u))||new Set(l.map(u=>r.get(u))).size>1}),d=t.summary?.seconds!=null||s.some(m=>/^(fast_forward|retain)/.test(m));e.outcome=d?o?"split":"cleared":n.running?"running":"returned",e.tone=o?"red":d?"green":"orange",e.reason=d?o?"A verified counterexample test splits the agreed candidates.":"No verified counterexample test splits the agreed candidates.":`${e.count} agent processes returned; ${e.v} candidates verified.`}else s.some(i=>/^retain/.test(i))||e.landed?.subject?.startsWith("scrub:")?(e.outcome="retained",e.tone="violet",e.reason="The agreed scrub test passes on trunk and is retained."):e.landed||s.some(i=>/^fast_forward/.test(i))||e.children.some(i=>i.trace.some(o=>/^fast_forward/.test(o)))?(e.outcome="fast_forward",e.tone="indigo",e.reason="Trunk fast-forwarded to the selected candidate."):n.running&&t===n.searches?.at(-1)&&(e.outcome="running",e.tone="orange",e.reason=`${e.count} agent processes returned; ${e.v} candidates verified.`)}function oe(e){let{s:t}=e,s=(t.candidates??[]).filter(M),a=s.map(g=>JSON.stringify(g.facts?.candidate?.out)),i=s.every(g=>g.facts?.candidate?.out!=null),o=e.selected!=null||s.length>=2&&i&&new Set(a).size===1,d=i&&new Set(a).size>1,m=e.children.at(-1),l=t.summary?.kind==="counterexample"?e.outcome:m?.outcome??(e.outcome==="fast_forward"?"cleared":void 0),u=["fast_forward","retained","blocked","broken"].includes(e.outcome),h=Math.max(t.summary?.agent_processes??0,e.count);return[{label:"granted",value:h?H(h):"\u2014",tone:"orange",done:h>0||e.trace.some(g=>g.startsWith("grant"))},{label:"agent processes returned",value:h?`${e.count} / ${h}`:H(e.count),tone:e.count>=h&&h>0?"yellow":"orange",done:e.count>0},{label:"verified",value:H(e.v),tone:e.v?"green":"red",done:e.count>0},{label:d?"not agreed":"agreed",value:o?H(e.v):d?"different output":e.v<2&&e.count?"fewer than 2":"not recorded",tone:o?"green":d?"red":"yellow",done:o||d},{label:"selected",value:e.selected==null?"\u2014":`#${e.selected}`,tone:"blue",done:e.selected!=null},{label:"counterexample",value:l??"\u2014",tone:l==="split"?"red":l==="cleared"?"green":"yellow",done:l!=null},{label:e.outcome==="retained"?"retain":u?e.outcome:"fast_forward / retain / blocked",value:u?"\u2713":"\u2014",tone:u?e.tone:"neutral",done:u}]}function re(e){return`<div class="state-path" aria-label="Search path">${oe(e).map((t,n)=>`${n?`<span class="state-arrow">${S("arrow",16)}</span>`:""}<div class="state-node ${t.tone} ${t.done?"filled":"waiting"}"><span class="state-value">${c(t.value)}</span><span class="state-label">${p(t.label)}</span></div>`).join("")}</div>`}function ve(e){let t=oe(e);return`<span class="path-dots" aria-label="${c(t.map(n=>n.label+": "+n.value).join(" \u2192 "))}">${t.map(n=>`<i class="${n.tone} ${n.done?"filled":""}" title="${c(n.label+": "+n.value)}"></i>`).join("")}</span>`}function $e(){return`<div class="repository">${S("branch")}<strong>${c(f.repo?.name??"repository")}</strong><span class="head">${p("trunk",f.repo?.trunk??"main")} <code>${c(j(f.repo?.head))}</code></span>${fe(f.repo?.pushed?"pushed":"not pushed",f.repo?.pushed?"indigo":"blue")}</div><div class="header-cost">${w.verified?U(w.cost/w.verified):"\u2014"} per ${p("verified","verified candidate")} <span>\xB7</span> ${w.count?Math.round(w.verified/w.count*100):0}% of candidates verified</div><span class="live ${E?"":"offline"}"><i class="dot ${E?"violet":"red"}"></i>${E?"live":"waiting"}</span>`}function be(){let e=(f.processes??[]).filter(o=>o.running),t=e[0],n=t?b.get(`${t.pid}/${t.searches?.at(-1)?.search}`):void 0;if(n){let o=n.parent??n,d=n.outcome!=="running"&&n.s.summary?.seconds!=null;return`<div class="now-heading"><h1>Now</h1><span class="running orange"><i class="dot orange"></i>${e.length===1?"bon process running":`${e.length} bon processes running`}</span></div><div class="now-card"><div class="now-title"><span class="search-symbol orange">${S("search",21)}</span><div><div class="eyebrow">${p(o.s.summary?.kind??"search")} <span> / ${c(o.key)}</span></div><h2>${c(o.s.summary?.goal??"Goal not recorded")}</h2></div><a class="text-link" href="#${c(o.key)}">Open search ${S("arrow",15)}</a></div>${re(o)}<p class="now-note">${d?"Last recorded path: ":""}${c(n.reason)}${d?" The bon process is still running.":""}</p></div>`}let s=C[0],a=f.map?.find(o=>o.status==="open"),i="No search has run yet.";if(s?.commit)i=`The owner committed \u201C${s.commit.subject??j(s.commit.commit)}\u201D to trunk.`;else if(s?.entry){let o=s.entry;i=o.outcome==="fast_forward"?`Trunk fast-forwarded${o.s.summary?.goal?`: ${o.s.summary.goal}`:". Goal not recorded."}`:o.outcome==="retained"?`The last scrub was retained${o.s.summary?.goal?`: ${o.s.summary.goal}`:". Goal not recorded."}`:`The last search ${o.outcome}. ${o.reason}`}return`<div class="now-heading"><h1>Now</h1><span class="muted">No searches running</span></div><div class="now-calm"><p>${c(i)} <span class="muted">${s?se(s.time):""}</span></p>${a?`<div class="next-command"><span class="eyebrow">NEXT OPEN INTENT</span>${he(`bon code ${me(a.intent)}`)}</div>`:'<p class="settled">No open intents on the map.</p>'}</div>`}function we(){let e=f.map??[];return`<div class="section-heading"><h2>${p("map","Map")}</h2><span>${e.length} intents</span></div><div class="map-list">${e.map((t,n)=>{let s=t.scrub?.passes&&(t.scrub.time??0)>=(t.landed?.time??0),a=t.status==="broken"?"red":t.status==="open"?"orange":s?"violet":"blue";return`<a id="intent-${n}" class="map-intent ${v===n?"active":""}" href="#intent/${n}" aria-label="Filter timeline to ${c(t.intent)}" ${v===n?'aria-current="true"':""}><div class="map-intent-title"><span class="dot ${a}"></span><span>${c(t.intent)}</span></div><div class="map-meta"><span class="status-text ${a}">${p(t.status??"open")}</span><span>${p("scrub")} ${t.scrub?A(t.scrub.time):"\u2014"}</span><span>${p("landed")} ${t.landed?A(t.landed.time):"\u2014"}</span></div></a>`}).join("")||'<p class="empty">The map holds intents, one per line. None are recorded yet.</p>'}</div><p class="map-note">An intent shows its searches here.<br><span class="key-hint">Hover or focus a word for its <code>///</code> line.</span></p>`}function ke(e,t=!1){let{s:n}=e;return`<summary class="timeline-summary"><span class="line-chevron">${S("chevron",12)}</span><span class="line-goal">${t?'<span class="counter-label">counterexample</span> ':""}${c(n.summary?.goal??"not recorded")}<span class="line-record"><span class="line-kind">${c(n.summary?.kind??"kind not recorded")}</span>${e.landed?`<span class="landed-commit" title="${c(e.landed.commit)}">${p("trunk")} <code>${j(e.landed.commit)}</code></span>`:""}</span></span>${ve(e)}<span class="outcome ${e.tone}">${p(e.outcome)}</span><span class="line-cost">${U(e.cost)}</span><span class="line-time">${A(n.summary?.time??e.p.modified)}</span></summary>`}function Ee(e,t){let n=e.facts??{},s=n.candidate;return`<summary><span class="candidate-index">#${e.index}${t.selected===e.index?'<span class="selected-mark" title="selected">\u25C6</span>':""}</span><span class="candidate-model"><strong>${c(n.model??"not recorded")}</strong><small>${c(n.harness??"not recorded")} \xB7 <code>${j(s?.commit)}</code></small></span><span class="checks ${M(e)?"green":"orange"}">${p(M(e)?"verified":s?.checks_pass===!1?"not verified":"checks",M(e)?"verified":s?.checks_pass===!1?"not verified":"not recorded")}</span><span class="numeric">${U(n.cost_microdollars==null?void 0:n.cost_microdollars/1e6)}</span><span class="numeric">${H(s?.rank)}</span><span class="numeric">${H(s?.diff)}</span><span class="candidate-log-count">${e.logs?.length??0} logs ${S("chevron",12)}</span></summary>`}function ie(e,t){let n=e.facts??{},s=n.candidate;return`<div class="candidate-facts"><div><div class="eyebrow">${p("checks")}</div><p>${M(e)?"Every check passes.":s?.checks_pass===!1?"The candidate is not verified. The logs record the checks.":"No checks recorded yet."}</p>${["killed","over_limit","price_mismatch"].filter(a=>n[a]).map(a=>`<span class="fact-flag">${p(a)}</span>`).join("")}</div><div><div class="eyebrow">${p("changed")} / ${p("diff")}</div><p>${(s?.changed??[]).map(a=>`<code>${c(a)}</code>`).join("<br>")||"No changed paths recorded."}</p><p class="muted">diff: ${H(s?.diff)} \xB7 ${s?.base?`base ${j(s.base)}`:"base not recorded"}</p></div><div><div class="eyebrow">${p("out")} / ${p("test_passes")}</div><pre>${c(JSON.stringify(s?.out??[]))}</pre><p>${s?.test_passes?.length?s.test_passes.map(([a,i])=>`#${a}: ${i?"passes":"does not pass"}`).join(" \xB7 "):"No test_passes recorded."}</p></div></div><div class="log-list"><span class="eyebrow">logs</span>${(e.logs??[]).map(a=>`<button class="log-button" data-log="${c(`${t.key}/${e.index}/${a}`)}">${c(a)}</button>`).join("")||'<span class="muted">No logs recorded.</span>'}</div><div class="inline-log" hidden><div class="log-heading"><code></code><button data-close-log aria-label="Close log">\xD7</button></div><pre></pre></div>`}function Te(e){return`<div class="search-context"><code>${c(e.key)}</code><span>${e.s.summary?.kind?p(e.s.summary.kind):"kind not recorded"}</span><span>${e.s.summary?.time?A(e.s.summary.time):"time not recorded; using process modified"}</span><span class="push-right">${e.count} candidates \xB7 rank \u2193, diff \u2191</span></div>${re(e)}<p class="search-explanation ${e.tone}"><i class="dot ${e.tone}"></i>${c(e.reason)}</p><div class="candidate-table"><div class="candidate-head"><span>${p("candidate","index")}</span><span>model / commit</span><span>${p("checks")}</span><span class="numeric">cost</span><span class="numeric">${p("rank")}</span><span class="numeric">${p("diff")}</span><span>logs</span></div><div class="candidate-rows"></div></div><div class="search-foot"><span>${e.v} of ${e.count} candidates ${p("verified")}</span><span>${e.selected==null?"selected not recorded":`selected #${e.selected}`}</span></div><details class="transitions"><summary>Recorded transitions <span>${e.trace.length?"search":"bon process"}</span>${S("chevron",12)}</summary><div class="trace-list">${(e.trace.length?e.trace:e.p.transitions??[]).map(t=>{let[n,...s]=t.split(" ");return`<code>${p(n??"")} ${c(s.join(" "))}</code>`}).join("")||'<span class="muted">No transitions recorded.</span>'}</div></details>`}var D=new WeakMap;function k(e,t,n){e.getAttribute(t)!==n&&e.setAttribute(t,n)}function B(e,t){e.hidden!==t&&(e.hidden=t)}function y(e,t){D.get(e)!==t&&(e.innerHTML=t,D.set(e,t))}function xe(e,t){let n=e.querySelector(".candidate-rows");n.querySelector(".empty")&&t.count&&(n.replaceChildren(),D.delete(n));let s=[...t.s.candidates??[]].sort((d,m)=>(m.facts?.candidate?.rank??-1/0)-(d.facts?.candidate?.rank??-1/0)||(d.facts?.candidate?.diff??1/0)-(m.facts?.candidate?.diff??1/0)||d.index-m.index),a=new Map([...n.children].map(d=>[d.dataset.key,d])),i=new Set,o=n.firstElementChild;for(let d of s){let m=`${t.key}/${d.index}`,r=a.get(m);r||(r=document.createElement("details"),r.dataset.key=m,r.dataset.candidate=m,r.innerHTML='<summary></summary><div class="candidate-details"></div>'),k(r,"class",`candidate ${d.index===t.selected?"is-selected":""}`);let l=r.firstElementChild,u=document.createElement("template");u.innerHTML=Ee(d,t);let h=u.content.firstElementChild.innerHTML;if(y(l,h),r.open!==F.has(m)&&(r.open=F.has(m)),r.open){let g=r.lastElementChild,$=ie(d,t);if(D.get(g)!==$){let O=g.querySelector(".inline-log");y(g,$),O&&g.querySelector(".inline-log").replaceWith(O)}}r!==o&&n.insertBefore(r,o),o=r.nextElementSibling,i.add(r)}for(let d of[...n.children])i.has(d)||d.remove();s.length||y(n,'<p class="empty">No agent processes have returned yet.</p>')}function z(e,t,n=!1){k(e,"class","search-group"),k(e,"data-group-search",t.key),e.firstElementChild||(e.innerHTML='<details><summary></summary><div class="search-body"></div></details><div class="counter-searches"></div>');let s=e.firstElementChild;k(s,"class",`timeline-search ${n?"counter-search":""}`),k(s,"id",`search-${t.key.replace("/","-")}`),k(s,"data-search",t.key),k(s.firstElementChild,"class","timeline-summary");let a=ke(t,n),i=a.indexOf(">")+1;y(s.firstElementChild,a.slice(i,-10)),s.open!==T.has(t.key)&&(s.open=T.has(t.key));let o=s.children[1];if(s.open){let l=Te(t);if(D.get(o)!==l){let u=o.querySelector(".candidate-rows"),h=o.querySelector(".transitions")?.open;y(o,l),u&&o.querySelector(".candidate-rows").replaceWith(u);let g=o.querySelector(".transitions");g&&(g.open=h??!1)}xe(o,t)}let d=e.children[1],m=new Map([...d.children].map(l=>[l.dataset.groupSearch,l])),r=d.firstElementChild;for(let l of t.children){let u=m.get(l.key)??document.createElement("div");z(u,l,!0),u!==r&&d.insertBefore(u,r),r=u.nextElementSibling,m.delete(l.key)}for(let l of m.values())l.remove()}function Me(){if(v==null)return C;let e=f.map?.[v];return e?C.filter(t=>t.entry?t.entry.s.summary?.goal===e.intent||t.entry.landed?.subject===e.intent||t.entry.landed?.subject===`scrub: ${e.intent}`||t.entry.landed?.commit===e.landed?.commit:t.commit?.commit===e.landed?.commit):[]}var Q=new Map;function Se(){let e=document.querySelector("#timeline-lines"),t=Me(),n=t.slice(0,x),s=new Set(n.map(r=>r.key)),a=e.firstElementChild;for(let r of n){let l=Q.get(r.key);if(l||(l=document.createElement("div"),Q.set(r.key,l)),r.entry)z(l,r.entry);else{let u=r.commit;k(l,"class","owner-line"),y(l,`<span class="commit-dot ${u.pushed?"indigo":"blue"}"></span><span class="owner-subject">${c(u.subject??"not recorded")}<span class="owner-label">${u.by_agent?"agent \xB7 trace not recorded here":"owner"}</span></span><code>${j(u.commit)}</code><span class="outcome ${u.pushed?"indigo":"blue"}">${p(u.pushed?"pushed":"landed")}</span><span class="line-time">${A(u.time)}</span>`)}k(l,"data-line-key",r.key),l!==a&&e.insertBefore(l,a),a=l.nextElementSibling}for(let r of[...e.children])s.has(r.dataset.lineKey??"")||r.remove();y(document.querySelector("#timeline-count"),`${t.reduce((r,l)=>r+1+(l.entry?.children.length??0),0)} ${v==null?"searches & commits":"matching lines"}`);let i=document.querySelector("#intent-filter");y(i,v==null?"":`<span><span class="dot orange"></span>${c(f.map?.[v]?.intent??"Intent not recorded")}</span><a href="#" data-clear-filter>Clear filter \xD7</a>`),B(i,v==null);let o=document.querySelector("#load-more");B(o,x>=t.length);let d=`Earlier \xB7 ${Math.max(0,t.length-x)} more`;o.textContent!==d&&(o.textContent=d);let m=document.querySelector("#timeline-empty");B(m,t.length>0),y(m,v==null?"No search has run yet. A code search writes candidates for an intent.":"No searches recorded for this intent. Older searches may not record a goal.")}_.innerHTML='<div class="page"><header class="topbar" id="header"></header><main><p id="connection-note" hidden role="status"></p><section id="now" aria-label="Now"></section><div class="reading-layout"><section id="timeline" aria-labelledby="timeline-title"><div class="section-heading"><h2 id="timeline-title">Timeline</h2><span id="timeline-count"></span></div><div id="intent-filter" hidden></div><div id="timeline-lines"></div><p id="timeline-empty" class="empty" hidden></p><button id="load-more" hidden>Earlier</button></section><aside id="map" aria-label="Map"></aside></div><footer><span class="footer-brand"><strong>bon</strong> view</span><span>The owner writes intents. bon searches.</span></footer></main></div>';var I=[];Object.assign(window,{bonRenderTimes:I});function N(e="state"){let t=performance.now();ae!==Y&&ge(),y(document.querySelector("#header"),$e()),y(document.querySelector("#now"),q?be():'<h1>Now</h1><p class="empty">Reading the repository\u2026</p>'),y(document.querySelector("#map"),we()),Se();let n=document.querySelector("#connection-note");B(n,E),!E&&!n.textContent&&(n.textContent="/api/state is not available. The last state stays here. Reading again every 2 seconds.");let s=`${f.repo?.name??"bon"} \u2014 bon view`;document.title!==s&&(document.title=s);let a=performance.now()-t;I.push({reason:e,ms:a}),I.length>200&&I.shift(),console.info(`[bon view] render ${e}: ${a.toFixed(2)} ms`)}function R(e=!0){if(!q)return;let t=decodeURIComponent(location.hash.slice(1)),n=/^intent\/(\d+)$/.exec(t);v=n&&f.map?.[Number(n[1])]?Number(n[1]):null;let s=b.get(t);if(s){T.add(s.key),s.parent&&T.add(s.parent.key);let a=s.parent??s;x=Math.max(x,C.findIndex(i=>i.key===a.key)+1)}N("address"),e&&(s||n)&&requestAnimationFrame(()=>{(s?document.getElementById(`search-${s.key.replace("/","-")}`):document.querySelector("#timeline"))?.scrollIntoView({block:"start"})})}function J(e){history.pushState(null,"",e?`#${e}`:location.pathname+location.search)}function X(e,t){let n=performance.now();t();let s=performance.now()-n;I.push({reason:e,ms:s}),console.info(`[bon view] render ${e}: ${s.toFixed(2)} ms`)}_.addEventListener("toggle",e=>{let t=e.target;if(t.dataset.search){let n=t.dataset.search;if(t.open===T.has(n))return;t.open?(T.add(n),J(n)):(T.delete(n),location.hash===`#${n}`&&J(v==null?"":`intent/${v}`));let s=b.get(n);s&&t.open&&X("open search",()=>z(t.parentElement,s,!!s.parent))}else if(t.dataset.candidate){let n=t.dataset.candidate;if(t.open){F.add(n);let s=n.split("/"),a=b.get(s.slice(0,2).join("/")),i=a?.s.candidates?.find(o=>String(o.index)===s[2]);a&&i&&X("open candidate",()=>y(t.lastElementChild,ie(i,a)))}else F.delete(n)}},!0);_.addEventListener("click",e=>{let t=e.target.closest('[data-copy],[data-log],[data-close-log],[data-clear-filter],a[href^="#"],#load-more');if(t){if(t.dataset.copy)Le(t.dataset.copy);else if(t.dataset.log)He(t.dataset.log,t);else if(t.hasAttribute("data-close-log"))t.closest(".inline-log").hidden=!0;else if(t.id==="load-more")x+=12,N("scroll");else if(t instanceof HTMLAnchorElement){e.preventDefault();let n=t.getAttribute("href").slice(1);J(n===`intent/${v}`?"":n),x=12,R()}}});var Z=!1,ee=0,G=!1;window.addEventListener("scroll",()=>{Z=window.scrollY>ee,ee=window.scrollY,!(G||!Z)&&(G=!0,requestAnimationFrame(()=>{G=!1;let e=document.querySelector("#load-more");!e.hidden&&e.getBoundingClientRect().top<innerHeight+160&&(x+=12,N("scroll"))}))},{passive:!0});window.addEventListener("popstate",()=>{let e=location.hash.slice(1);for(let t of T)t!==e&&document.querySelector(`[data-search="${t}"]`)?.open&&T.delete(t);R()});window.addEventListener("hashchange",()=>R());function te(e){let t=document.querySelector("#toast");t.textContent=e,t.classList.add("visible"),setTimeout(()=>t.classList.remove("visible"),2e3)}async function Le(e){try{await navigator.clipboard.writeText(e),te("Command copied")}catch{let t=document.createElement("textarea");t.value=e,document.body.append(t),t.select();let n=document.execCommand("copy");t.remove(),te(n?"Command copied":"Select the command to copy")}}var ne=new Map;async function He(e,t){let n=t.closest(".candidate-details")?.querySelector(".inline-log");if(!n)return;n.hidden=!1,n.dataset.path=e,n.querySelector("code").textContent=e;let s=n.querySelector("pre");s.textContent="Reading log\u2026";try{let a=ne.get(e);if(a==null||b.get(e.split("/").slice(0,2).join("/"))?.p.running){let i=await fetch(`/api/log?path=${encodeURIComponent(e)}`);if(!i.ok)throw new Error;a=await i.text(),ne.set(e,a)}n.dataset.path===e&&(s.textContent=a)}catch{n.dataset.path===e&&(s.textContent="This log is not available. The recorded file may no longer be on disk.")}}var L=document.querySelector("#spec-tip"),V=null;function ce(e){let t=e.dataset.word??"",n=pe[t]??t,s=f.spec?.items?.find(r=>r.name.toLowerCase()===n.toLowerCase()),a=f.spec?.fields?.find(r=>r.name===n),i=s?.doc||a?.doc,o=a?(f.spec?.items??[]).filter(r=>r.reads?.includes(a.name)).map(r=>r.name):[],d=a?(f.spec?.items??[]).filter(r=>r.updates?.includes(a.name)).map(r=>r.name):[];y(L,`<div class="tip-heading"><code>${c(s?.name??a?.name??t)}</code><span>${c(s?.kind??(a?"field":""))}</span></div><p>${i?`<span class="doc-slash">///</span> ${c(i)}`:`No /// doc line recorded for \u201C${c(t)}\u201D.`}</p>${a?`<div class="tip-type"><code>${c(a.type)}</code> \xB7 ${c(a.sharding)}</div><dl><dt>read by</dt><dd>${c(o.join(", ")||"none recorded")}</dd><dt>updated by</dt><dd>${c(d.join(", ")||"none recorded")}</dd></dl>`:`<dl><dt>reads</dt><dd>${c(s?.reads?.join(", ")||"none recorded")}</dd><dt>updates</dt><dd>${c(s?.updates?.join(", ")||"none recorded")}</dd></dl>`}`),V=e,L.hidden=!1;let m=e.getBoundingClientRect();L.style.left=`${Math.max(12,Math.min(innerWidth-L.offsetWidth-12,m.left))}px`,L.style.top=`${Math.min(innerHeight-L.offsetHeight-12,m.bottom+9)}px`}function P(){L.hidden=!0,V=null}_.addEventListener("pointerover",e=>{let t=e.target.closest("[data-word]");t&&ce(t)});_.addEventListener("pointerout",e=>{(!(e.relatedTarget instanceof Node)||!V?.contains(e.relatedTarget))&&P()});_.addEventListener("focusin",e=>{let t=e.target.closest("[data-word]");t&&ce(t)});_.addEventListener("focusout",P);window.addEventListener("scroll",P,{passive:!0});window.addEventListener("keydown",e=>{e.key==="Escape"&&P()});async function de(){if(!W){W=!0;try{let e=await fetch("/api/state",{cache:"no-store",signal:AbortSignal.timeout(8e3)});if(!e.ok)throw new Error;let t=await e.json();if(!t||typeof t!="object"||Array.isArray(t))throw new Error;let n=JSON.stringify({...t,repo:{...t.repo,now:Math.floor((t.repo?.now??Date.now()/1e3)/60)}}),s=!q,a=n!==K;f=t,q=!0;let i=!E;E=!0,a&&(Y++,K=n),N(a?"state":i?"reconnected":"unchanged"),s&&location.hash!=="#page"&&location.hash!==""&&R()}catch{(E||!q)&&(E=!1,N("connection"))}finally{W=!1}}}N("initial");de();setInterval(()=>void de(),2e3);
+                                                                                     
+                                                                                             
+                     
+                   
+                    
+                    
+              
+                        
+                      
+                         
+             
+             
+                      
+                         
+             
+ 
+                     
+                       
+                  
+             
+                         
+                       
+                                   
+                         
+                             
+                                 
+                         
+                                             
+      
+                    
+ 
+                   
+                  
+                  
+                  
+                             
+                      
+                                
+                     
+                  
+                          
+                                                
+ 
+                  
+                   
+                                 
+                             
+                             
+                             
+ 
+                   
+                
+                      
+                      
+                           
+                        
+ 
+                    
+                 
+                 
+                 
+                     
+                       
+ 
+                     
+                 
+                  
+                      
+                 
+ 
+                 
+                   
+                    
+                  
+                     
+                   
+                     
+                       
+ 
+                   
+                   
+                  
+                 
+ 
+                 
+            
+                      
+                      
+                             
+                        
+                       
+                         
+                     
+      
+                      
+            
+                      
+                             
+                           
+             
+                          
+                    
+            
+                      
+                        
+                         
+             
+                
+                            
+                          
+                                
+          
+                 
+                                
+          
+                      
+                               
+             
+ 
+const app = document.querySelector                ('#app') ;
+let data        = {};
+let ready = false;
+let connection = true;
+let pending = false;
+let lastPayload = '';
+let filter                = null;
+let visibleCount = 12;
+const opened = new Set        ();
+const openCandidates = new Set        ();
+const e = (v         )         => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] ));
+const nf = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
+const n = (v         )         => v == null ? '—' : nf.format(v);
+const money = (v                )         => v == null || !Number.isFinite(v) ? '—' : '$' + v.toFixed(v !== 0 && v < .01 ? 4 : 2);
+const short = (v         )         => v ? v.slice(0, 8) : '—';
+const intentArg = (value        )         => '"' + value.replace(/["\\$`]/g, '\\$&') + '"';
+const verifiedCandidates = new WeakSet           ();
+const decisions = new WeakMap                                                                        ();
+const verified = (c           )          => verifiedCandidates.has(c);
+// This program supplies bytes and renders answers; the compiled kernel decides.
+const gates = WebAssembly.instantiateStreaming(fetch('/gates.wasm'));
+async function derive(state       )                {
+    const { instance } = await gates;
+    const exports = instance.exports;
+    const memory = exports.memory                      ;
+    const call = (name        , ...args          )         => (exports[name]                                 )(...args);
+    for (const p of state.processes ?? []) {
+        const snapshots = new Map                     ();
+        for (const s of p.searches ?? []) {
+            if (!s.kernel) continue;
+            const response = await fetch(`/api/words?path=${p.pid}%2F${s.search}`, { cache: 'no-store' });
+            if (!response.ok) throw new Error('Kernel snapshot unavailable');
+            const bytes = await response.arrayBuffer();
+            if (bytes.byteLength % 8) throw new Error('Invalid kernel snapshot');
+            snapshots.set(s.search, bytes);
+            const len = bytes.byteLength / 8;
+            const ptr = call('alloc', len);
+            try {
+                new Uint8Array(memory.buffer, ptr, bytes.byteLength).set(new Uint8Array(bytes));
+                const selected = call('selected', ptr, len);
+                if (selected < -1) {
+                    decisions.set(s, { selected: null, error: 'Kernel rejected the recorded search.' });
+                    continue;
+                }
+                const decision                                                 = { selected: selected < 0 ? null : selected };
+                if ('counterexample' in s.kernel.kind) {
+                    const target = snapshots.get(s.kernel.kind.counterexample.goal.search);
+                    if (target) {
+                        const tlen = target.byteLength / 8;
+                        const tptr = call('alloc', tlen);
+                        try {
+                            new Uint8Array(memory.buffer, tptr, target.byteLength).set(new Uint8Array(target));
+                            const cleared = call('cleared', ptr, len, tptr, tlen);
+                            if (cleared < 0) throw new Error('Invalid counterexample search');
+                            decision.cleared = cleared === 1;
+                        } finally { call('dealloc', tptr, tlen); }
+                    }
+                }
+                decisions.set(s, decision);
+                for (const c of s.candidates ?? []) {
+                    if (c.verified === true) verifiedCandidates.add(c);
+                }
+            } finally { call('dealloc', ptr, len); }
+        }
+    }
+}
+const keyOf = (p         , s        )         => `${p.pid}/${s.search}`;
+function relative(time         )         {
+    if (!time) return 'not recorded';
+    const diff = Math.max(0, (data.repo?.now ?? Date.now() / 1000) - time);
+    return diff < 60 ? 'just now' : diff < 3600 ? `${Math.floor(diff / 60)}m ago` : diff < 86400 ? `${Math.floor(diff / 3600)}h ago` : `${Math.floor(diff / 86400)}d ago`;
+}
+function timestamp(time         )         {
+    return `<time ${time ? `datetime="${new Date(time * 1000).toISOString()}" title="${e(new Date(time * 1000).toLocaleString())}"` : ''}>${relative(time)}</time>`;
+}
+function icon(name        , size = 16)         {
+    const paths                         = {
+        branch: '<circle cx="6" cy="4" r="2"/><circle cx="6" cy="20" r="2"/><circle cx="18" cy="5" r="2"/><path d="M6 6v12m0-3c0-7 12-2 12-8"/>',
+        search: '<circle cx="6" cy="5" r="2"/><circle cx="18" cy="12" r="2"/><circle cx="6" cy="19" r="2"/><path d="M6 7v10m2-12h3a7 7 0 0 1 7 5M8 19h3a7 7 0 0 0 7-5"/>',
+        arrow: '<path d="M5 12h14m-5-5 5 5-5 5"/>',
+        chevron: '<path d="m9 5 7 7-7 7"/>',
+        copy: '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 8V3H3v13h5"/>'
+    };
+    return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] ?? paths.search}</svg>`;
+}
+const aliases                         = { granted: 'grant', returned: 'wait', 'agent processes returned': 'wait', retained: 'retain', landed: 'fast_forward', built: 'map', open: 'map', broken: 'broken', candidate: 'Candidate', candidates: 'Candidate', intent: 'Intent', selected: 'selected', verified: 'verified', agreed: 'agreed', checks_pass: 'verified' };
+function word(name        , label = name)         {
+    return `<span class="word" tabindex="0" data-word="${e(name)}" aria-describedby="spec-tip">${e(label)}</span>`;
+}
+function pill(label        , tone      )         { return `<span class="pill ${tone}"><i></i>${word(label)}</span>`; }
+function command(value        )         {
+    return `<button class="command" data-copy="${e(value)}" title="Copy command"><code>${e(value)}</code>${icon('copy', 14)}<span class="sr-only">Copy command</span></button>`;
+}
+                 
+                                                                                           
+                                                                               
+                                                              
+ 
+                                                                           
+let entries = new Map               ();
+let lines         = [];
+let totals = { count: 0, verified: 0, cost: 0 };
+let revision = 0;
+let projected = -1;
+function project()       {
+    entries = new Map();
+    totals = { count: 0, verified: 0, cost: 0 };
+    const commitByHash = new Map((data.trunk ?? []).map(t => [t.commit, t]));
+    const matched = new Set        ();
+    for (const p of data.processes ?? []) {
+        const segments             = [];
+        for (const t of p.transitions ?? []) {
+            if (/^grant(?: |$)/.test(t)) segments.push([]);
+            segments.at(-1)?.push(t);
+        }
+        for (const [i, s] of (p.searches ?? []).entries()) {
+            const cs = s.candidates ?? [];
+            const trace = segments.length === p.searches?.length ? segments[i] ?? [] : [];
+            const v = cs.filter(verified).length;
+            const generation = s.summary?.generation_dollars ?? (cs.some(c => c.facts?.cost_microdollars != null) ? cs.reduce((a, c) => a + (c.facts?.cost_microdollars ?? 0) / 1e6, 0) : undefined);
+            const cost = generation == null && s.summary?.time_dollars == null ? undefined : (generation ?? 0) + (s.summary?.time_dollars ?? 0);
+            const exact = (data.trunk ?? []).find(t => t.trace?.replace(/^\.bon\/traces\//, '').startsWith(`${p.pid}/${s.search}/`));
+            // The commit is also useful when older traces have no selected index.
+            const landed = exact ?? cs.map(c => commitByHash.get(c.facts?.candidate?.commit ?? '')).find(Boolean);
+            if (landed) matched.add(landed.commit);
+            const entry        = { key: keyOf(p, s), p, s, trace, children: [], landed, selected: decisions.get(s)?.selected ?? undefined, count: cs.length, v, cost, outcome: 'returned', tone: 'neutral', reason: 'Agent processes returned. No further transition recorded.', time: s.summary?.time ?? p.modified ?? 0 };
+            entries.set(entry.key, entry);
+            totals.count += cs.length; totals.verified += v; totals.cost += cost ?? 0;
+        }
+    }
+    for (const entry of entries.values()) {
+        if (entry.s.summary?.kind === 'counterexample') {
+            const target = /^search (\d+) candidate/.exec(entry.s.summary.goal ?? '')?.[1];
+            const parent = entries.get(`${entry.p.pid}/${target}`);
+            if (parent && parent !== entry) { parent.children.push(entry); entry.parent = parent; }
+        }
+    }
+    for (const entry of entries.values()) resolve(entry);
+    lines = [...entries.values()].filter(en => !en.parent).map(en => ({ key: en.key, entry: en, time: Math.max(en.time, ...en.children.map(c => c.time)) }));
+    for (const commit of data.trunk ?? []) {
+        if (!commit.by_agent || !matched.has(commit.commit)) lines.push({ key: `commit-${commit.commit}`, commit, time: commit.time ?? 0 });
+    }
+    lines.sort((a, b) => b.time - a.time || (b.entry?.s.search ?? -1) - (a.entry?.s.search ?? -1));
+    projected = revision;
+}
+function resolve(en       )       {
+    const { s, p, trace } = en;
+    const terminal = trace.find(t => /^(blocked|broken)/.test(t));
+    if (terminal) {
+        en.outcome = terminal.startsWith('broken') ? 'broken' : 'blocked';
+        en.tone = en.outcome === 'broken' ? 'red' : 'yellow';
+        en.reason = terminal.replace(/^(blocked|broken):?\s*/, '') + '. ' + (en.outcome === 'broken' ? 'bon starts a code search carrying the test.' : 'bon reruns wider, as the width list allows.');
+    } else if (s.summary?.kind === 'counterexample') {
+        const cleared = decisions.get(s)?.cleared;
+        const split = cleared === false;
+        const complete = cleared != null;
+        en.outcome = complete ? split ? 'split' : 'cleared' : p.running ? 'running' : 'returned';
+        en.tone = split ? 'red' : complete ? 'green' : 'orange';
+        en.reason = complete ? split ? 'A verified counterexample test splits the agreed candidates.' : 'No verified counterexample test splits the agreed candidates.' : `${en.count} agent processes returned; ${en.v} candidates verified.`;
+    } else if (trace.some(t => /^retain/.test(t)) || en.landed?.subject?.startsWith('scrub:')) {
+        en.outcome = 'retained'; en.tone = 'violet'; en.reason = 'The agreed scrub test passes on trunk and is retained.';
+    } else if (en.landed || trace.some(t => /^fast_forward/.test(t)) || en.children.some(c => c.trace.some(t => /^fast_forward/.test(t)))) {
+        en.outcome = 'fast_forward'; en.tone = 'indigo'; en.reason = 'Trunk fast-forwarded to the selected candidate.';
+    } else if (p.running && s === p.searches?.at(-1)) {
+        en.outcome = 'running'; en.tone = 'orange'; en.reason = `${en.count} agent processes returned; ${en.v} candidates verified.`;
+    }
+    const decision = decisions.get(s);
+    if (decision?.error) {
+        en.tone = 'red'; en.reason = decision.error;
+    } else if (decision && decision.selected !== (s.selected ?? null)) {
+        en.tone = 'red'; en.reason = `Kernel selected ${decision.selected ?? 'none'}; trace selected ${s.selected ?? 'none'}.`;
+    }
+
+}
+                                                                           
+function stages(en       )          {
+    const { s } = en;
+    const cs = s.candidates ?? [];
+    const v = cs.filter(verified);
+    const decision = decisions.get(s);
+    const agreed = decision?.selected != null;
+    const differs = decision != null && !agreed && v.length >= 2;
+    const ce = en.children.at(-1);
+    const counter = s.summary?.kind === 'counterexample';
+    const ceOutcome = counter ? en.outcome : ce?.outcome ?? (en.outcome === 'fast_forward' ? 'cleared' : undefined);
+    const end = ['fast_forward', 'retained', 'blocked', 'broken'].includes(en.outcome);
+    const width = Math.max(s.summary?.agent_processes ?? 0, en.count);
+    return [
+        { label: 'granted', value: width ? n(width) : '—', tone: 'orange', done: width > 0 || en.trace.some(t => t.startsWith('grant')) },
+        { label: 'agent processes returned', value: width ? `${en.count} / ${width}` : n(en.count), tone: en.count >= width && width > 0 ? 'yellow' : 'orange', done: en.count > 0 },
+        { label: 'verified', value: n(en.v), tone: en.v ? 'green' : 'red', done: en.count > 0 },
+        { label: differs ? 'not agreed' : 'agreed', value: agreed ? n(en.v) : differs ? 'different output' : en.v < 2 && en.count ? 'fewer than 2' : 'not recorded', tone: agreed ? 'green' : differs ? 'red' : 'yellow', done: agreed || differs },
+        { label: 'selected', value: en.selected == null ? '—' : `#${en.selected}`, tone: 'blue', done: en.selected != null },
+        { label: 'counterexample', value: ceOutcome ?? '—', tone: ceOutcome === 'split' ? 'red' : ceOutcome === 'cleared' ? 'green' : 'yellow', done: ceOutcome != null },
+        { label: en.outcome === 'retained' ? 'retain' : end ? en.outcome : 'fast_forward / retain / blocked', value: end ? '✓' : '—', tone: end ? en.tone : 'neutral', done: end }
+    ];
+}
+function diagram(en       )         {
+    return `<div class="state-path" aria-label="Search path">${stages(en).map((a, i) => `${i ? `<span class="state-arrow">${icon('arrow', 16)}</span>` : ''}<div class="state-node ${a.tone} ${a.done ? 'filled' : 'waiting'}"><span class="state-value">${e(a.value)}</span><span class="state-label">${word(a.label)}</span></div>`).join('')}</div>`;
+}
+function dots(en       )         {
+    const ss = stages(en);
+    return `<span class="path-dots" aria-label="${e(ss.map(a => a.label + ': ' + a.value).join(' → '))}">${ss.map(a => `<i class="${a.tone} ${a.done ? 'filled' : ''}" title="${e(a.label + ': ' + a.value)}"></i>`).join('')}</span>`;
+}
+function headerHTML()         {
+    return `<div class="repository">${icon('branch')}<strong>${e(data.repo?.name ?? 'repository')}</strong><span class="head">${word('trunk', data.repo?.trunk ?? 'main')} <code>${e(short(data.repo?.head))}</code></span>${pill(data.repo?.pushed ? 'pushed' : 'not pushed', data.repo?.pushed ? 'indigo' : 'blue')}</div><div class="header-cost">${totals.verified ? money(totals.cost / totals.verified) : '—'} per ${word('verified', 'verified candidate')} <span>·</span> ${totals.count ? Math.round(totals.verified / totals.count * 100) : 0}% of candidates verified</div><span class="live ${connection ? '' : 'offline'}"><i class="dot ${connection ? 'violet' : 'red'}"></i>${connection ? 'live' : 'waiting'}</span>`;
+}
+function nowHTML()         {
+    const running = (data.processes ?? []).filter(p => p.running);
+    const activeP = running[0];
+    const active = activeP ? entries.get(`${activeP.pid}/${activeP.searches?.at(-1)?.search}`) : undefined;
+    if (active) {
+        const parent = active.parent ?? active;
+        const completed = active.outcome !== 'running' && active.s.summary?.seconds != null;
+        return `<div class="now-heading"><h1>Now</h1><span class="running orange"><i class="dot orange"></i>${running.length === 1 ? 'bon process running' : `${running.length} bon processes running`}</span></div><div class="now-card"><div class="now-title"><span class="search-symbol orange">${icon('search', 21)}</span><div><div class="eyebrow">${word(parent.s.summary?.kind ?? 'search')} <span> / ${e(parent.key)}</span></div><h2>${e(parent.s.summary?.goal ?? 'Goal not recorded')}</h2></div><a class="text-link" href="#${e(parent.key)}">Open search ${icon('arrow', 15)}</a></div>${diagram(parent)}<p class="now-note">${completed ? 'Last recorded path: ' : ''}${e(active.reason)}${completed ? ' The bon process is still running.' : ''}</p></div>`;
+    }
+    const latest = lines[0];
+    const next = data.map?.find(i => i.status === 'open');
+    let sentence = 'No search has run yet.';
+    if (latest?.commit) sentence = `The owner committed “${latest.commit.subject ?? short(latest.commit.commit)}” to trunk.`;
+    else if (latest?.entry) {
+        const en = latest.entry;
+        sentence = en.outcome === 'fast_forward' ? `Trunk fast-forwarded${en.s.summary?.goal ? `: ${en.s.summary.goal}` : '. Goal not recorded.'}` : en.outcome === 'retained' ? `The last scrub was retained${en.s.summary?.goal ? `: ${en.s.summary.goal}` : '. Goal not recorded.'}` : `The last search ${en.outcome}. ${en.reason}`;
+    }
+    return `<div class="now-heading"><h1>Now</h1><span class="muted">No searches running</span></div><div class="now-calm"><p>${e(sentence)} <span class="muted">${latest ? relative(latest.time) : ''}</span></p>${next ? `<div class="next-command"><span class="eyebrow">NEXT OPEN INTENT</span>${command(`bon code ${intentArg(next.intent)}`)}</div>` : '<p class="settled">No open intents on the map.</p>'}</div>`;
+}
+function mapHTML()         {
+    const intents = data.map ?? [];
+    return `<div class="section-heading"><h2>${word('map', 'Map')}</h2><span>${intents.length} intents</span></div><div class="map-list">${intents.map((item, index) => {
+        const scrubbed = item.scrub?.passes && (item.scrub.time ?? 0) >= (item.landed?.time ?? 0);
+        const tone       = item.status === 'broken' ? 'red' : item.status === 'open' ? 'orange' : scrubbed ? 'violet' : 'blue';
+        return `<a id="intent-${index}" class="map-intent ${filter === index ? 'active' : ''}" href="#intent/${index}" aria-label="Filter timeline to ${e(item.intent)}" ${filter === index ? 'aria-current="true"' : ''}><div class="map-intent-title"><span class="dot ${tone}"></span><span>${e(item.intent)}</span></div><div class="map-meta"><span class="status-text ${tone}">${word(item.status ?? 'open')}</span><span>${word('scrub')} ${item.scrub ? timestamp(item.scrub.time) : '—'}</span><span>${word('landed')} ${item.landed ? timestamp(item.landed.time) : '—'}</span></div></a>`;
+    }).join('') || '<p class="empty">The map holds intents, one per line. None are recorded yet.</p>'}</div><p class="map-note">An intent shows its searches here.<br><span class="key-hint">Hover or focus a word for its <code>///</code> line.</span></p>`;
+}
+function searchSummary(en       , child = false)         {
+    const { s } = en;
+    return `<summary class="timeline-summary"><span class="line-chevron">${icon('chevron', 12)}</span><span class="line-goal">${child ? '<span class="counter-label">counterexample</span> ' : ''}${e(s.summary?.goal ?? 'not recorded')}<span class="line-record"><span class="line-kind">${e(s.summary?.kind ?? 'kind not recorded')}</span>${en.landed ? `<span class="landed-commit" title="${e(en.landed.commit)}">${word('trunk')} <code>${short(en.landed.commit)}</code></span>` : ''}</span></span>${dots(en)}<span class="outcome ${en.tone}">${word(en.outcome)}</span><span class="line-cost">${money(en.cost)}</span><span class="line-time">${timestamp(s.summary?.time ?? en.p.modified)}</span></summary>`;
+}
+function candidateSummary(c           , en       )         {
+    const f = c.facts ?? {}; const v = f.candidate;
+    return `<summary><span class="candidate-index">#${c.index}${en.selected === c.index ? '<span class="selected-mark" title="selected">◆</span>' : ''}</span><span class="candidate-model"><strong>${e(f.model ?? 'not recorded')}</strong><small>${e(f.harness ?? 'not recorded')} · <code>${short(v?.commit)}</code></small></span><span class="checks ${verified(c) ? 'green' : 'orange'}">${word(verified(c) ? 'verified' : v?.checks_pass === false ? 'not verified' : 'checks', verified(c) ? 'verified' : v?.checks_pass === false ? 'not verified' : 'not recorded')}</span><span class="numeric">${money(f.cost_microdollars == null ? undefined : f.cost_microdollars / 1e6)}</span><span class="numeric">${n(v?.rank)}</span><span class="numeric">${n(v?.diff)}</span><span class="candidate-log-count">${c.logs?.length ?? 0} logs ${icon('chevron', 12)}</span></summary>`;
+}
+function candidateContent(c           , en       )         {
+    const f = c.facts ?? {}; const v = f.candidate;
+    return `<div class="candidate-facts"><div><div class="eyebrow">${word('checks')}</div><p>${verified(c) ? 'Every check passes.' : v?.checks_pass === false ? 'The candidate is not verified. The logs record the checks.' : 'No checks recorded yet.'}</p>${['killed', 'over_limit', 'price_mismatch'].filter(k => f[k                  ]).map(k => `<span class="fact-flag">${word(k)}</span>`).join('')}</div><div><div class="eyebrow">${word('changed')} / ${word('diff')}</div><p>${(v?.changed ?? []).map(path => `<code>${e(path)}</code>`).join('<br>') || 'No changed paths recorded.'}</p><p class="muted">diff: ${n(v?.diff)} · ${v?.base ? `base ${short(v.base)}` : 'base not recorded'}</p></div><div><div class="eyebrow">${word('out')} / ${word('test_passes')}</div><pre>${e(JSON.stringify(v?.out ?? []))}</pre><p>${v?.test_passes?.length ? v.test_passes.map(([i, pass]) => `#${i}: ${pass ? 'passes' : 'does not pass'}`).join(' · ') : 'No test_passes recorded.'}</p></div></div><div class="log-list"><span class="eyebrow">logs</span>${(c.logs ?? []).map(file => `<button class="log-button" data-log="${e(`${en.key}/${c.index}/${file}`)}">${e(file)}</button>`).join('') || '<span class="muted">No logs recorded.</span>'}</div><div class="inline-log" hidden><div class="log-heading"><code></code><button data-close-log aria-label="Close log">×</button></div><pre></pre></div>`;
+}
+function searchBodyHTML(en       )         {
+    return `<div class="search-context"><code>${e(en.key)}</code><span>${en.s.summary?.kind ? word(en.s.summary.kind) : 'kind not recorded'}</span><span>${en.s.summary?.time ? timestamp(en.s.summary.time) : 'time not recorded; using process modified'}</span><span class="push-right">${en.count} candidates · rank ↓, diff ↑</span></div>${diagram(en)}<p class="search-explanation ${en.tone}"><i class="dot ${en.tone}"></i>${e(en.reason)}</p><div class="candidate-table"><div class="candidate-head"><span>${word('candidate', 'index')}</span><span>model / commit</span><span>${word('checks')}</span><span class="numeric">cost</span><span class="numeric">${word('rank')}</span><span class="numeric">${word('diff')}</span><span>logs</span></div><div class="candidate-rows"></div></div><div class="search-foot"><span>${en.v} of ${en.count} candidates ${word('verified')}</span><span>${en.selected == null ? 'selected not recorded' : `selected #${en.selected}`}</span></div><details class="transitions"><summary>Recorded transitions <span>${en.trace.length ? 'search' : 'bon process'}</span>${icon('chevron', 12)}</summary><div class="trace-list">${(en.trace.length ? en.trace : en.p.transitions ?? []).map(t => { const [name, ...rest] = t.split(' '); return `<code>${word(name ?? '')} ${e(rest.join(' '))}</code>`; }).join('') || '<span class="muted">No transitions recorded.</span>'}</div></details>`;
+}
+// Each stable island compares its markup before touching the DOM. Search and
+// candidate bodies are separate islands, so polling cannot close or replace them.
+const markup = new WeakMap                 ();
+function attr(el         , name        , value        )       { if (el.getAttribute(name) !== value) el.setAttribute(name, value); }
+function hidden(el             , value         )       { if (el.hidden !== value) el.hidden = value; }
+function put(el         , html        )       { if (markup.get(el) !== html) { el.innerHTML = html; markup.set(el, html); } }
+function syncCandidates(body         , en       )       {
+    const list = body.querySelector('.candidate-rows') ;
+    if (list.querySelector('.empty') && en.count) { list.replaceChildren(); markup.delete(list); }
+    const candidates = [...(en.s.candidates ?? [])].sort((a, b) => (b.facts?.candidate?.rank ?? -Infinity) - (a.facts?.candidate?.rank ?? -Infinity) || (a.facts?.candidate?.diff ?? Infinity) - (b.facts?.candidate?.diff ?? Infinity) || a.index - b.index);
+    const existing = new Map([...list.children].map(el => [(el               ).dataset.key, el]));
+    const keep = new Set         ();
+    let cursor = list.firstElementChild;
+    for (const c of candidates) {
+        const key = `${en.key}/${c.index}`;
+        let row = existing.get(key)                                  ;
+        if (!row) { row = document.createElement('details'); row.dataset.key = key; row.dataset.candidate = key; row.innerHTML = '<summary></summary><div class="candidate-details"></div>'; }
+        attr(row, 'class', `candidate ${c.index === en.selected ? 'is-selected' : ''}`);
+        const summary = row.firstElementChild ;
+        const template = document.createElement('template'); template.innerHTML = candidateSummary(c, en);
+        const html = template.content.firstElementChild .innerHTML;
+        put(summary, html);
+        if (row.open !== openCandidates.has(key)) row.open = openCandidates.has(key);
+        if (row.open) {
+            const detail = row.lastElementChild ;
+            const content = candidateContent(c, en);
+            if (markup.get(detail) !== content) {
+                const log = detail.querySelector('.inline-log'); put(detail, content);
+                if (log) detail.querySelector('.inline-log') .replaceWith(log);
+            }
+        }
+        if (row !== cursor) list.insertBefore(row, cursor);
+        cursor = row.nextElementSibling; keep.add(row);
+    }
+    for (const el of [...list.children]) if (!keep.has(el)) el.remove();
+    if (!candidates.length) put(list, '<p class="empty">No agent processes have returned yet.</p>');
+}
+function syncSearch(container             , en       , child = false)       {
+    attr(container, 'class', 'search-group');
+    attr(container, 'data-group-search', en.key);
+    if (!container.firstElementChild) container.innerHTML = '<details><summary></summary><div class="search-body"></div></details><div class="counter-searches"></div>';
+    const row = container.firstElementChild                      ;
+    attr(row, 'class', `timeline-search ${child ? 'counter-search' : ''}`);
+    attr(row, 'id', `search-${en.key.replace('/', '-')}`);
+    attr(row, 'data-search', en.key);
+    attr(row.firstElementChild , 'class', 'timeline-summary');
+    const html = searchSummary(en, child);
+    const start = html.indexOf('>') + 1;
+    put(row.firstElementChild , html.slice(start, -10));
+    if (row.open !== opened.has(en.key)) row.open = opened.has(en.key);
+    const body = row.children[1] ;
+    if (row.open) {
+        // Preserve candidate islands on updates, including a fetched inline log.
+        const shell = searchBodyHTML(en);
+        if (markup.get(body) !== shell) {
+            const oldList = body.querySelector('.candidate-rows');
+            const oldTransitions = body.querySelector                    ('.transitions')?.open;
+            put(body, shell);
+            if (oldList) body.querySelector('.candidate-rows') .replaceWith(oldList);
+            const trace = body.querySelector                    ('.transitions'); if (trace) trace.open = oldTransitions ?? false;
+        }
+        syncCandidates(body, en);
+    }
+    // Counterexample lines belong to the search they tested, never a second view.
+    const nested = container.children[1] ;
+    const old = new Map([...nested.children].map(c => [(c               ).dataset.groupSearch, c]));
+    let cursor = nested.firstElementChild;
+    for (const c of en.children) {
+        const el = old.get(c.key)                            ?? document.createElement('div');
+        syncSearch(el, c, true);
+        if (el !== cursor) nested.insertBefore(el, cursor);
+        cursor = el.nextElementSibling; old.delete(c.key);
+    }
+    for (const el of old.values()) el.remove();
+}
+function filteredLines()         {
+    if (filter == null) return lines;
+    const intent = data.map?.[filter];
+    if (!intent) return [];
+    return lines.filter(l => l.entry ? l.entry.s.summary?.goal === intent.intent || l.entry.landed?.subject === intent.intent || l.entry.landed?.subject === `scrub: ${intent.intent}` || l.entry.landed?.commit === intent.landed?.commit : l.commit?.commit === intent.landed?.commit);
+}
+const rowNodes = new Map                     ();
+function syncTimeline()       {
+    const list = document.querySelector('#timeline-lines') ;
+    const all = filteredLines();
+    const visible = all.slice(0, visibleCount);
+    const wanted = new Set(visible.map(l => l.key));
+    let cursor = list.firstElementChild;
+    for (const line of visible) {
+        let row = rowNodes.get(line.key);
+        if (!row) { row = document.createElement('div'); rowNodes.set(line.key, row); }
+        if (line.entry) syncSearch(row, line.entry);
+        else {
+            const t = line.commit ;
+            attr(row, 'class', 'owner-line');
+            put(row, `<span class="commit-dot ${t.pushed ? 'indigo' : 'blue'}"></span><span class="owner-subject">${e(t.subject ?? 'not recorded')}<span class="owner-label">${t.by_agent ? 'agent · trace not recorded here' : 'owner'}</span></span><code>${short(t.commit)}</code><span class="outcome ${t.pushed ? 'indigo' : 'blue'}">${word(t.pushed ? 'pushed' : 'landed')}</span><span class="line-time">${timestamp(t.time)}</span>`);
+        }
+        attr(row, 'data-line-key', line.key);
+        if (row !== cursor) list.insertBefore(row, cursor);
+        cursor = row.nextElementSibling;
+    }
+    for (const row of [...list.children]) if (!wanted.has((row               ).dataset.lineKey ?? '')) row.remove();
+    put(document.querySelector('#timeline-count') , `${all.reduce((count, l) => count + 1 + (l.entry?.children.length ?? 0), 0)} ${filter == null ? 'searches & commits' : 'matching lines'}`);
+    const filterEl = document.querySelector('#intent-filter') ;
+    put(filterEl, filter == null ? '' : `<span><span class="dot orange"></span>${e(data.map?.[filter]?.intent ?? 'Intent not recorded')}</span><a href="#" data-clear-filter>Clear filter ×</a>`);
+    hidden(filterEl               , filter == null);
+    const more = document.querySelector                   ('#load-more') ;
+    hidden(more, visibleCount >= all.length);
+    const moreLabel = `Earlier · ${Math.max(0, all.length - visibleCount)} more`;
+    if (more.textContent !== moreLabel) more.textContent = moreLabel;
+    const empty = document.querySelector             ('#timeline-empty') ;
+    hidden(empty, all.length > 0);
+    put(empty, filter == null ? 'No search has run yet. A code search writes candidates for an intent.' : 'No searches recorded for this intent. Older searches may not record a goal.');
+}
+app.innerHTML = `<div class="page"><header class="topbar" id="header"></header><main><p id="connection-note" hidden role="status"></p><section id="now" aria-label="Now"></section><div class="reading-layout"><section id="timeline" aria-labelledby="timeline-title"><div class="section-heading"><h2 id="timeline-title">Timeline</h2><span id="timeline-count"></span></div><div id="intent-filter" hidden></div><div id="timeline-lines"></div><p id="timeline-empty" class="empty" hidden></p><button id="load-more" hidden>Earlier</button></section><aside id="map" aria-label="Map"></aside></div><footer><span class="footer-brand"><strong>bon</strong> view</span><span>The owner writes intents. bon searches.</span></footer></main></div>`;
+const renderTimes                                   = [];
+Object.assign(window, { bonRenderTimes: renderTimes });
+function render(reason = 'state')       {
+    const start = performance.now();
+    if (projected !== revision) project();
+    put(document.querySelector('#header') , headerHTML());
+    put(document.querySelector('#now') , ready ? nowHTML() : '<h1>Now</h1><p class="empty">Reading the repository…</p>');
+    put(document.querySelector('#map') , mapHTML());
+    syncTimeline();
+    const note = document.querySelector             ('#connection-note') ;
+    hidden(note, connection);
+    if (!connection && !note.textContent) note.textContent = '/api/state is not available. The last state stays here. Reading again every 2 seconds.';
+    const title = `${data.repo?.name ?? 'bon'} — bon view`;
+    if (document.title !== title) document.title = title;
+    const ms = performance.now() - start;
+    renderTimes.push({ reason, ms });
+    if (renderTimes.length > 200) renderTimes.shift();
+    console.info(`[bon view] render ${reason}: ${ms.toFixed(2)} ms`);
+}
+function address(scroll = true)       {
+    if (!ready) return;
+    const hash = decodeURIComponent(location.hash.slice(1));
+    const matchIntent = /^intent\/(\d+)$/.exec(hash);
+    filter = matchIntent && data.map?.[Number(matchIntent[1])] ? Number(matchIntent[1]) : null;
+    const search = entries.get(hash);
+    if (search) {
+        opened.add(search.key); if (search.parent) opened.add(search.parent.key);
+        const root = search.parent ?? search;
+        visibleCount = Math.max(visibleCount, lines.findIndex(l => l.key === root.key) + 1);
+    }
+    render('address');
+    if (scroll && (search || matchIntent)) requestAnimationFrame(() => {
+        const el = search ? document.getElementById(`search-${search.key.replace('/', '-')}`) : document.querySelector('#timeline');
+        el?.scrollIntoView({ block: 'start' });
+    });
+}
+function pushHash(hash        )       { history.pushState(null, '', hash ? `#${hash}` : location.pathname + location.search); }
+function measureAction(reason        , action            )       {
+    const start = performance.now(); action();
+    const ms = performance.now() - start; renderTimes.push({ reason, ms });
+    console.info(`[bon view] render ${reason}: ${ms.toFixed(2)} ms`);
+}
+app.addEventListener('toggle', event => {
+    const el = event.target                      ;
+    if (el.dataset.search) {
+        const key = el.dataset.search;
+        if (el.open === opened.has(key)) return;
+        if (el.open) { opened.add(key); pushHash(key); }
+        else { opened.delete(key); if (location.hash === `#${key}`) pushHash(filter == null ? '' : `intent/${filter}`); }
+        const en = entries.get(key);
+        if (en && el.open) measureAction('open search', () => syncSearch(el.parentElement , en, !!en.parent));
+    } else if (el.dataset.candidate) {
+        const key = el.dataset.candidate;
+        if (el.open) {
+            openCandidates.add(key);
+            const parts = key.split('/'); const en = entries.get(parts.slice(0, 2).join('/'));
+            const c = en?.s.candidates?.find(c => String(c.index) === parts[2]);
+            if (en && c) measureAction('open candidate', () => put(el.lastElementChild , candidateContent(c, en)));
+        } else openCandidates.delete(key);
+    }
+}, true);
+app.addEventListener('click', event => {
+    const target = (event.target           ).closest             ('[data-copy],[data-log],[data-close-log],[data-clear-filter],a[href^="#"],#load-more');
+    if (!target) return;
+    if (target.dataset.copy) void copy(target.dataset.copy);
+    else if (target.dataset.log) void openLog(target.dataset.log, target);
+    else if (target.hasAttribute('data-close-log')) target.closest             ('.inline-log') .hidden = true;
+    else if (target.id === 'load-more') { visibleCount += 12; render('scroll'); }
+    else if (target instanceof HTMLAnchorElement) {
+        event.preventDefault();
+        const hash = target.getAttribute('href') .slice(1);
+        pushHash(hash === `intent/${filter}` ? '' : hash);
+        visibleCount = 12; address();
+    }
+});
+let scrollingDown = false;
+let previousY = 0;
+let scrollQueued = false;
+window.addEventListener('scroll', () => {
+    scrollingDown = window.scrollY > previousY; previousY = window.scrollY;
+    if (scrollQueued || !scrollingDown) return;
+    scrollQueued = true;
+    requestAnimationFrame(() => {
+        scrollQueued = false;
+        const more = document.querySelector             ('#load-more') ;
+        if (!more.hidden && more.getBoundingClientRect().top < innerHeight + 160) { visibleCount += 12; render('scroll'); }
+    });
+}, { passive: true });
+window.addEventListener('popstate', () => {
+    // A search address represents the open line; leave unrelated open lines intact.
+    const hash = location.hash.slice(1);
+    for (const key of opened) if (key !== hash && document.querySelector                    (`[data-search="${key}"]`)?.open) opened.delete(key);
+    address();
+});
+// Hash edits (and native links from outside the page) use the same in-place route.
+window.addEventListener('hashchange', () => address());
+function toast(message        )       { const el = document.querySelector             ('#toast') ; el.textContent = message; el.classList.add('visible'); setTimeout(() => el.classList.remove('visible'), 2000); }
+async function copy(text        )                {
+    try { await navigator.clipboard.writeText(text); toast('Command copied'); }
+    catch { const box = document.createElement('textarea'); box.value = text; document.body.append(box); box.select(); const ok = document.execCommand('copy'); box.remove(); toast(ok ? 'Command copied' : 'Select the command to copy'); }
+}
+const logCache = new Map                ();
+async function openLog(path        , button             )                {
+    const panel = button.closest('.candidate-details')?.querySelector             ('.inline-log');
+    if (!panel) return;
+    panel.hidden = false; panel.dataset.path = path;
+    panel.querySelector('code') .textContent = path;
+    const pre = panel.querySelector('pre') ; pre.textContent = 'Reading log…';
+    try {
+        let text = logCache.get(path);
+        if (text == null || entries.get(path.split('/').slice(0, 2).join('/'))?.p.running) {
+            const response = await fetch(`/api/log?path=${encodeURIComponent(path)}`);
+            if (!response.ok) throw new Error();
+            text = await response.text(); logCache.set(path, text);
+        }
+        if (panel.dataset.path === path) pre.textContent = text;
+    } catch { if (panel.dataset.path === path) pre.textContent = 'This log is not available. The recorded file may no longer be on disk.'; }
+}
+const tip = document.querySelector             ('#spec-tip') ;
+let tipTarget                     = null;
+function showTip(target             )       {
+    const name = target.dataset.word ?? '';
+    const lookup = aliases[name] ?? name;
+    const item = data.spec?.items?.find(i => i.name.toLowerCase() === lookup.toLowerCase());
+    const field = data.spec?.fields?.find(f => f.name === lookup);
+    const doc = item?.doc || field?.doc;
+    const readers = field ? (data.spec?.items ?? []).filter(i => i.reads?.includes(field.name)).map(i => i.name) : [];
+    const writers = field ? (data.spec?.items ?? []).filter(i => i.updates?.includes(field.name)).map(i => i.name) : [];
+    put(tip, `<div class="tip-heading"><code>${e(item?.name ?? field?.name ?? name)}</code><span>${e(item?.kind ?? (field ? 'field' : ''))}</span></div><p>${doc ? `<span class="doc-slash">///</span> ${e(doc)}` : `No /// doc line recorded for “${e(name)}”.`}</p>${field ? `<div class="tip-type"><code>${e(field.type)}</code> · ${e(field.sharding)}</div><dl><dt>read by</dt><dd>${e(readers.join(', ') || 'none recorded')}</dd><dt>updated by</dt><dd>${e(writers.join(', ') || 'none recorded')}</dd></dl>` : `<dl><dt>reads</dt><dd>${e(item?.reads?.join(', ') || 'none recorded')}</dd><dt>updates</dt><dd>${e(item?.updates?.join(', ') || 'none recorded')}</dd></dl>`}`);
+    tipTarget = target; tip.hidden = false;
+    const rect = target.getBoundingClientRect();
+    tip.style.left = `${Math.max(12, Math.min(innerWidth - tip.offsetWidth - 12, rect.left))}px`;
+    tip.style.top = `${Math.min(innerHeight - tip.offsetHeight - 12, rect.bottom + 9)}px`;
+}
+function hideTip()       { tip.hidden = true; tipTarget = null; }
+app.addEventListener('pointerover', event => { const target = (event.target           ).closest             ('[data-word]'); if (target) showTip(target); });
+app.addEventListener('pointerout', event => { if (!(event.relatedTarget instanceof Node) || !tipTarget?.contains(event.relatedTarget)) hideTip(); });
+app.addEventListener('focusin', event => { const target = (event.target           ).closest             ('[data-word]'); if (target) showTip(target); });
+app.addEventListener('focusout', hideTip);
+window.addEventListener('scroll', hideTip, { passive: true });
+window.addEventListener('keydown', event => { if (event.key === 'Escape') hideTip(); });
+async function refresh()                {
+    if (pending) return; pending = true;
+    try {
+        const response = await fetch('/api/state', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+        if (!response.ok) throw new Error();
+        const next = await response.json()         ;
+        if (!next || typeof next !== 'object' || Array.isArray(next)) throw new Error();
+        await derive(next);
+        const payload = JSON.stringify({ ...next, repo: { ...next.repo, now: Math.floor((next.repo?.now ?? Date.now() / 1000) / 60) } });
+        const first = !ready; const changed = payload !== lastPayload;
+        data = next; ready = true;
+        const recovered = !connection; connection = true;
+        if (changed) { revision++; lastPayload = payload; }
+        // Unchanged polls still get a measured render; put() leaves every DOM node alone.
+        render(changed ? 'state' : recovered ? 'reconnected' : 'unchanged');
+        if (first && location.hash !== '#page' && location.hash !== '') address();
+    } catch {
+        if (connection || !ready) { connection = false; render('connection'); }
+    } finally { pending = false; }
+}
+render('initial');
+void refresh();
+setInterval(() => void refresh(), 2000);

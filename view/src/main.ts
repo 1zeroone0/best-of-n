@@ -1,4 +1,4 @@
-export {};
+import type { Candidate as KernelCandidate, Search as KernelSearch } from './kernel';
 type Tone = 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'indigo' | 'violet' | 'neutral';
 interface MapIntent {
     intent: string;
@@ -15,6 +15,7 @@ interface MapIntent {
     } | null;
 }
 interface Candidate {
+    verified?: boolean;
     index: number;
     facts?: {
         harness?: string;
@@ -24,19 +25,7 @@ interface Candidate {
         over_limit?: boolean;
         price_mismatch?: boolean;
         prices?: unknown;
-        candidate?: {
-            commit?: string;
-            base?: string;
-            checks_pass?: boolean;
-            changed?: string[];
-            diff?: number;
-            rank?: number;
-            out?: unknown[];
-            test_passes?: [
-                number,
-                boolean
-            ][];
-        };
+        candidate?: Partial<KernelCandidate>;
     };
     logs?: string[];
 }
@@ -54,6 +43,7 @@ interface Summary {
 }
 interface Search {
     search: number;
+    kernel?: KernelSearch | null;
     summary?: Summary | null;
     selected?: number | null;
     candidates?: Candidate[];
@@ -143,7 +133,56 @@ const n = (v?: number): string => v == null ? '—' : nf.format(v);
 const money = (v?: number | null): string => v == null || !Number.isFinite(v) ? '—' : '$' + v.toFixed(v !== 0 && v < .01 ? 4 : 2);
 const short = (v?: string): string => v ? v.slice(0, 8) : '—';
 const intentArg = (value: string): string => '"' + value.replace(/["\\$`]/g, '\\$&') + '"';
-const verified = (c: Candidate): boolean => c.facts?.candidate?.checks_pass === true;
+const verifiedCandidates = new WeakSet<Candidate>();
+const decisions = new WeakMap<Search, { selected: number | null; cleared?: boolean; error?: string }>();
+const verified = (c: Candidate): boolean => verifiedCandidates.has(c);
+// This program supplies bytes and renders answers; the compiled kernel decides.
+const gates = WebAssembly.instantiateStreaming(fetch('/gates.wasm'));
+async function derive(state: State): Promise<void> {
+    const { instance } = await gates;
+    const exports = instance.exports;
+    const memory = exports.memory as WebAssembly.Memory;
+    const call = (name: string, ...args: number[]): number => (exports[name] as (...args: number[]) => number)(...args);
+    for (const p of state.processes ?? []) {
+        const snapshots = new Map<number, ArrayBuffer>();
+        for (const s of p.searches ?? []) {
+            if (!s.kernel) continue;
+            const response = await fetch(`/api/words?path=${p.pid}%2F${s.search}`, { cache: 'no-store' });
+            if (!response.ok) throw new Error('Kernel snapshot unavailable');
+            const bytes = await response.arrayBuffer();
+            if (bytes.byteLength % 8) throw new Error('Invalid kernel snapshot');
+            snapshots.set(s.search, bytes);
+            const len = bytes.byteLength / 8;
+            const ptr = call('alloc', len);
+            try {
+                new Uint8Array(memory.buffer, ptr, bytes.byteLength).set(new Uint8Array(bytes));
+                const selected = call('selected', ptr, len);
+                if (selected < -1) {
+                    decisions.set(s, { selected: null, error: 'Kernel rejected the recorded search.' });
+                    continue;
+                }
+                const decision: { selected: number | null; cleared?: boolean } = { selected: selected < 0 ? null : selected };
+                if ('counterexample' in s.kernel.kind) {
+                    const target = snapshots.get(s.kernel.kind.counterexample.goal.search);
+                    if (target) {
+                        const tlen = target.byteLength / 8;
+                        const tptr = call('alloc', tlen);
+                        try {
+                            new Uint8Array(memory.buffer, tptr, target.byteLength).set(new Uint8Array(target));
+                            const cleared = call('cleared', ptr, len, tptr, tlen);
+                            if (cleared < 0) throw new Error('Invalid counterexample search');
+                            decision.cleared = cleared === 1;
+                        } finally { call('dealloc', tptr, tlen); }
+                    }
+                }
+                decisions.set(s, decision);
+                for (const c of s.candidates ?? []) {
+                    if (c.verified === true) verifiedCandidates.add(c);
+                }
+            } finally { call('dealloc', ptr, len); }
+        }
+    }
+}
 const keyOf = (p: Process, s: Search): string => `${p.pid}/${s.search}`;
 function relative(time?: number): string {
     if (!time) return 'not recorded';
@@ -203,7 +242,7 @@ function project(): void {
             // The commit is also useful when older traces have no selected index.
             const landed = exact ?? cs.map(c => commitByHash.get(c.facts?.candidate?.commit ?? '')).find(Boolean);
             if (landed) matched.add(landed.commit);
-            const entry: Entry = { key: keyOf(p, s), p, s, trace, children: [], landed, selected: s.selected ?? cs.find(c => c.facts?.candidate?.commit === landed?.commit && landed)?.index, count: cs.length, v, cost, outcome: 'returned', tone: 'neutral', reason: 'Agent processes returned. No further transition recorded.', time: s.summary?.time ?? p.modified ?? 0 };
+            const entry: Entry = { key: keyOf(p, s), p, s, trace, children: [], landed, selected: decisions.get(s)?.selected ?? undefined, count: cs.length, v, cost, outcome: 'returned', tone: 'neutral', reason: 'Agent processes returned. No further transition recorded.', time: s.summary?.time ?? p.modified ?? 0 };
             entries.set(entry.key, entry);
             totals.count += cs.length; totals.verified += v; totals.cost += cost ?? 0;
         }
@@ -231,14 +270,9 @@ function resolve(en: Entry): void {
         en.tone = en.outcome === 'broken' ? 'red' : 'yellow';
         en.reason = terminal.replace(/^(blocked|broken):?\s*/, '') + '. ' + (en.outcome === 'broken' ? 'bon starts a code search carrying the test.' : 'bon reruns wider, as the width list allows.');
     } else if (s.summary?.kind === 'counterexample') {
-        const members = (en.parent?.s.candidates ?? []).filter(verified).map(c => c.index);
-        if (en.parent?.s.summary?.kind === 'compaction') members.push(-1);
-        const split = (s.candidates ?? []).filter(verified).some(c => {
-            const tests = new Map(c.facts?.candidate?.test_passes ?? []);
-            const targets = members.length ? members : [...tests.keys()];
-            return targets.some(i => !tests.has(i)) || new Set(targets.map(i => tests.get(i))).size > 1;
-        });
-        const complete = s.summary?.seconds != null || trace.some(t => /^(fast_forward|retain)/.test(t));
+        const cleared = decisions.get(s)?.cleared;
+        const split = cleared === false;
+        const complete = cleared != null;
         en.outcome = complete ? split ? 'split' : 'cleared' : p.running ? 'running' : 'returned';
         en.tone = split ? 'red' : complete ? 'green' : 'orange';
         en.reason = complete ? split ? 'A verified counterexample test splits the agreed candidates.' : 'No verified counterexample test splits the agreed candidates.' : `${en.count} agent processes returned; ${en.v} candidates verified.`;
@@ -249,16 +283,22 @@ function resolve(en: Entry): void {
     } else if (p.running && s === p.searches?.at(-1)) {
         en.outcome = 'running'; en.tone = 'orange'; en.reason = `${en.count} agent processes returned; ${en.v} candidates verified.`;
     }
+    const decision = decisions.get(s);
+    if (decision?.error) {
+        en.tone = 'red'; en.reason = decision.error;
+    } else if (decision && decision.selected !== (s.selected ?? null)) {
+        en.tone = 'red'; en.reason = `Kernel selected ${decision.selected ?? 'none'}; trace selected ${s.selected ?? 'none'}.`;
+    }
+
 }
 interface Stage { label: string; value: string; tone: Tone; done: boolean }
 function stages(en: Entry): Stage[] {
     const { s } = en;
     const cs = s.candidates ?? [];
     const v = cs.filter(verified);
-    const outs = v.map(c => JSON.stringify(c.facts?.candidate?.out));
-    const hasOut = v.every(c => c.facts?.candidate?.out != null);
-    const agreed = en.selected != null || (v.length >= 2 && hasOut && new Set(outs).size === 1);
-    const differs = hasOut && new Set(outs).size > 1;
+    const decision = decisions.get(s);
+    const agreed = decision?.selected != null;
+    const differs = decision != null && !agreed && v.length >= 2;
     const ce = en.children.at(-1);
     const counter = s.summary?.kind === 'counterexample';
     const ceOutcome = counter ? en.outcome : ce?.outcome ?? (en.outcome === 'fast_forward' ? 'cleared' : undefined);
@@ -589,6 +629,7 @@ async function refresh(): Promise<void> {
         if (!response.ok) throw new Error();
         const next = await response.json() as State;
         if (!next || typeof next !== 'object' || Array.isArray(next)) throw new Error();
+        await derive(next);
         const payload = JSON.stringify({ ...next, repo: { ...next.repo, now: Math.floor((next.repo?.now ?? Date.now() / 1000) / 60) } });
         const first = !ready; const changed = payload !== lastPayload;
         data = next; ready = true;
