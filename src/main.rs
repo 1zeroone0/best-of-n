@@ -156,6 +156,8 @@ fn setup(dry_run: bool, user: Option<String>) -> Result<(), String> {
         steps.push(s(&["dscl", ".", "create", "/Users/agent", "IsHidden", "1"]));
     }
     steps.push(s(&["dseditgroup", "-o", "edit", "-a", "agent", "-t", "user", "bon"]));
+    // agent's primary group is bon, not staff: staff can read engineer's home.
+    steps.push(s(&["sh", "-c", "dscl . -create /Users/agent PrimaryGroupID \"$(dscl . -read /Groups/bon PrimaryGroupID | awk '{print $2}')\""]));
     steps.push(s(&["dseditgroup", "-o", "edit", "-a", &me, "-t", "user", "bon"]));
     steps.push(vec!["sh".into(), "-c".into(), format!(
         "f=$(mktemp) && printf '%s ALL=(agent) NOPASSWD: ALL\\n' {me} > \"$f\" && visudo -cf \"$f\" && install -m 0440 -o root -g wheel \"$f\" /etc/sudoers.d/bon; r=$?; rm -f \"$f\"; exit $r")]);
