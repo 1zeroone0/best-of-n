@@ -299,16 +299,23 @@ fn build_directory(config: &Config, name: &str) -> Result<PathBuf, String> {
     Ok(d)
 }
 
-/// Remove this bon process's directories under /tmp/bon, as agent where agent owns them.
+/// Remove this bon process's directories under /tmp/bon, and any left by a bon
+/// process no longer running. Each holds files of two owners: engineer's check
+/// files (with an ACL denying agent) and agent's build output. So: engineer
+/// removes its ACLs, agent removes what it can, engineer removes the rest.
 pub fn cleanup(path: &[String]) {
-    let mine = format!("{}-", std::process::id());
+    let me = std::process::id().to_string();
+    let running = |pid: &str| pid == me || Command::new("kill").args(["-0", pid]).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
     for e in std::fs::read_dir("/tmp/bon").into_iter().flatten().flatten() {
-        if !e.file_name().to_string_lossy().starts_with(&mine) { continue; }
+        let name = e.file_name().to_string_lossy().to_string();
+        let Some((pid, _)) = name.split_once('-') else { continue };
+        if !pid.chars().all(|c| c.is_ascii_digit()) || (pid != me && running(pid)) { continue; }
         let p = e.path();
-        if std::fs::remove_dir_all(&p).is_err() {
-            let _ = Command::new("sudo").args(["-n", "-u", "agent", "env", "-i", &format!("PATH={}", path.join(":")), "rm", "-rf"])
-                .arg(&p).current_dir("/tmp").status();
-        }
+        let _ = Command::new("chmod").args(["-R", "-N"]).arg(&p).stderr(Stdio::null()).status();
+        let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&p).stderr(Stdio::null()).status();
+        let _ = Command::new("sudo").args(["-n", "-u", "agent", "env", "-i", &format!("PATH={}", path.join(":")), "rm", "-rf"])
+            .arg(&p).current_dir("/tmp").stderr(Stdio::null()).status();
+        let _ = std::fs::remove_dir_all(&p);
     }
 }
 
