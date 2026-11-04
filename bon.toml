@@ -7,9 +7,9 @@ limit = 5.00
 time = 3600
 
 [checks]
-paths = ["src/spec.rs", "src/gates.rs"]
+paths = ["src/spec.rs", "src/gates.rs", "examples/kernel.rs"]
 verify = ["cargo verus verify", "cargo test --lib -q", "cargo run -q -- sbom --check"]
-agree = ["cargo run -q -- help"]
+agree = ["cargo run -q --example kernel"]
 rank = { code = "echo 0", compaction = "echo $((0 - $(cat src/*.rs | wc -l)))" }
 
 [[harness]]
