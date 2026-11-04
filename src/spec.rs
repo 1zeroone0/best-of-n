@@ -63,6 +63,10 @@ pub enum Kind {
     /// behavior. `out` is the goal's agree-check outputs, as trusted code
     /// observed them. Ends in fast_forward. (intent 17)
     Compaction { goal: Commit, out: Seq<nat> },
+    /// The goal is an intent in the map, checked against trunk by a test written
+    /// from the spec and the intent, never the implementation, at `path`.
+    /// An agreed pass is retained on trunk. (intent 21)
+    Scrub { goal: Intent, path: Path },
 }
 
 /// One generated change, as trusted code observed it after its agent process exited.
@@ -127,6 +131,7 @@ pub open spec fn protected(checks: Set<Path>, p: Path) -> bool {
 pub open spec fn authority(kind: Kind, checks: Set<Path>) -> ISet<Path> {
     match kind {
         Kind::Map { .. } => ISet::new(|p: Path| p == map_path()),
+        Kind::Scrub { path, .. } => ISet::new(|p: Path| p == path),
         _ => ISet::new(|p: Path| !protected(checks, p)),
     }
 }
@@ -171,13 +176,30 @@ pub open spec fn complete(s: Search) -> bool {
 /// measured. (intent 17)
 pub open spec fn agree(s: Search) -> bool {
     complete(s) && match s.kind {
-        Kind::Code { .. } =>
+        Kind::Code { .. } | Kind::Scrub { .. } =>
             (exists|i: int, j: int| i != j && verified_at(s, i) && verified_at(s, j))
             && forall|i: int, j: int| verified_at(s, i) && verified_at(s, j) ==> at(s, i).out == at(s, j).out,
         Kind::Compaction { out, .. } =>
             (exists|i: int, j: int| i != j && verified_at(s, i) && verified_at(s, j))
             && forall|i: int| verified_at(s, i) ==> at(s, i).out == out,
         _ => false,
+    }
+}
+
+/// Scrub: candidate c's test passes on trunk, as trusted code observed it (index -1).
+pub open spec fn passes_on_trunk(c: Candidate) -> bool {
+    c.test_passes.contains_key(-1) && c.test_passes[-1]
+}
+
+/// Candidate i of search k may land on trunk: a code or compaction candidate once
+/// a counterexample search on it cleared; a scrub candidate when its test passes
+/// on trunk. (intents 13, 21)
+pub open spec fn landable(searches: Seq<Search>, k: int, i: int) -> bool {
+    match searches[k].kind {
+        Kind::Scrub { .. } => passes_on_trunk(at(searches[k], i)),
+        _ => exists|x: int| 0 <= x < searches.len()
+            && searches[x].kind == (Kind::Counterexample { goal: AgentProcess { search: k, index: i } })
+            && cleared(searches[x], searches[k]),
     }
 }
 
@@ -349,9 +371,22 @@ tokenized_state_machine!{ bon {
     /// search on it cleared and trunk hasn't moved. (intents 6, 13)
     transition!{ fast_forward(k: int, i: int, x: int) {
         require 0 <= k < pre.searches.len() && 0 <= x < pre.searches.len();
+        require !(pre.searches[k].kind is Scrub);
         require selected(pre.searches[k], i);
         require pre.searches[x].kind == Kind::Counterexample { goal: AgentProcess { search: k, index: i } };
         require cleared(pre.searches[x], pre.searches[k]);
+        require pre.searches[k].base == pre.trunk.last();
+        update trunk = pre.trunk.push(at(pre.searches[k], i).commit);
+        update authors = pre.authors.push(User::agent);
+    }}
+
+    /// Scrub: trunk retains the selected test when it passes on trunk and trunk
+    /// hasn't moved. (intent 21)
+    transition!{ retain(k: int, i: int) {
+        require 0 <= k < pre.searches.len();
+        require pre.searches[k].kind is Scrub;
+        require selected(pre.searches[k], i);
+        require passes_on_trunk(at(pre.searches[k], i));
         require pre.searches[k].base == pre.trunk.last();
         update trunk = pre.trunk.push(at(pre.searches[k], i).commit);
         update authors = pre.authors.push(User::agent);
@@ -413,15 +448,14 @@ tokenized_state_machine!{ bon {
             ==> at(self.searches[k], i).base == self.searches[k].base
     }
 
-    /// Every trunk commit authored by agent is exactly the selected candidate of a
-    /// code search on the previous head, cleared by a counterexample search. (intents 3–6, 13)
+    /// Every trunk commit authored by agent is exactly a selected, landable
+    /// candidate of a search on the previous head. (intents 3–6, 13, 21)
     #[invariant]
     pub fn trunk_exact(&self) -> bool {
         forall|t: int| 1 <= t < self.trunk.len() && self.authors[t] == User::agent ==>
-            exists|k: int, i: int, x: int| 0 <= k < self.searches.len() && 0 <= x < self.searches.len()
+            exists|k: int, i: int| 0 <= k < self.searches.len()
                 && selected(self.searches[k], i)
-                && self.searches[x].kind == (Kind::Counterexample { goal: AgentProcess { search: k, index: i } })
-                && cleared(self.searches[x], self.searches[k])
+                && landable(self.searches, k, i)
                 && self.searches[k].base == self.trunk[t - 1]
                 && at(self.searches[k], i).commit == self.trunk[t]
     }
@@ -464,20 +498,24 @@ tokenized_state_machine!{ bon {
             requires post.reserved == l * n, post.searches.last().limit == l, post.capability.dom().len() == n;
         // Earlier searches are unchanged, so their witnesses still hold.
         assert forall|t: int| 1 <= t < post.trunk.len() && post.authors[t] == User::agent implies
-            exists|kk: int, ii: int, x: int| 0 <= kk < post.searches.len() && 0 <= x < post.searches.len()
+            exists|kk: int, ii: int| 0 <= kk < post.searches.len()
                 && selected(post.searches[kk], ii)
-                && post.searches[x].kind == (Kind::Counterexample { goal: AgentProcess { search: kk, index: ii } })
-                && cleared(post.searches[x], post.searches[kk])
+                && landable(post.searches, kk, ii)
                 && post.searches[kk].base == post.trunk[t - 1]
                 && at(post.searches[kk], ii).commit == post.trunk[t] by {
-            let (kk, ii, x) = choose|kk: int, ii: int, x: int| 0 <= kk < pre.searches.len() && 0 <= x < pre.searches.len()
+            let (kk, ii) = choose|kk: int, ii: int| 0 <= kk < pre.searches.len()
                 && selected(pre.searches[kk], ii)
-                && pre.searches[x].kind == (Kind::Counterexample { goal: AgentProcess { search: kk, index: ii } })
-                && cleared(pre.searches[x], pre.searches[kk])
+                && landable(pre.searches, kk, ii)
                 && pre.searches[kk].base == pre.trunk[t - 1]
                 && at(pre.searches[kk], ii).commit == pre.trunk[t];
             assert(post.searches[kk] == pre.searches[kk]);
-            assert(post.searches[x] == pre.searches[x]);
+            if !(pre.searches[kk].kind is Scrub) {
+                let x = choose|x: int| 0 <= x < pre.searches.len()
+                    && pre.searches[x].kind == (Kind::Counterexample { goal: AgentProcess { search: kk, index: ii } })
+                    && cleared(pre.searches[x], pre.searches[kk]);
+                assert(post.searches[x] == pre.searches[x]);
+            }
+            assert(landable(post.searches, kk, ii));
         }
     }
 
@@ -512,27 +550,38 @@ tokenized_state_machine!{ bon {
         // Selected and cleared searches are complete, so they hold no capability:
         // the one waited on here belongs to neither.
         assert forall|t: int| 1 <= t < post.trunk.len() && post.authors[t] == User::agent implies
-            exists|kk: int, ii: int, x: int| 0 <= kk < post.searches.len() && 0 <= x < post.searches.len()
+            exists|kk: int, ii: int| 0 <= kk < post.searches.len()
                 && selected(post.searches[kk], ii)
-                && post.searches[x].kind == (Kind::Counterexample { goal: AgentProcess { search: kk, index: ii } })
-                && cleared(post.searches[x], post.searches[kk])
+                && landable(post.searches, kk, ii)
                 && post.searches[kk].base == post.trunk[t - 1]
                 && at(post.searches[kk], ii).commit == post.trunk[t] by {
-            let (kk, ii, x) = choose|kk: int, ii: int, x: int| 0 <= kk < pre.searches.len() && 0 <= x < pre.searches.len()
+            let (kk, ii) = choose|kk: int, ii: int| 0 <= kk < pre.searches.len()
                 && selected(pre.searches[kk], ii)
-                && pre.searches[x].kind == (Kind::Counterexample { goal: AgentProcess { search: kk, index: ii } })
-                && cleared(pre.searches[x], pre.searches[kk])
+                && landable(pre.searches, kk, ii)
                 && pre.searches[kk].base == pre.trunk[t - 1]
                 && at(pre.searches[kk], ii).commit == pre.trunk[t];
             assert(complete(pre.searches[kk]));
-            assert(complete(pre.searches[x]));
             assert(kk != p.search);
-            assert(x != p.search);
             assert(post.searches[kk] == pre.searches[kk]);
-            assert(post.searches[x] == pre.searches[x]);
+            if !(pre.searches[kk].kind is Scrub) {
+                let x = choose|x: int| 0 <= x < pre.searches.len()
+                    && pre.searches[x].kind == (Kind::Counterexample { goal: AgentProcess { search: kk, index: ii } })
+                    && cleared(pre.searches[x], pre.searches[kk]);
+                assert(complete(pre.searches[x]));
+                assert(x != p.search);
+                assert(post.searches[x] == pre.searches[x]);
+            }
+            assert(landable(post.searches, kk, ii));
         }
     }
 
     #[inductive(fast_forward)]
-    fn fast_forward_inductive(pre: Self, post: Self, k: int, i: int, x: int) {}
+    fn fast_forward_inductive(pre: Self, post: Self, k: int, i: int, x: int) {
+        assert(landable(post.searches, k, i));
+    }
+
+    #[inductive(retain)]
+    fn retain_inductive(pre: Self, post: Self, k: int, i: int) {
+        assert(landable(post.searches, k, i));
+    }
 }}

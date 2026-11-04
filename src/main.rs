@@ -10,6 +10,7 @@ const USAGE: &str = "usage:
   bon                     every intent in the map, and whether it is built
   bon code \"<intent>\"     search for code that makes this intent hold; fast-forward trunk
   bon compaction          search for code that removes or simplifies without changing behavior
+  bon scrub \"<intent>\"    check an intent against trunk with tests written from the spec and the intent
   bon map                 turn each new transcript into a proposal for the map
   bon setup [--dry-run] [--for <user>]
                           create user agent and group bon, and let <user> (default: you) run commands as agent;
@@ -29,9 +30,22 @@ fn main() {
         Some("code") => {
             let intent = args[1..].join(" ");
             if intent.is_empty() { fail("which intent? bon code \"<intent>\"") }
-            exec::land(&root, Some(intent.chars().collect())).map(|_| println!("trunk fast-forwarded"))
+            exec::land(&root, Some(intent.chars().collect()), best_of_n::trusted::no_tests()).map(|_| println!("trunk fast-forwarded"))
         }
-        Some("compaction") => exec::land(&root, None).map(|_| println!("trunk fast-forwarded")),
+        Some("compaction") => exec::land(&root, None, best_of_n::trusted::no_tests()).map(|_| println!("trunk fast-forwarded")),
+        Some("scrub") => {
+            let intent = args[1..].join(" ");
+            if intent.is_empty() { fail("which intent? bon scrub \"<intent>\"") }
+            let goal: Vec<char> = intent.chars().collect();
+            match exec::scrub(&root, goal.clone()) {
+                Ok(None) => { println!("holds: its test is retained on trunk"); Ok(()) }
+                Ok(Some(carried)) => {
+                    println!("broken: the agreed test fails on trunk; searching for code that passes it");
+                    exec::land(&root, Some(goal), carried).map(|_| println!("trunk fast-forwarded"))
+                }
+                Err(e) => Err(e),
+            }
+        }
         Some("map") => map(&root),
         Some("setup") => {
             let dry_run = args.iter().any(|a| a == "--dry-run");
@@ -58,16 +72,27 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// Status is derived, never stored: an intent is built when trunk has a commit
-/// whose subject is that intent. (intent 1)
+/// whose subject is that intent, and broken when its latest scrub failed after
+/// that commit. (intents 1, 21)
 fn status(root: &str) -> Result<(), String> {
     let root = Path::new(root);
     let map = git(root, &["show", "HEAD:map"]).map_err(|_| "no map at trunk's head".to_string())?;
-    let subjects = git(root, &["log", "--format=%s"])?;
+    let log = git(root, &["log", "--format=%ct %s"])?;
+    let scrubs: Vec<serde_json::Value> = std::fs::read_to_string(root.join(".bon/scrubs.jsonl")).unwrap_or_default()
+        .lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
     for line in map.lines() {
         let intent = line.split('\t').next().unwrap_or("").trim();
         if intent.is_empty() { continue; }
-        let built = subjects.lines().any(|s| s == intent);
-        println!("{:<6} {intent}", if built { "built" } else { "open" });
+        let landed = log.lines().filter_map(|l| l.split_once(' ')).filter(|(_, s)| *s == intent)
+            .filter_map(|(t, _)| t.parse::<u64>().ok()).max();
+        let failed = scrubs.iter().filter(|v| v["intent"] == intent).last()
+            .filter(|v| v["passes"] == false).and_then(|v| v["time"].as_u64());
+        let state = match (landed, failed) {
+            (_, Some(f)) if landed.is_none_or(|l| l < f) => "broken",
+            (Some(_), _) => "built",
+            _ => "open",
+        };
+        println!("{state:<6} {intent}");
     }
     Ok(())
 }

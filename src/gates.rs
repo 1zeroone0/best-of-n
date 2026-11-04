@@ -46,6 +46,7 @@ pub enum Kind {
     Map { goal: Transcript },
     Counterexample { goal: AgentProcess },
     Compaction { goal: Commit, out: Vec<u64> },
+    Scrub { goal: Intent, path: Path },
 }
 
 impl View for Kind {
@@ -56,6 +57,7 @@ impl View for Kind {
             Kind::Map { goal } => spec::Kind::Map { goal: goal@ },
             Kind::Counterexample { goal } => spec::Kind::Counterexample { goal: goal@ },
             Kind::Compaction { goal, out } => spec::Kind::Compaction { goal: goal@, out: hashes(out@) },
+            Kind::Scrub { goal, path } => spec::Kind::Scrub { goal: goal@, path: path@ },
         }
     }
 }

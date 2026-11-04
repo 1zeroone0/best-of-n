@@ -97,6 +97,7 @@ fn authority_contains(kind: &Kind, checks: &Vec<Path>, p: &Path) -> (r: bool)
 {
     match kind {
         Kind::Map { .. } => eq(p, &vec!['m', 'a', 'p']),
+        Kind::Scrub { path, .. } => eq(p, path),
         _ => !protected(checks, p),
     }
 }
@@ -195,6 +196,7 @@ pub fn selected(s: &Search) -> (r: Option<usize>)
     match &s.kind {
         Kind::Code { .. } => {},
         Kind::Compaction { .. } => {},
+        Kind::Scrub { .. } => {},
         _ => {
             assert(forall|i: int| !spec::agree(sv) ==> !spec::selected(sv, i));
             return None;
@@ -247,8 +249,8 @@ pub fn selected(s: &Search) -> (r: Option<usize>)
             forall|j: int| 0 <= j < s.n ==> v[j] == spec::verified_at(sv, j),
             forall|j: int| 0 <= j < i && v[j] ==> spec::at(sv, j).out == hashes(reference@),
             f < s.n, spec::verified_at(sv, f as int),
-            sv.kind is Code || sv.kind is Compaction,
-            sv.kind is Code ==> hashes(reference@) == spec::at(sv, f as int).out,
+            sv.kind is Code || sv.kind is Compaction || sv.kind is Scrub,
+            (sv.kind is Code || sv.kind is Scrub) ==> hashes(reference@) == spec::at(sv, f as int).out,
             sv.kind matches spec::Kind::Compaction { out, .. } ==> out == hashes(reference@),
         decreases v.len() - i,
     {
@@ -1002,7 +1004,7 @@ fn search(
 /// fast-forwards once one clears. A blocked attempt reruns wider, carrying the
 /// counterexample tests into agreement, until the attempts run out.
 /// (intents 2–9, 13, 15–17)
-pub fn land(root: &str, goal: Option<Intent>) -> (r: Result<(), String>) {
+pub fn land(root: &str, goal: Option<Intent>, carried: trusted::Tests) -> (r: Result<(), String>) {
     let head = trusted::head(root)?;
     let m = trusted::manifest(root, &head)?;
     trusted::on_trunk(&m)?;
@@ -1027,7 +1029,7 @@ pub fn land(root: &str, goal: Option<Intent>) -> (r: Result<(), String>) {
     trusted::record(&m, "initialize");
 
     let attempts = trusted::attempts(&m);
-    let mut tests = trusted::no_tests();
+    let mut tests = carried;
     let mut a: usize = 0;
     let mut index: usize = 0;
     while a < attempts
@@ -1098,6 +1100,91 @@ pub fn land(root: &str, goal: Option<Intent>) -> (r: Result<(), String>) {
         a = a + 1;
     }
     Err("blocked: no attempt was selected and cleared; see .bon/traces".into())
+}
+
+/// bon scrub: check an intent against trunk with tests written from the spec and
+/// the intent alone. An agreed pass retains the selected test on trunk (Ok(None));
+/// an agreed fail means the intent is broken, and returns the test to carry into
+/// a code search (Ok(Some)). (intent 21)
+#[verifier::rlimit(100)]
+pub fn scrub(root: &str, goal: Intent) -> (r: Result<Option<trusted::Tests>, String>) {
+    let head = trusted::head(root)?;
+    let m = trusted::manifest(root, &head)?;
+    trusted::on_trunk(&m)?;
+    let intents = trusted::intents(&m, &head);
+    if !contains(&intents, &goal) { return Err("that intent is not in the map at trunk's head".into()); }
+    let checks = trusted::checks(&m);
+    let limit = trusted::limit(&m);
+    let l = trusted::agent_process_limit(&m);
+    let (pc, pt, pw, pr) = trusted::observe(&m, &head)?;
+    if !isolated(pc, pt, pw, pr) {
+        return Err("agent is not isolated: its permissions differ from the policy; run bon setup".into());
+    }
+    let ghost observed = observed(pc, pt, pw, pr);
+    let tracked (Tracked(instance), Tracked(map), Tracked(checks_t), Tracked(trunk), Tracked(authors),
+                 Tracked(searches), Tracked(limit_t), Tracked(spent_t), Tracked(reserved), Tracked(capability))
+        = spec::bon::Instance::initialize(head@, intent_set(intents@), paths(checks@), limit as nat);
+    let tracked mut t = Tokens { instance, map, checks: checks_t, trunk, authors, searches, limit: limit_t, spent: spent_t, reserved };
+    let mut spent: u64 = 0;
+    trusted::record(&m, "initialize");
+    let attempts = trusted::scrub_attempts(&m);
+    let path = trusted::scrub_test_path(&m, &goal)?;
+    let none = trusted::no_tests();
+    let mut a: usize = 0;
+    while a < attempts
+        invariant
+            t.wf(),
+            spec::isolated(observed),
+            t.searches.value().len() == a as int,
+            forall|k: int| 0 <= k < t.searches.value().len() ==> spec::complete(#[trigger] t.searches.value()[k]),
+            t.reserved.value() == 0,
+            t.spent.value() == spent as nat,
+            t.trunk.value() == Seq::<spec::Commit>::empty().push(head@),
+            t.map.value() == intent_set(intents@),
+            t.checks.value() == paths(checks@),
+            t.limit.value() == limit as nat,
+        decreases attempts - a,
+    {
+        let kind = Kind::Scrub { goal: goal.clone(), path: path.clone() };
+        let ghost before = t.searches.value();
+        let s0 = search(&m, a, a, kind, head.clone(), &checks, l, limit, &mut spent, None, &none,
+                        Ghost(observed), Tracked(&mut t))?;
+        proof {
+            assert(t.searches.value()[a as int] == s0@);
+            assert forall|k: int| 0 <= k < t.searches.value().len() implies spec::complete(#[trigger] t.searches.value()[k]) by {
+                if k < a { assert(t.searches.value()[k] == before[k]); }
+            }
+        }
+        match selected(&s0) {
+            None => { trusted::record(&m, "blocked: fewer than two verified tests, or they disagree"); }
+            Some(i) => {
+                let c = candidate(&s0, i);
+                match test_passes_on(c, None) {
+                    Some(true) => {
+                        let now = trusted::head(root)?;
+                        if !eq(&now, &head) { return Err("blocked: trunk moved during the scrub; run it again".into()); }
+                        proof {
+                            assert(s0@.kind is Scrub);
+                            t.instance.retain(a as int, i as int, &mut t.trunk, &mut t.authors, &t.searches);
+                        }
+                        trusted::fast_forward(&m, &c.commit)?;
+                        trusted::record(&m, "retain");
+                        trusted::record_scrub(&m, &goal, true);
+                        return Ok(None);
+                    }
+                    _ => {
+                        trusted::record(&m, "broken: the agreed test fails on trunk");
+                        trusted::record_scrub(&m, &goal, false);
+                        let mut carried = trusted::no_tests();
+                        trusted::require(&m, &mut carried, &s0, c);
+                        return Ok(Some(carried));
+                    }
+                }
+            }
+        }
+        a = a + 1;
+    }
+    Err("blocked: no attempt agreed; see .bon/traces".into())
 }
 
 /// bon map: one map search on a transcript, and its proposal for engineer:

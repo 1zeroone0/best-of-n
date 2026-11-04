@@ -41,6 +41,8 @@ pub struct Config {
     pub checks: Checks,
     pub harness: Vec<Harness>,
     pub counterexample: Counterexample,
+    #[serde(default)]
+    pub scrub: Option<Scrub>,
     /// Prices by canonical model, from the device file.
     #[serde(skip)]
     pub prices: HashMap<String, Price>,
@@ -110,9 +112,38 @@ pub struct Counterexample {
     pub harness: Vec<Harness>,
     /// Where its test goes; must not be under a check path.
     pub path: String,
-    /// How its test runs.
-    pub test: String,
+    /// The command that runs its test.
+    pub run: String,
 }
+
+/// A scrub: a test written from the spec and an intent alone checks that trunk
+/// still satisfies the intent. (intent 21)
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct Scrub {
+    pub harness: Vec<Harness>,
+    /// All an agent process sees besides the checks, the map and bon.toml: the
+    /// spec and the interface, never the implementation.
+    pub visible: Vec<String>,
+    /// Where its test goes, with `{}` filled by the intent's short name; a test
+    /// that lands becomes a check, so this should be under a check path.
+    pub path: String,
+    /// The command that builds its test (`{}` as in path); a test that does not
+    /// build is unverified.
+    pub build: String,
+    /// The command that runs its test (`{}` as in path); exit 0 means it passes.
+    pub run: String,
+}
+
+/// An intent's short name for its scrub test: lowercase words joined by `_`.
+fn short(intent: &str) -> String {
+    let words: Vec<String> = intent.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase()).take(6).collect();
+    words.join("_")
+}
+
+/// A scrub template with `{}` filled for an intent.
+fn fill(template: &str, intent: &str) -> String { template.replace("{}", &short(intent)) }
 
 /// Dollars per million tokens.
 #[derive(Deserialize, serde::Serialize, Clone, Debug, PartialEq)]
@@ -220,12 +251,20 @@ fn materialize(root: &std::path::Path, commit: &str, dir: &std::path::Path) -> R
 /// write everything except the check paths, which it may read and execute but
 /// not write, rename or delete. (intent 8; TCB: POSIX ACLs)
 fn working_directory(root: &std::path::Path, config: &Config, commit: &str, dir: &std::path::Path) -> Result<(), String> {
+    working_directory_except(root, config, commit, dir, None)
+}
+
+/// A working directory whose protected paths exclude `writable`: the directory a
+/// scrub writes its test into. Only that test is ever committed.
+fn working_directory_except(root: &std::path::Path, config: &Config, commit: &str, dir: &std::path::Path,
+                            writable: Option<&str>) -> Result<(), String> {
     materialize(root, commit, dir)?;
     sh(dir, "chmod", &["-R", "g+rwX", "."])?;
     sh(dir, "find", &[".", "-type", "d", "-exec", "chmod", "g+s", "{}", "+"])?;
     // The checks and the transcripts: agent may read them, never change them.
     let transcripts = config.transcripts.clone().unwrap_or("transcripts".into());
     for p in config.checks.paths.iter().chain(std::iter::once(&transcripts)) {
+        if writable.is_some_and(|w| w.starts_with(p.trim_end_matches('/'))) { continue; }
         let target = dir.join(p.trim_end_matches('/'));
         if !target.exists() { continue; }
         let t = target.to_string_lossy().to_string();
@@ -404,7 +443,18 @@ fn prompt(kind: &Kind, config: &Config, map: &str, target: Option<&Search>) -> S
                  You will not see them. From the spec, the checks and the intent alone, write one test, \
                  at {}, that every correct implementation must pass, and that a plausible wrong reading \
                  of the intent would fail. It runs with: {}\n",
-                config.counterexample.path, config.counterexample.test)
+                config.counterexample.path, config.counterexample.run)
+        }
+        Kind::Scrub { goal, path } => {
+            let s = config.scrub.as_ref();
+            format!(
+                "This intent should hold of this repository:\n\n{}\n\n\
+                 You see only the spec, the interface and the checks, not the implementation, on purpose. \
+                 From them and the intent alone, write one test, at {}, that passes exactly when the intent \
+                 holds. It builds with: {}. It runs with: {}.\n",
+                goal.iter().collect::<String>(), path.iter().collect::<String>(),
+                s.map_or(String::new(), |s| fill(&s.build, &goal.iter().collect::<String>())),
+                s.map_or(String::new(), |s| fill(&s.run, &goal.iter().collect::<String>())))
         }
         Kind::Map { goal } => format!("Read the transcript at {} and append to `map` one line per need it voices: \
              the intent, a tab, then the transcript path, '#', and the cue's start time.\n", goal.iter().collect::<String>()),
@@ -439,7 +489,8 @@ pub fn manifest(root: &str, commit: &Commit) -> (r: Result<Manifest, String>) {
     config.path = device.path;
     config.prices = device.prices;
     config.jobs = device.jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1)));
-    for h in config.harness.iter().chain(config.counterexample.harness.iter()) {
+    let scrubbers = config.scrub.as_ref().map(|s| s.harness.clone()).unwrap_or_default();
+    for h in config.harness.iter().chain(config.counterexample.harness.iter()).chain(scrubbers.iter()) {
         if !config.prices.contains_key(&h.model) {
             return Err(format!("{DEVICE}: no price for {}; bon.toml must name canonical model ids", h.model));
         }
@@ -458,6 +509,16 @@ pub fn agent_process_limit(m: &Manifest) -> u64 { micro(m.config.agent_process.l
 #[verifier::external_body]
 pub fn checks(m: &Manifest) -> Vec<Path> { m.config.checks.paths.iter().map(|p| p.chars().collect()).collect() }
 
+/// The harnesses a search of this kind draws from.
+#[verifier::external]
+fn harnesses(config: &Config, kind: &Kind) -> Vec<Harness> {
+    match kind {
+        Kind::Counterexample { .. } => config.counterexample.harness.clone(),
+        Kind::Scrub { .. } => config.scrub.as_ref().map(|s| s.harness.clone()).unwrap_or_default(),
+        _ => config.harness.clone(),
+    }
+}
+
 /// How many agent processes one harness runs on attempt `a`.
 #[verifier::external]
 fn at(h: &Harness, a: usize) -> usize { h.n.get(a).or(h.n.last()).copied().unwrap_or(0) }
@@ -465,8 +526,7 @@ fn at(h: &Harness, a: usize) -> usize { h.n.get(a).or(h.n.last()).copied().unwra
 /// How many agent processes a search of this kind runs on attempt `a`.
 #[verifier::external_body]
 pub fn width(m: &Manifest, kind: &Kind, a: usize) -> usize {
-    let hs = match kind { Kind::Counterexample { .. } => &m.config.counterexample.harness, _ => &m.config.harness };
-    hs.iter().map(|h| at(h, a)).sum()
+    harnesses(&m.config, kind).iter().map(|h| at(h, a)).sum()
 }
 
 /// How many attempts a command makes: the longest width list. (intent 15)
@@ -478,10 +538,54 @@ pub fn attempts(m: &Manifest) -> usize {
 /// Tests carried from a counterexample search that did not clear: each joins the
 /// agree checks of the later attempts in this command. (intent 13)
 #[verifier::external_body]
-pub struct Tests { pub files: Vec<Vec<u8>> }
+pub struct Tests {
+    /// Counterexample tests: each joins the agree checks.
+    pub files: Vec<Vec<u8>>,
+    /// Scrub tests that failed on trunk: each must pass for a candidate to be verified.
+    pub required: Vec<Vec<u8>>,
+}
 
 #[verifier::external_body]
-pub fn no_tests() -> Tests { Tests { files: Vec::new() } }
+pub fn no_tests() -> Tests { Tests { files: Vec::new(), required: Vec::new() } }
+
+/// Where an intent's scrub test goes.
+#[verifier::external_body]
+pub fn scrub_test_path(m: &Manifest, goal: &Intent) -> (r: Result<Path, String>) {
+    let s = m.config.scrub.as_ref().ok_or("bon.toml has no [scrub]")?;
+    Ok(fill(&s.path, &goal.iter().collect::<String>()).chars().collect())
+}
+
+/// How many attempts a scrub makes: the longest of its width lists.
+#[verifier::external_body]
+pub fn scrub_attempts(m: &Manifest) -> usize {
+    m.config.scrub.as_ref().map_or(1, |s| s.harness.iter().map(|h| h.n.len()).max().unwrap_or(1))
+}
+
+/// Carry a scrub candidate's test, which failed on trunk, as a required test.
+#[verifier::external_body]
+pub fn require(m: &Manifest, tests: &mut Tests, x: &Search, c: &Candidate) {
+    let commit: String = c.commit.iter().collect();
+    if let (Some(s), Kind::Scrub { goal, .. }) = (&m.config.scrub, &x.kind) {
+        let path = fill(&s.path, &goal.iter().collect::<String>());
+        if let Ok(out) = Command::new("git").args(["show", &format!("{commit}:{path}")]).current_dir(&m.root).output() {
+            if out.status.success() { tests.required.push(out.stdout); }
+        }
+    }
+}
+
+/// Record a scrub's outcome for an intent: status reads these to derive broken.
+#[verifier::external_body]
+pub fn record_scrub(m: &Manifest, intent: &Intent, passes: bool) {
+    let line = serde_json::json!({
+        "intent": intent.iter().collect::<String>(), "passes": passes,
+        "time": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
+    });
+    let d = m.root.join(".bon");
+    let _ = std::fs::create_dir_all(&d);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(d.join("scrubs.jsonl")) {
+        let _ = writeln!(f, "{line}");
+    }
+}
 
 /// Carry every test the counterexample search `x` wrote.
 #[verifier::external_body]
@@ -565,7 +669,7 @@ pub fn observe(m: &Manifest, commit: &Commit) -> (r: Result<(Permission, Permiss
 pub fn run(m: &Manifest, kind: &Kind, search: usize, a: usize, start: &Commit, target: Option<&Search>, tests: &Tests) -> Vec<(Option<Candidate>, u64)> {
     let start: String = start.iter().collect();
     warm(m, &start);
-    let hs = match kind { Kind::Counterexample { .. } => &m.config.counterexample.harness, _ => &m.config.harness };
+    let hs = harnesses(&m.config, kind);
     let slots: Vec<Harness> = hs.iter().flat_map(|h| std::iter::repeat(h.clone()).take(at(h, a))).collect();
     let map = git(&m.root, &["show", &format!("{start}:map")]).unwrap_or_default();
     let traces = m.root.join(".bon").join("traces").join(format!("{}", std::process::id())).join(search.to_string());
@@ -656,7 +760,7 @@ pub fn agree_outputs(m: &Manifest, commit: &Commit, tests: &Tests) -> (r: Result
         out.push(hash(&run_check(&m.config, &dir, &build, a, &log.join(format!("goal-agree-{k}"))).1));
     }
     for (k, t) in tests.files.iter().enumerate() {
-        out.push(hash(if test_on(m, &c, t, &build, &log.join(format!("goal-carried-{k}"))) { "pass" } else { "fail" }));
+        out.push(hash(if test_on(m, &c, t, &m.config.counterexample.path, &m.config.counterexample.run, &build, &log.join(format!("goal-carried-{k}"))) { "pass" } else { "fail" }));
     }
     let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
     let _ = std::fs::remove_dir_all(&dir);
@@ -672,9 +776,21 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
     let _ = std::fs::create_dir_all(trace);
     let config = &m.config;
     let dir = scratch(&format!("{search}-{index}"));
-    if let Err(e) = working_directory(&m.root, config, start, &dir) {
+    let writable = match (kind, &config.scrub) {
+        (Kind::Scrub { path, .. }, Some(_)) => {
+            let p: String = path.iter().collect();
+            std::path::Path::new(&p).parent().map(|d| d.to_string_lossy().to_string())
+        }
+        _ => None,
+    };
+    if let Err(e) = working_directory_except(&m.root, config, start, &dir, writable.as_deref()) {
         let _ = std::fs::write(trace.join("error"), e);
         return (None, 0);
+    }
+    if let (Kind::Scrub { .. }, Some(s)) = (kind, &config.scrub) {
+        let mut keep: Vec<String> = s.visible.iter().chain(config.checks.paths.iter()).cloned().collect();
+        keep.extend(["bon.toml", "map", "Cargo.toml"].map(String::from));
+        prune(&dir, &keep);
     }
     let argv = harness_argv(h, config, &dir);
     let _ = std::fs::write(trace.join("argv"), argv.join(" "));
@@ -726,7 +842,14 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
     with(&["read-tree", start])?;
-    with(&["add", "-A", "."])?;
+    match kind {
+        // A scrub's working directory holds only what it may see: record its test alone.
+        Kind::Scrub { path, .. } => {
+            let p: String = path.iter().collect();
+            if dir.join(&p).exists() { with(&["add", "--", &p])?; }
+        }
+        _ => { with(&["add", "-A", "."])?; }
+    }
     let tree = with(&["write-tree"])?;
     let _ = std::fs::remove_file(&index_file);
     let subject = match kind {
@@ -734,6 +857,7 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
         Kind::Compaction { .. } => "compaction".to_string(),
         Kind::Map { goal } => format!("map: {}", goal.iter().collect::<String>()),
         Kind::Counterexample { .. } => "counterexample".to_string(),
+        Kind::Scrub { goal, .. } => format!("scrub: {}", goal.iter().collect::<String>()),
     };
     let message = format!("{subject}\n\nTrace: .bon/traces/{}/{search}/{index}\n", std::process::id());
     let commit = {
@@ -760,19 +884,46 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
     check_directory(root, &commit, &cdir)?;
     let build = build_directory(config, &format!("{search}-{index}-build"))?;
     let mut checks_pass = true;
-    for (k, v) in config.checks.verify.iter().enumerate() {
-        let (ok, _) = run_check(config, &cdir, &build, v, &trace.join(format!("verify-{k}")));
-        if !ok { checks_pass = false; break; }
+    let mut test_passes = Vec::new();
+    let mut rank = 0i64;
+    if let (Kind::Scrub { goal, .. }, Some(s)) = (kind, &config.scrub) {
+        // Trunk is unchanged; a scrub candidate is verified when its test builds.
+        let intent: String = goal.iter().collect();
+        let (path, run) = (fill(&s.path, &intent), fill(&s.run, &intent));
+        checks_pass = run_check(config, &cdir, &build, &fill(&s.build, &intent), &trace.join("scrub-build")).0;
+        if checks_pass {
+            let passes = run_check(config, &cdir, &build, &run, &trace.join("scrub-run")).0;
+            test_passes.push((-1, passes));
+            // Rank: how many losing candidates for this intent the test rejects.
+            let test = std::fs::read(dir.join(&path)).unwrap_or_default();
+            for (k, mc) in losing(root, &intent, start).iter().enumerate() {
+                if !test_on(m, mc, &test, &path, &run, &build, &trace.join(format!("losing-{k}"))) { rank += 1; }
+            }
+        }
+    } else {
+        for (k, v) in config.checks.verify.iter().enumerate() {
+            let (ok, _) = run_check(config, &cdir, &build, v, &trace.join(format!("verify-{k}")));
+            if !ok { checks_pass = false; break; }
+        }
+        // A broken intent's scrub test must pass.
+        if let (Some(s), Kind::Code { goal }) = (&config.scrub, kind) {
+            let intent: String = goal.iter().collect();
+            for (k, t) in tests.required.iter().enumerate() {
+                if checks_pass && !test_on(m, &commit, t, &fill(&s.path, &intent), &fill(&s.run, &intent), &build, &trace.join(format!("required-{k}"))) {
+                    checks_pass = false;
+                }
+            }
+        }
     }
     let mut out = Vec::new();
-    let mut rank = 0i64;
-    if checks_pass {
+    if let [(_, passes)] = test_passes.as_slice() { out.push(hash(if *passes { "pass" } else { "fail" })); }
+    if checks_pass && !matches!(kind, Kind::Scrub { .. }) {
         for (k, a) in config.checks.agree.iter().enumerate() {
             let (_, o) = run_check(config, &cdir, &build, a, &trace.join(format!("agree-{k}")));
             out.push(hash(&o));
         }
         for (k, t) in tests.files.iter().enumerate() {
-            out.push(hash(if test_on(m, &commit, t, &build, &trace.join(format!("carried-{k}"))) { "pass" } else { "fail" }));
+            out.push(hash(if test_on(m, &commit, t, &config.counterexample.path, &config.counterexample.run, &build, &trace.join(format!("carried-{k}"))) { "pass" } else { "fail" }));
         }
         let which = match kind { Kind::Compaction { .. } => "compaction", _ => "code" };
         if let Some(r) = config.checks.rank.get(which) {
@@ -780,7 +931,6 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
             rank = o.trim().parse().unwrap_or(0);
         }
     }
-    let mut test_passes = Vec::new();
     if let (Kind::Counterexample { .. }, Some(t)) = (kind, target) {
         let test = std::fs::read(dir.join(&config.counterexample.path)).ok();
         let mut members: Vec<(i64, String)> = Vec::new();
@@ -790,7 +940,7 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
         }
         for (j, mc) in members {
             let passes = match &test {
-                Some(bytes) => test_on(m, &mc, bytes, &build, &trace.join(format!("test-{j}"))),
+                Some(bytes) => test_on(m, &mc, bytes, &config.counterexample.path, &config.counterexample.run, &build, &trace.join(format!("test-{j}"))),
                 None => false,
             };
             test_passes.push((j, passes));
@@ -816,24 +966,46 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
     })
 }
 
-/// Whether a counterexample test passes on `commit`: a read-only checkout of it
-/// with the test at the manifest's counterexample path, run as agent.
-fn test_on(m: &Manifest, commit: &str, test: &[u8], build: &std::path::Path, log: &std::path::Path) -> bool {
+/// Whether a test passes on `commit`: a read-only checkout of it with the test at
+/// `path`, run as agent with `run`.
+fn test_on(m: &Manifest, commit: &str, test: &[u8], path: &str, run: &str, build: &std::path::Path, log: &std::path::Path) -> bool {
     let config = &m.config;
     let dir = scratch(&format!("test-{}", hash(&format!("{commit}{log:?}"))));
     let passes = match materialize(&m.root, commit, &dir) {
         Ok(()) => {
-            let p = dir.join(&config.counterexample.path);
+            let p = dir.join(path);
             let _ = std::fs::create_dir_all(p.parent().unwrap_or(&dir));
             let _ = std::fs::write(&p, test);
             let _ = Command::new("chmod").args(["-R", "a-w,g+rX"]).arg(&dir).status();
-            run_check(config, &dir, build, &config.counterexample.test, log).0
+            run_check(config, &dir, build, run, log).0
         }
         Err(_) => false,
     };
     let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
     let _ = std::fs::remove_dir_all(&dir);
     passes
+}
+
+/// Up to five of the most recent losing candidates for an intent: candidate
+/// commits under refs/bon whose subject is the intent and that trunk never took.
+fn losing(root: &std::path::Path, intent: &str, trunk: &str) -> Vec<String> {
+    git(root, &["for-each-ref", "--sort=-committerdate", "--format=%(objectname) %(subject)", "refs/bon/"])
+        .unwrap_or_default().lines()
+        .filter_map(|l| l.split_once(' ')).filter(|(_, s)| *s == intent).map(|(c, _)| c.to_string())
+        .filter(|c| !Command::new("git").args(["merge-base", "--is-ancestor", c, trunk]).current_dir(root)
+            .status().is_ok_and(|s| s.success()))
+        .take(5).collect()
+}
+
+/// Remove every file of a working directory except the paths an agent process may see.
+fn prune(dir: &std::path::Path, keep: &[String]) {
+    let out = Command::new("find").arg(".").args(["-type", "f"]).current_dir(dir).output();
+    for f in out.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default().lines() {
+        let rel = f.trim_start_matches("./");
+        if !keep.iter().any(|k| rel == k.trim_end_matches('/') || rel.starts_with(&format!("{}/", k.trim_end_matches('/')))) {
+            let _ = std::fs::remove_file(dir.join(rel));
+        }
+    }
 }
 
 /// A map candidate's new lines, by the cue each cites: `intent\tpath#HH:MM:SS.mmm`.
@@ -872,7 +1044,7 @@ mod tests {
             agent_process = { limit = 0.5, time = 60 }
             checks = { paths = ["checks/"], verify = ["true"] }
             harness = [{ name = "claude", model = "claude-haiku-5-5", n = [2, 4] }]
-            counterexample = { harness = [{ name = "codex", model = "gpt-6.1-sol", n = [1] }], path = "c.sh", test = "sh c.sh" }
+            counterexample = { harness = [{ name = "codex", model = "gpt-6.1-sol", n = [1] }], path = "c.sh", run = "sh c.sh" }
         "#).unwrap();
         let d: Device = toml::from_str(r#"
             path = ["/usr/bin"]
