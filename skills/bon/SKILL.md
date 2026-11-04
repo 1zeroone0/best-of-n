@@ -54,7 +54,7 @@ The repository holds the vocabulary; this skill does not restate it.
 - `map`: the current intents, one per line. `git log -p map` is their history.
 - The spec named in `checks.paths`: its types, predicates, transitions and
   invariants are the nouns. Read them before writing anything.
-- `/etc/bon/device.toml`: facts about this machine (agent's `path`, model
+- `/etc/bon/host.toml`: facts about this host (agent's `path`, model
   `prices`, `jobs`).
 
 ## The two levels
@@ -77,7 +77,7 @@ code yourself.
   core and programs under one seed.
 - Tests come from the spec and the intent, never from candidate code.
 
-**Widths.** Searches are Monte Carlo: go wide, and let the device's `jobs` cap
+**Widths.** Searches are Monte Carlo: go wide, and let the host's `jobs` cap
 how many run at once. Report the spread, not just the winner.
 
 ## Commands

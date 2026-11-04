@@ -110,7 +110,7 @@ interface State {
     } | null;
     processes?: Process[];
     trunk?: Trunk[];
-    device?: {
+    host?: {
         jobs?: number;
         path?: string[];
         prices?: unknown;
@@ -557,7 +557,7 @@ async function openLog(path: string, button: HTMLElement): Promise<void> {
             text = await response.text(); logCache.set(path, text);
         }
         if (panel.dataset.path === path) pre.textContent = text;
-    } catch { if (panel.dataset.path === path) pre.textContent = 'This log is not available. The recorded file may no longer be on the device.'; }
+    } catch { if (panel.dataset.path === path) pre.textContent = 'This log is not available. The recorded file may no longer be on disk.'; }
 }
 const tip = document.querySelector<HTMLElement>('#spec-tip')!;
 let tipTarget: HTMLElement | null = null;

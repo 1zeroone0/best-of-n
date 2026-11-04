@@ -34,7 +34,7 @@ pub struct Config {
     pub rate: f64,
     #[serde(default)]
     pub transcripts: Option<String>,
-    /// PATH for agent processes and checks, from the device file. Nothing is inherited.
+    /// PATH for agent processes and checks, from the host file. Nothing is inherited.
     #[serde(skip)]
     pub path: Vec<String>,
     pub agent_process: AgentProcessConfig,
@@ -43,21 +43,21 @@ pub struct Config {
     pub counterexample: Counterexample,
     #[serde(default)]
     pub scrub: Option<Scrub>,
-    /// Prices by canonical model, from the device file.
+    /// Prices by canonical model, from the host file.
     #[serde(skip)]
     pub prices: HashMap<String, Price>,
-    /// How many agent processes run at once, from the device file. (intent 24)
+    /// How many agent processes run at once, from the host file. (intent 24)
     #[serde(skip)]
     pub jobs: usize,
 }
 
 /// What is true of this machine rather than of a repository, written by
 /// `bon setup` and owned by root: where agent's tools live, and model prices.
-pub const DEVICE: &str = "/etc/bon/device.toml";
+pub const HOST: &str = "/etc/bon/host.toml";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Device {
+struct Host {
     path: Vec<String>,
     prices: HashMap<String, Price>,
     /// How many agent processes run at once; width stays what bon.toml says.
@@ -534,15 +534,15 @@ pub fn manifest(root: &str, commit: &Commit) -> (r: Result<Manifest, String>) {
     let c: String = commit.iter().collect();
     let text = git(&root, &["show", &format!("{c}:bon.toml")]).map_err(|_| "no bon.toml at trunk's head; commit one".to_string())?;
     let mut config: Config = toml::from_str(&text).map_err(|e| format!("bon.toml: {e}"))?;
-    let device: Device = toml::from_str(&std::fs::read_to_string(DEVICE).map_err(|_| format!("no {DEVICE}; run bon setup"))?)
-        .map_err(|e| format!("{DEVICE}: {e}"))?;
-    config.path = device.path;
-    config.prices = device.prices;
-    config.jobs = device.jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1)));
+    let host: Host = toml::from_str(&std::fs::read_to_string(HOST).map_err(|_| format!("no {HOST}; run bon setup"))?)
+        .map_err(|e| format!("{HOST}: {e}"))?;
+    config.path = host.path;
+    config.prices = host.prices;
+    config.jobs = host.jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1)));
     let scrubbers = config.scrub.as_ref().map(|s| s.harness.clone()).unwrap_or_default();
     for h in config.harness.iter().chain(config.counterexample.harness.iter()).chain(scrubbers.iter()) {
         if !config.prices.contains_key(&h.model) {
-            return Err(format!("{DEVICE}: no price for {}; bon.toml must name canonical model ids", h.model));
+            return Err(format!("{HOST}: no price for {}; bon.toml must name canonical model ids", h.model));
         }
     }
     Ok(Manifest { config, root })
@@ -882,7 +882,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
     let facts = serde_json::json!({
         "harness": h.name, "model": h.model, "cost_microdollars": spent, "killed": killed,
         "harness_cost_microdollars": harness_cost,
-        // The prices this cost was computed at, so the trace stays true when the device's prices change.
+        // The prices this cost was computed at, so the trace stays true when the host's prices change.
         "prices": prices,
         // The harness's own figure differs from bon's by more than 5%: the price table or the harness is stale.
         "price_mismatch": harness_cost.is_some_and(|c| (c as f64 - spent as f64).abs() > 0.05 * (c.max(spent).max(1) as f64)),
@@ -1117,7 +1117,7 @@ mod tests {
             harness = [{ name = "claude", model = "claude-haiku-5-5", n = [2, 4] }]
             counterexample = { harness = [{ name = "codex", model = "gpt-6.1-sol", n = [1] }], path = "c.sh", run = "sh c.sh" }
         "#).unwrap();
-        let d: Device = toml::from_str(r#"
+        let d: Host = toml::from_str(r#"
             path = ["/usr/bin"]
             [prices]
             "claude-haiku-5-5" = { input = 0.10, cached_input = 0.01, output = 0.50, cache_write = 0.125, cache_write_long = 0.20 }
@@ -1136,7 +1136,7 @@ mod tests {
     }
 
     #[test]
-    fn device_facts_are_refused_in_bon_toml() {
+    fn host_facts_are_refused_in_bon_toml() {
         assert!(toml::from_str::<Config>("limit = 1.0\nrate = 1\npath = [\"/usr/bin\"]").is_err());
         assert!(toml::from_str::<Config>("limit = 1.0\nrate = 1\n[prices]").is_err());
     }

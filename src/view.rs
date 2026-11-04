@@ -196,13 +196,13 @@ pub fn state(root: &Path) -> Value {
         "spec": spec(root, &manifest),
         "processes": searches,
         "trunk": trunk,
-        "device": device(),
+        "host": host(),
         "manifest": serde_json::to_value(&manifest).unwrap_or(Value::Null),
     })
 }
 
-fn device() -> Value {
-    let text = std::fs::read_to_string(best_of_n::trusted::DEVICE).unwrap_or_default();
+fn host() -> Value {
+    let text = std::fs::read_to_string(best_of_n::trusted::HOST).unwrap_or_default();
     toml::from_str::<toml::Value>(&text).ok().and_then(|v| serde_json::to_value(v).ok()).unwrap_or(Value::Null)
 }
 

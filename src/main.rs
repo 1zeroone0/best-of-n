@@ -110,11 +110,11 @@ fn scrub(root: &str, intent: &str) -> Result<(), String> {
 /// (intent 25)
 fn background(root: &str) -> Result<(), String> {
     let r = Path::new(root);
-    // Spare capacity: no bon command running here, and load below the device's jobs.
+    // Spare capacity: no bon command running here, and load below the host's jobs.
     let busy = std::fs::read_to_string(r.join(".bon/running")).ok()
         .filter(|pid| Command::new("kill").args(["-0", pid.trim()]).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success()));
     if busy.is_some() { println!("busy: a bon command is running here"); return Ok(()); }
-    let jobs = std::fs::read_to_string(best_of_n::trusted::DEVICE).ok()
+    let jobs = std::fs::read_to_string(best_of_n::trusted::HOST).ok()
         .and_then(|d| d.lines().find_map(|l| l.strip_prefix("jobs").and_then(|v| v.trim_start_matches([' ', '=']).trim().parse::<f64>().ok())))
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1.0, |n| (n.get() / 2).max(1) as f64));
     let load: f64 = Command::new("sysctl").args(["-n", "vm.loadavg"]).output().ok()
@@ -303,12 +303,12 @@ fn setup(dry_run: bool, user: Option<String>) -> Result<(), String> {
     // bon remakes it after a reboot clears /tmp. (intent 8)
     steps.push(vec!["sh".into(), "-c".into(), format!(
         "mkdir -p {d} && chown {me} {d} && chmod 0711 {d}", d = best_of_n::trusted::WORKING_DIRECTORIES)]);
-    // The device file: written once, then edited by hand (with sudo) as models and prices change.
-    if !std::path::Path::new(best_of_n::trusted::DEVICE).exists() {
-        let draft = std::env::temp_dir().join(format!("bon-device-{}.toml", std::process::id()));
-        if !dry_run { std::fs::write(&draft, DEVICE_TEMPLATE).map_err(|e| e.to_string())?; }
+    // The host file: written once, then edited by hand (with sudo) as models and prices change.
+    if !std::path::Path::new(best_of_n::trusted::HOST).exists() {
+        let draft = std::env::temp_dir().join(format!("bon-host-{}.toml", std::process::id()));
+        if !dry_run { std::fs::write(&draft, HOST_TEMPLATE).map_err(|e| e.to_string())?; }
         steps.push(vec!["sh".into(), "-c".into(), format!(
-            "mkdir -p /etc/bon && install -m 0644 -o root -g wheel {} {}", draft.display(), best_of_n::trusted::DEVICE)]);
+            "mkdir -p /etc/bon && install -m 0644 -o root -g wheel {} {}", draft.display(), best_of_n::trusted::HOST)]);
     }
     for step in &steps {
         let shown: Vec<&str> = step.iter().map(|x| if x.len() > 40 && !x.contains(' ') { "<random>" } else { x.as_str() }).collect();
@@ -329,9 +329,9 @@ fn setup(dry_run: bool, user: Option<String>) -> Result<(), String> {
     Ok(())
 }
 
-/// The device file `bon setup` writes: where agent's tools live, and the prices
+/// The host file `bon setup` writes: where agent's tools live, and the prices
 /// of the models in use. Traces record the prices they were costed at.
-const DEVICE_TEMPLATE: &str = r#"# bon's device file: facts about this machine, not about any repository.
+const HOST_TEMPLATE: &str = r#"# bon's host file: facts about this host, not about any repository.
 # Owned by root; edit with sudo. Every trace records the prices it was costed at.
 
 # How many agent processes run at once (default: half the cores). Width per

@@ -1,5 +1,5 @@
 {
-  "device": {
+  "host": {
     "path": [
       "/Users/agent/.local/bin",
       "/Users/agent/.cargo/bin",

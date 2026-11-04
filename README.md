@@ -40,7 +40,7 @@ sudo -u agent -i codex login
 
 Two files, by what they are about.
 
-**`/etc/bon/device.toml`, about this machine.** `bon setup` writes it once and
+**`/etc/bon/host.toml`, about this host.** `bon setup` writes it once and
 you edit it with sudo afterwards. It holds `path`, where agent's tools live,
 and `[prices]`: dollars per million tokens, keyed by canonical model id
 (`claude-haiku-5-5`, `gpt-6.1-sol`), with `input`, `cached_input`, `output`,
