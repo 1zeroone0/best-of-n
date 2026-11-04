@@ -11,7 +11,9 @@ const USAGE: &str = "usage:
   bon code \"<intent>\"     search for code that makes this intent hold; fast-forward trunk
   bon compaction          search for code that removes or simplifies without changing behavior
   bon map                 turn each new transcript into a proposal for the map
-  bon setup [--dry-run]   create user agent and group bon, and let engineer run commands as agent
+  bon setup [--dry-run] [--for <user>]
+                          create user agent and group bon, and let <user> (default: you) run commands as agent;
+                          run it as an administrator
   bon sbom [--check]      write sbom.json, or fail if it differs from this machine";
 
 fn main() {
@@ -30,7 +32,11 @@ fn main() {
         }
         Some("compaction") => exec::land(&root, None).map(|_| println!("trunk fast-forwarded")),
         Some("map") => map(&root),
-        Some("setup") => setup(args.get(1).map(String::as_str) == Some("--dry-run")),
+        Some("setup") => {
+            let dry_run = args.iter().any(|a| a == "--dry-run");
+            let user = args.iter().position(|a| a == "--for").and_then(|i| args.get(i + 1)).cloned();
+            setup(dry_run, user)
+        }
         Some("sbom") => sbom(&root, args.get(1).map(String::as_str) == Some("--check")),
         Some("help" | "-h" | "--help") => { println!("{USAGE}"); Ok(()) }
         Some(other) => Err(format!("unknown command {other}\n{USAGE}")),
@@ -131,8 +137,9 @@ fn timestamp(ms: u64) -> String {
 /// Create user agent and group bon, put engineer and agent in bon, and let
 /// engineer run commands as agent (never as root) with no password. Each step
 /// runs with sudo and is printed first. (intents 7, 8)
-fn setup(dry_run: bool) -> Result<(), String> {
-    let me = std::env::var("USER").map_err(|_| "USER is not set")?;
+fn setup(dry_run: bool, user: Option<String>) -> Result<(), String> {
+    let runner = std::env::var("USER").map_err(|_| "USER is not set")?;
+    let me = user.unwrap_or(runner.clone());
     let exists = |kind: &str, name: &str| Command::new("dscl").args([".", "-read", &format!("/{kind}/{name}")])
         .output().is_ok_and(|o| o.status.success());
     let mut steps: Vec<Vec<String>> = Vec::new();
@@ -161,8 +168,12 @@ fn setup(dry_run: bool) -> Result<(), String> {
         if !ok { return Err(format!("failed: sudo {}", shown.join(" "))); }
     }
     if dry_run { println!("(dry run: nothing changed)"); return Ok(()); }
-    let ok = Command::new("sudo").args(["-n", "-u", "agent", "true"]).status().is_ok_and(|s| s.success());
-    if !ok { return Err("engineer still cannot run commands as agent".into()); }
+    if me == runner {
+        let ok = Command::new("sudo").args(["-n", "-u", "agent", "true"]).status().is_ok_and(|s| s.success());
+        if !ok { return Err(format!("{me} still cannot run commands as agent")); }
+    } else {
+        println!("as {me}, confirm with: sudo -n -u agent true && echo ok");
+    }
     println!("done. Group membership takes effect in a new login session.");
     println!("Then log the harnesses in as agent: sudo -u agent -i claude, and sudo -u agent -i codex login");
     Ok(())
