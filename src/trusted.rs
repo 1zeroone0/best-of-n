@@ -499,6 +499,41 @@ pub fn fast_forward(m: &Manifest, commit: &Commit) -> (r: Result<(), String>) {
     git(&m.root, &["merge", "--ff-only", "--quiet", &c]).map(|_| ())
 }
 
+/// A point in time, for a search's wall time.
+#[verifier::external_body]
+pub struct Clock { pub at: Instant }
+
+#[verifier::external_body]
+pub fn clock() -> Clock { Clock { at: Instant::now() } }
+
+/// One search's cost per verified candidate, printed and recorded:
+/// (Σ_c (g(c) + k(c)) + r·t) / v. g(c) is each agent process's measured cost; k(c)
+/// is 0 because checks run locally and their time is inside t; r is bon.toml's
+/// rate; t is the search's wall time; v is how many candidates the verified gate
+/// passed. (intent 14)
+#[verifier::external_body]
+pub fn report(m: &Manifest, search: usize, n: usize, verified: usize, generation: u64, started: Clock) {
+    let hours = started.at.elapsed().as_secs_f64() / 3600.0;
+    let generation = generation as f64 / 1_000_000.0;
+    let time = m.config.rate * hours;
+    let per = if verified == 0 { None } else { Some((generation + time) / verified as f64) };
+    let line = format!(
+        "search {search}: {n} agent processes, {verified} verified; generation ${generation:.4} + time ${time:.4} ({:.0}s at ${}/h) = {}",
+        hours * 3600.0, m.config.rate,
+        per.map_or("no verified candidate".to_string(), |p| format!("${p:.4} per verified candidate")));
+    eprintln!("bon: {line}");
+    let d = m.root.join(".bon").join("traces").join(format!("{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&d);
+    let summary = serde_json::json!({
+        "search": search, "agent_processes": n, "verified": verified, "generation_dollars": generation,
+        "seconds": hours * 3600.0, "rate": m.config.rate, "time_dollars": time,
+        "cost_per_verified_candidate": per,
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(d.join("searches.jsonl")) {
+        let _ = writeln!(f, "{summary}");
+    }
+}
+
 /// Append one line to this command's trace. (intent 14)
 #[verifier::external_body]
 pub fn record(m: &Manifest, line: &str) {

@@ -1050,6 +1050,8 @@ fn search(
     let tracked mut capability = t.instance.grant(kind@, n as nat, l as nat, observed,
         &t.map, &t.checks, &t.trunk, &mut t.searches, &t.limit, &t.spent, &mut t.reserved);
     trusted::record(m, "grant");
+    let started = trusted::clock();
+    let spent_before = *spent;
     let mut results = trusted::run(m, &kind, index, a, &start, target, tests);
     if results.len() != n {
         return Err("trusted code returned the wrong number of agent processes".into());
@@ -1129,6 +1131,18 @@ fn search(
         assert(spec::complete(s@));
         assert(t.reserved.value() == 0) by(nonlinear_arith) requires t.reserved.value() == l as nat * (n - n) as nat;
     }
+    let v = verified_each(&s);
+    let mut verified: usize = 0;
+    let mut j = 0;
+    while j < v.len()
+        invariant 0 <= j <= v.len(), verified <= j,
+        decreases v.len() - j,
+    {
+        if v[j] { verified = verified + 1; }
+        j += 1;
+    }
+    let generation = if *spent >= spent_before { *spent - spent_before } else { 0 };
+    trusted::report(m, index, n, verified, generation, started);
     Ok(s)
 }
 
