@@ -15,7 +15,7 @@ rank = { code = "echo 0", compaction = "echo $((0 - $(cat src/*.rs | wc -l)))" }
 [[harness]]
 name = "codex"
 model = "gpt-6.1-sol"
-n = [4, 6, 8]
+n = [16, 24]
 
 [counterexample]
 harness = [{ name = "claude", model = "claude-opus-5-5", n = [2] }]
