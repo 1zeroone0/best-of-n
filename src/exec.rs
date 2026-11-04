@@ -61,7 +61,7 @@ pub fn isolated(checks: Permission, transcripts: Permission, working_directory: 
 {
     let ghost o = observed(checks, transcripts, working_directory, repository);
     let r = permission_is(&checks, true, false, true)
-        && permission_is(&transcripts, true, false, false)
+        && permission_is(&transcripts, true, false, true)
         && permission_is(&working_directory, true, true, true)
         && permission_is(&repository, false, false, false);
     proof {
@@ -72,7 +72,7 @@ pub fn isolated(checks: Permission, transcripts: Permission, working_directory: 
         } else {
             if !permission_is_spec(checks, true, false, true) {
                 assert(o[File::Checks] != spec::policy(User::agent, File::Checks));
-            } else if !permission_is_spec(transcripts, true, false, false) {
+            } else if !permission_is_spec(transcripts, true, false, true) {
                 assert(o[File::Transcripts] != spec::policy(User::agent, File::Transcripts));
             } else if !permission_is_spec(working_directory, true, true, true) {
                 assert(o[File::WorkingDirectory] != spec::policy(User::agent, File::WorkingDirectory));

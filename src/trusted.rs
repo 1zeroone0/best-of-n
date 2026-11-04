@@ -216,7 +216,9 @@ fn working_directory(root: &std::path::Path, config: &Config, commit: &str, dir:
     materialize(root, commit, dir)?;
     sh(dir, "chmod", &["-R", "g+rwX", "."])?;
     sh(dir, "find", &[".", "-type", "d", "-exec", "chmod", "g+s", "{}", "+"])?;
-    for p in &config.checks.paths {
+    // The checks and the transcripts: agent may read them, never change them.
+    let transcripts = config.transcripts.clone().unwrap_or("transcripts".into());
+    for p in config.checks.paths.iter().chain(std::iter::once(&transcripts)) {
         let target = dir.join(p.trim_end_matches('/'));
         if !target.exists() { continue; }
         let t = target.to_string_lossy().to_string();
@@ -460,8 +462,9 @@ pub fn observe(m: &Manifest, commit: &Commit) -> (r: Result<(Permission, Permiss
     };
     let perm = |path: &std::path::Path| Permission { read: ask(path, "-r"), write: ask(path, "-w"), execute: ask(path, "-x") };
     let check = m.config.checks.paths.first().map(|p| probe.join(p.trim_end_matches('/'))).ok_or("no check paths")?;
-    let transcripts = m.root.join(m.config.transcripts.clone().unwrap_or("transcripts".into()));
-    let r = (perm(&check), if transcripts.exists() { perm(&transcripts) } else { Permission { read: true, write: false, execute: false } },
+    // The transcripts as agent meets them: in a working directory.
+    let transcripts = probe.join(m.config.transcripts.clone().unwrap_or("transcripts".into()));
+    let r = (perm(&check), if transcripts.exists() { perm(&transcripts) } else { Permission { read: true, write: false, execute: true } },
              perm(&probe), perm(&m.root.join(".git")));
     let _ = std::fs::remove_dir_all(&probe);
     Ok(r)

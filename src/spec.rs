@@ -135,7 +135,7 @@ pub open spec fn authority(kind: Kind, checks: Set<Path>) -> ISet<Path> {
 pub open spec fn policy(u: User, f: File) -> Permission {
     match (u, f) {
         (User::agent, File::Checks)           => Permission { read: true,  write: false, execute: true },
-        (User::agent, File::Transcripts)      => Permission { read: true,  write: false, execute: false },
+        (User::agent, File::Transcripts)      => Permission { read: true,  write: false, execute: true },
         (User::agent, File::WorkingDirectory) => Permission { read: true,  write: true,  execute: true },
         (User::agent, File::Repository)       => Permission { read: false, write: false, execute: false },
         (User::engineer, _)                   => Permission { read: true,  write: true,  execute: true },
