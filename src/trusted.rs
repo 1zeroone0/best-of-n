@@ -358,7 +358,10 @@ pub fn intents(m: &Manifest, commit: &Commit) -> Vec<Intent> {
 pub fn observe(m: &Manifest, commit: &Commit) -> (r: Result<(Permission, Permission, Permission, Permission), String>) {
     let c: String = commit.iter().collect();
     let probe = scratch("probe");
-    working_directory(&m.root, &m.config, &c, &probe)?;
+    if let Err(e) = working_directory(&m.root, &m.config, &c, &probe) {
+        let _ = std::fs::remove_dir_all(&probe);
+        return Err(format!("agent is not set up ({e}); run bon setup"));
+    }
     let ask = |path: &std::path::Path, flag: &str| -> bool {
         Command::new("sudo").args(["-n", "-u", "agent", "test", flag]).arg(path).status().map_or(false, |s| s.success())
     };
@@ -406,6 +409,24 @@ pub fn record(m: &Manifest, line: &str) {
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(d.join("transitions")) {
         let _ = writeln!(f, "{line}");
     }
+}
+
+/// The agree checks' outputs at a commit, hashed: a compaction search's goal.
+#[verifier::external_body]
+pub fn agree_outputs(m: &Manifest, commit: &Commit) -> (r: Result<Vec<u64>, String>) {
+    let c: String = commit.iter().collect();
+    let dir = scratch("goal");
+    check_directory(&m.root, &c, &dir)?;
+    let build = build_directory(&m.config, "goal-build")?;
+    let log = m.root.join(".bon").join("traces").join(format!("{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&log);
+    let mut out = Vec::new();
+    for (k, a) in m.config.checks.agree.iter().enumerate() {
+        out.push(hash(&run_check(&m.config, &dir, &build, a, &log.join(format!("goal-agree-{k}"))).1));
+    }
+    let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(out)
 }
 
 } // verus!
@@ -557,4 +578,51 @@ fn parse_cue(t: &str) -> Option<u64> {
     let parts: Vec<u64> = hms.split(':').map(|p| p.parse().ok()).collect::<Option<_>>()?;
     let secs = parts.iter().fold(0, |a, p| a * 60 + p);
     Some(secs * 1000 + ms.parse::<u64>().ok()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cues() {
+        assert_eq!(parse_cue("00:01:02.345"), Some(62_345));
+        assert_eq!(parse_cue("01:00:00.000"), Some(3_600_000));
+        assert_eq!(parse_cue("nope"), None);
+    }
+
+    fn config() -> Config {
+        toml::from_str(r#"
+            limit = 5.0
+            rate = 150
+            path = ["/usr/bin"]
+            agent_process = { limit = 0.5, time = 60 }
+            checks = { paths = ["checks/"], verify = ["true"] }
+            harness = [{ name = "claude", model = "haiku", n = 2 }]
+            counterexample = { harness = [{ name = "codex", model = "mini", n = 1 }], path = "c.sh", test = "sh c.sh" }
+            prices = { haiku = { input = 1.0, output = 5.0, cache_read = 0.1, cache_write = 1.25 }, mini = { input = 0.25, output = 2.0 } }
+        "#).unwrap()
+    }
+
+    #[test]
+    fn claude_cost_is_the_result_usage_priced() {
+        let c = config();
+        let out = r#"{"type":"assistant"}
+{"type":"result","usage":{"input_tokens":1000000,"output_tokens":100000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#;
+        assert_eq!(cost(&c.harness[0], &c, out), Ok(1_500_000));
+    }
+
+    #[test]
+    fn codex_cost_sums_turns_and_prices_cached_input_apart() {
+        let c = config();
+        let h = &c.counterexample.harness[0];
+        let out = r#"{"type":"turn.completed","usage":{"input_tokens":1000000,"cached_input_tokens":0,"output_tokens":0}}
+{"type":"turn.completed","usage":{"input_tokens":0,"cached_input_tokens":0,"output_tokens":1000000}}"#;
+        assert_eq!(cost(h, &c, out), Ok(2_250_000));
+    }
+
+    #[test]
+    fn unknown_fields_are_refused() {
+        assert!(toml::from_str::<Config>("limit = 1.0\nbogus = 2").is_err());
+    }
 }

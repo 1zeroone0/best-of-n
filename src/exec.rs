@@ -1130,17 +1130,23 @@ fn search(
 }
 
 
-/// bon code: search for code that makes one intent of the map hold, and
+/// bon code (goal is an intent) or bon compaction (no goal): search, then
 /// fast-forward trunk to the selected candidate once a counterexample search
-/// clears it. (intents 2–9, 13, 16)
-pub fn code(root: &str, goal: Intent) -> (r: Result<(), String>) {
+/// clears it. (intents 2–9, 13, 16, 17)
+pub fn land(root: &str, goal: Option<Intent>) -> (r: Result<(), String>) {
     let head = trusted::head(root)?;
     let m = trusted::manifest(root, &head)?;
     trusted::on_trunk(&m)?;
     let intents = trusted::intents(&m, &head);
-    if !contains(&intents, &goal) {
-        return Err("that intent is not in the map at trunk's head".into());
-    }
+    let kind = match goal {
+        Some(goal) => {
+            if !contains(&intents, &goal) {
+                return Err("that intent is not in the map at trunk's head".into());
+            }
+            Kind::Code { goal }
+        }
+        None => Kind::Compaction { goal: copy_text(&head), out: trusted::agree_outputs(&m, &head)? },
+    };
     let checks = trusted::checks(&m);
     let limit = trusted::limit(&m);
     let l = trusted::agent_process_limit(&m);
@@ -1157,7 +1163,7 @@ pub fn code(root: &str, goal: Intent) -> (r: Result<(), String>) {
     trusted::record(&m, "initialize");
     proof { assert(t.trunk.value().last() == head@); }
 
-    let s0 = search(&m, 0, Kind::Code { goal }, copy_text(&head), &checks, l, limit, &mut spent, None,
+    let s0 = search(&m, 0, kind, copy_text(&head), &checks, l, limit, &mut spent, None,
                     Ghost(observed), Tracked(&mut t))?;
     let i = match selected(&s0) {
         Some(i) => i,
@@ -1190,6 +1196,33 @@ pub fn code(root: &str, goal: Intent) -> (r: Result<(), String>) {
     trusted::fast_forward(&m, &candidate(&s0, i).commit)?;
     trusted::record(&m, "fast_forward");
     Ok(())
+}
+
+/// bon map: one map search on a transcript, and its proposal for engineer:
+/// the agreed intents with their wording, and the contested cues. (intent 10)
+pub fn map(root: &str, transcript: Transcript) -> (r: Result<(Vec<(Cue, Intent)>, Vec<Cue>), String>) {
+    let head = trusted::head(root)?;
+    let m = trusted::manifest(root, &head)?;
+    trusted::on_trunk(&m)?;
+    let intents = trusted::intents(&m, &head);
+    let checks = trusted::checks(&m);
+    let limit = trusted::limit(&m);
+    let l = trusted::agent_process_limit(&m);
+    let (pc, pt, pw, pr) = trusted::observe(&m, &head)?;
+    if !isolated(pc, pt, pw, pr) {
+        return Err("agent is not isolated: its permissions differ from the policy; run bon setup".into());
+    }
+    let ghost observed = observed(pc, pt, pw, pr);
+    let tracked (Tracked(instance), Tracked(map), Tracked(checks_t), Tracked(trunk), Tracked(authors),
+                 Tracked(searches), Tracked(limit_t), Tracked(spent_t), Tracked(reserved), Tracked(capability))
+        = spec::bon::Instance::initialize(head@, intent_set(intents@), paths(checks@), limit as nat);
+    let tracked mut t = Tokens { instance, map, checks: checks_t, trunk, authors, searches, limit: limit_t, spent: spent_t, reserved };
+    let mut spent: u64 = 0;
+    trusted::record(&m, "initialize");
+    let s = search(&m, 0, Kind::Map { goal: transcript }, copy_text(&head), &checks, l, limit, &mut spent, None,
+                   Ghost(observed), Tracked(&mut t))?;
+    trusted::record(&m, "proposal");
+    Ok((proposed(&s), contested(&s)))
 }
 
 /// A copy of some text.

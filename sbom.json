@@ -1,0 +1,278 @@
+{
+  "bomFormat": "CycloneDX",
+  "components": [
+    {
+      "name": "best-of-n",
+      "purl": "pkg:cargo/best-of-n@0.0.1",
+      "type": "library",
+      "version": "0.0.1"
+    },
+    {
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "6245d59a3e82a7fc217c5828a6692dbc6dfb63a0c8c90495621f7b9d79704a0e"
+        }
+      ],
+      "name": "convert_case",
+      "purl": "pkg:cargo/convert_case@0.4.0",
+      "type": "library",
+      "version": "0.4.0"
+    },
+    {
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
+        }
+      ],
+      "name": "equivalent",
+      "purl": "pkg:cargo/equivalent@1.0.3",
+      "type": "library",
+      "version": "1.0.3"
+    },
+    {
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+        }
+      ],
+      "name": "hashbrown",
+      "purl": "pkg:cargo/hashbrown@0.17.1",
+      "type": "library",
+      "version": "0.17.1"
+    },
+    {
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "cc4e190f5d26ca7051642629da2c52fc03bde85a03197c99408dcd291734c855"
+        }
+      ],
+      "name": "indexmap",
+      "purl": "pkg:cargo/indexmap@2.14.2",
+      "type": "library",
+      "version": "2.14.2"
+    },
+    {
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "985e7ec9bb745e6ce6535b544d84d6cd6f7ad8bd711c398938ae983b91a766d9"
+        }
+      ],
+      "name": "proc-macro2",
+      "purl": "pkg:cargo/proc-macro2@1.0.107",
+      "type": "library",
+      "version": "1.0.107"
+    },
+    {
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "1fbf4db142a473a8d80c26bbf18454ed458bf8d26c8219c331daecfdbd079001"
+        }
+      ],
+      "name": "quote",
+      "purl": "pkg:cargo/quote@1.0.47",
+      "type": "library",
+      "version": "1.0.47"
+    },
+    {
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "872831b642d1a07999a962a351ed35b955ea2cfc8f3862091e2a240a84f17297"
+        }
+      ],
+      "name": "syn",
+      "purl": "pkg:cargo/syn@2.0.119",
+      "type": "library",
+      "version": "2.0.119"
+    },
+    {
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "728a70f3dbaf5bab7f0c4b1ac8d7ae5ea60a4b5549c8a5914361c99147a709d2"
+        }
+      ],
+      "name": "synstructure",
+      "purl": "pkg:cargo/synstructure@0.13.2",
+      "type": "library",
+      "version": "0.13.2"
+    },
+    {
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
+        }
+      ],
+      "name": "unicode-ident",
+      "purl": "pkg:cargo/unicode-ident@1.0.27",
+      "type": "library",
+      "version": "1.0.27"
+    },
+    {
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "d2e5d0972903f31da5271f50645c402122804a4e5292e1694706977ce18cbe67"
+        }
+      ],
+      "name": "verus_builtin",
+      "purl": "pkg:cargo/verus_builtin@0.0.0-2026-10-11-0230",
+      "type": "library",
+      "version": "0.0.0-2026-10-11-0230"
+    },
+    {
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "c420824c5f3528bc29892c12c9083c03e8abe09119456e0ffe98ec3fb16ee5b8"
+        }
+      ],
+      "name": "verus_builtin_macros",
+      "purl": "pkg:cargo/verus_builtin_macros@0.0.0-2026-10-18-0147",
+      "type": "library",
+      "version": "0.0.0-2026-10-18-0147"
+    },
+    {
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "71956c0dcf55f57fd5a5335fff16981f7e0912d2e887914518c5a64fe36c063c"
+        }
+      ],
+      "name": "verus_prettyplease",
+      "purl": "pkg:cargo/verus_prettyplease@0.0.0-2026-09-06-0133",
+      "type": "library",
+      "version": "0.0.0-2026-09-06-0133"
+    },
+    {
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "999032b29d28518b813f7b474adbb958a2f41c606d72d84e986546309469eeef"
+        }
+      ],
+      "name": "verus_state_machines_macros",
+      "purl": "pkg:cargo/verus_state_machines_macros@0.0.0-2026-10-18-0147",
+      "type": "library",
+      "version": "0.0.0-2026-10-18-0147"
+    },
+    {
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "7d8b53574934e1f608dfccd809ce17f3733d6eb99c14ce8220326121929e1637"
+        }
+      ],
+      "name": "verus_syn",
+      "purl": "pkg:cargo/verus_syn@0.0.0-2026-09-06-0133",
+      "type": "library",
+      "version": "0.0.0-2026-09-06-0133"
+    },
+    {
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "eb200973a51d678d3432092ce692c110bf262e281d7ffd55ec028708be84d676"
+        }
+      ],
+      "name": "vstd",
+      "purl": "pkg:cargo/vstd@0.0.0-2026-10-18-0147",
+      "type": "library",
+      "version": "0.0.0-2026-10-18-0147"
+    },
+    {
+      "group": "tcb",
+      "name": "rustc",
+      "type": "application",
+      "version": "rustc 1.98.0 (88d9e12ae 2026-08-18)"
+    },
+    {
+      "group": "tcb",
+      "name": "verus",
+      "type": "application",
+      "version": "0.2026.10.18.7d82994"
+    },
+    {
+      "group": "tcb",
+      "name": "git",
+      "type": "application",
+      "version": "git version 2.50.1 (Apple Git-155)"
+    },
+    {
+      "group": "tcb",
+      "name": "sudo",
+      "type": "application",
+      "version": "Sudo version 1.9.17p2"
+    },
+    {
+      "group": "tcb",
+      "name": "tar",
+      "type": "application",
+      "version": "bsdtar 3.5.3 - libarchive 3.7.4 zlib/1.2.12 liblzma/5.4.3 bz2lib/1.0.8"
+    },
+    {
+      "group": "tcb",
+      "name": "claude",
+      "type": "application",
+      "version": "2.1.317 (Claude Code)"
+    },
+    {
+      "group": "tcb",
+      "name": "codex",
+      "type": "application",
+      "version": "codex-cli 0.166.0"
+    },
+    {
+      "group": "tcb",
+      "name": "macOS",
+      "type": "operating-system",
+      "version": "26.6.2"
+    }
+  ],
+  "metadata": {
+    "component": {
+      "name": "best-of-n",
+      "type": "application",
+      "version": "0.0.1"
+    },
+    "properties": [
+      {
+        "name": "bon:trusted-file",
+        "value": "src/trusted.rs"
+      },
+      {
+        "name": "bon:trusted-file",
+        "value": "src/main.rs"
+      },
+      {
+        "name": "bon:trusted-functions",
+        "value": "Manifest,manifest,limit,agent_process_limit,checks,width,head,on_trunk,intents,observe,run,fast_forward,record,agree_outputs"
+      }
+    ]
+  },
+  "services": [
+    {
+      "endpoints": [
+        "https://api.anthropic.com"
+      ],
+      "group": "harness",
+      "name": "Anthropic API"
+    },
+    {
+      "endpoints": [
+        "https://api.openai.com"
+      ],
+      "group": "harness",
+      "name": "OpenAI API"
+    }
+  ],
+  "specVersion": "1.5",
+  "version": 1
+}
