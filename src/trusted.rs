@@ -151,7 +151,8 @@ fn supervise(mut c: Command, stdin: Option<String>, time: Duration, log: &std::p
     };
     let stdout = o.join().unwrap_or_default();
     let stderr = e.join().unwrap_or_default();
-    let _ = std::fs::write(log, format!("{stdout}\n--- stderr\n{stderr}"));
+    let exit = if killed { "killed".to_string() } else { status.and_then(|s| s.code()).map_or("signal".into(), |c| c.to_string()) };
+    let _ = std::fs::write(log, format!("exit: {exit}\nseconds: {:.1}\n--- stdout\n{stdout}\n--- stderr\n{stderr}", start.elapsed().as_secs_f64()));
     (status.map_or(false, |s| s.success()) && !killed, stdout, killed)
 }
 
@@ -462,6 +463,19 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
         let _ = std::fs::write(trace.join("error"), &e);
     }).ok();
     let _ = std::fs::remove_dir_all(&dir);
+    let build = scratch(&format!("{search}-{index}-build"));
+    let _ = as_agent(config, std::path::Path::new("/tmp"), &[], &["rm".into(), "-rf".into(), build.to_string_lossy().into()]).status();
+    let text = |v: &Vec<char>| v.iter().collect::<String>();
+    let facts = serde_json::json!({
+        "harness": h.name, "model": h.model, "cost_microdollars": spent, "killed": killed,
+        "candidate": candidate.as_ref().map(|c| serde_json::json!({
+            "commit": text(&c.commit), "base": text(&c.base), "checks_pass": c.checks_pass,
+            "changed": c.changed.iter().map(text).collect::<Vec<_>>(), "diff": c.diff, "rank": c.rank,
+            "out": c.out, "test_passes": c.test_passes,
+            "intents": c.intents.iter().map(|(q, i)| (q, text(i))).collect::<Vec<_>>(),
+        })),
+    });
+    let _ = std::fs::write(trace.join("facts.json"), serde_json::to_string_pretty(&facts).unwrap_or_default());
     (candidate, spent)
 }
 
@@ -490,7 +504,13 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
         Kind::Counterexample { .. } => "counterexample".to_string(),
     };
     let message = format!("{subject}\n\nTrace: .bon/traces/{}/{search}/{index}\n", std::process::id());
-    let commit = git(root, &["commit-tree", &tree, "-p", start, "-m", &message])?;
+    let commit = {
+        let out = Command::new("git").args(["commit-tree", &tree, "-p", start, "-m", &message]).current_dir(root)
+            .env("GIT_AUTHOR_NAME", "agent").env("GIT_AUTHOR_EMAIL", "agent@localhost")
+            .stdin(Stdio::null()).output().map_err(|e| e.to_string())?;
+        if !out.status.success() { return Err(String::from_utf8_lossy(&out.stderr).to_string()); }
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
     git(root, &["update-ref", &format!("refs/bon/{}/{search}/{index}", std::process::id()), &commit])?;
 
     let numstat = git(root, &["diff-tree", "-r", "--numstat", "--no-renames", start, &commit])?;
