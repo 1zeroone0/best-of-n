@@ -24,6 +24,10 @@ use crate::gates::{Candidate, Commit, Cue, Intent, Kind, Path, Permission, Searc
 pub struct Config {
     #[serde(default = "trunk_default")]
     pub trunk: String,
+    /// The remote whose trunk is the golden trunk: searches start from it, and
+    /// every fast-forward is pushed to it.
+    #[serde(default = "remote_default")]
+    pub remote: String,
     /// The bon process's limit, in dollars, per command.
     pub limit: f64,
     /// engineer's time, in dollars per hour.
@@ -40,6 +44,7 @@ pub struct Config {
 }
 
 fn trunk_default() -> String { "main".into() }
+fn remote_default() -> String { "origin".into() }
 
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
@@ -70,6 +75,8 @@ pub struct Checks {
 pub struct Harness {
     /// "claude" or "codex".
     pub name: String,
+    /// The canonical model id (e.g. claude-haiku-5-5, gpt-6.1-sol), never an alias:
+    /// it is passed to the harness and keys the price table.
     pub model: String,
     pub n: usize,
 }
@@ -89,11 +96,13 @@ pub struct Counterexample {
 #[serde(deny_unknown_fields)]
 pub struct Price {
     pub input: f64,
+    /// Input read from the prompt cache.
+    pub cached_input: f64,
     pub output: f64,
-    #[serde(default)]
-    pub cache_read: f64,
-    #[serde(default)]
+    /// Input written to the prompt cache, shorter TTL (Claude 5 minutes, OpenAI 30 minutes).
     pub cache_write: f64,
+    /// Input written to the prompt cache, longer TTL (Claude 1 hour, OpenAI 12 hours).
+    pub cache_write_long: f64,
 }
 
 /// Dollars to microdollars, the unit of every cost and limit.
@@ -257,26 +266,36 @@ fn harness_argv(h: &Harness, config: &Config, dir: &std::path::Path) -> Vec<Stri
     }
 }
 
-/// Tokens from a harness's JSON output, priced by the manifest. Claude: the
-/// final `result` event's usage. Codex: the sum over `turn.completed` events.
-fn cost(h: &Harness, config: &Config, stdout: &str) -> Result<u64, String> {
-    let price = config.prices.get(&h.model).ok_or(format!("no price for model {}", h.model))?;
-    let (mut i, mut o, mut cr, mut cw) = (0f64, 0f64, 0f64, 0f64);
-    for line in stdout.lines() {
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-        let t = v["type"].as_str().unwrap_or("");
-        let u = if h.name == "claude" && t == "result" { &v["usage"] }
-            else if h.name != "claude" && t == "turn.completed" { &v["usage"] } else { continue };
-        let n = |k: &str| u[k].as_f64().unwrap_or(0.0);
-        if h.name == "claude" {
-            i = n("input_tokens"); o = n("output_tokens");
-            cr = n("cache_read_input_tokens"); cw = n("cache_creation_input_tokens");
-        } else {
-            let cached = n("cached_input_tokens");
-            i += n("input_tokens") - cached; o += n("output_tokens"); cr += cached;
+/// API-equivalent cost in microdollars, from the harness's token counts and the
+/// manifest's price table: (bon's figure, the harness's own figure if it reports one).
+/// Claude: the final `result` event's `modelUsage`, per model, with 5-minute and
+/// 1-hour cache writes apart. Codex: the last `turn.completed`, whose usage is a
+/// running total; cached and cache-write tokens are part of `input_tokens`.
+fn cost(h: &Harness, config: &Config, stdout: &str) -> Result<(u64, Option<u64>), String> {
+    let price = |model: &str| config.prices.get(model).ok_or(format!("no price for model {model}"));
+    let rate = |p: &Price, input: f64, cached: f64, output: f64, write: f64, write_long: f64| {
+        (input * p.input + cached * p.cached_input + output * p.output + write * p.cache_write + write_long * p.cache_write_long) / 1_000_000.0
+    };
+    let events: Vec<serde_json::Value> = stdout.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    if h.name == "claude" {
+        let Some(r) = events.iter().rev().find(|v| v["type"] == "result") else { return Err("no result event".into()) };
+        let mut ours = 0.0;
+        let mut theirs = 0.0;
+        for (model, u) in r["modelUsage"].as_object().cloned().unwrap_or_default() {
+            let n = |k: &str| u[k].as_f64().unwrap_or(0.0);
+            let (w5, w1) = (n("cacheCreationEphemeral5mInputTokens"), n("cacheCreationEphemeral1hInputTokens"));
+            let w5 = if w5 + w1 == 0.0 { n("cacheCreationInputTokens") } else { w5 };
+            ours += rate(price(&model)?, n("inputTokens"), n("cacheReadInputTokens"), n("outputTokens"), w5, w1);
+            theirs += n("costUSD");
         }
+        Ok((micro(ours), Some(micro(theirs))))
+    } else {
+        let Some(t) = events.iter().rev().find(|v| v["type"] == "turn.completed") else { return Err("no turn.completed event".into()) };
+        let n = |k: &str| t["usage"][k].as_f64().unwrap_or(0.0);
+        let (cached, write) = (n("cached_input_tokens"), n("cache_write_input_tokens"));
+        let input = (n("input_tokens") - cached - write).max(0.0);
+        Ok((micro(rate(price(&h.model)?, input, cached, n("output_tokens"), write, 0.0)), None))
     }
-    Ok(micro((i * price.input + o * price.output + cr * price.cache_read + cw * price.cache_write) / 1_000_000.0))
 }
 
 fn prompt(kind: &Kind, config: &Config, map: &str) -> String {
@@ -313,6 +332,11 @@ pub fn manifest(root: &str, commit: &Commit) -> (r: Result<Manifest, String>) {
     let c: String = commit.iter().collect();
     let text = git(&root, &["show", &format!("{c}:bon.toml")]).map_err(|_| "no bon.toml at trunk's head; commit one".to_string())?;
     let config: Config = toml::from_str(&text).map_err(|e| format!("bon.toml: {e}"))?;
+    for h in config.harness.iter().chain(config.counterexample.harness.iter()) {
+        if !config.prices.contains_key(&h.model) {
+            return Err(format!("bon.toml: no [prices] entry for {}; use the canonical model id", h.model));
+        }
+    }
     Ok(Manifest { config, root })
 }
 
@@ -350,6 +374,13 @@ pub fn head(root: &str) -> (r: Result<Commit, String>) {
 pub fn on_trunk(m: &Manifest) -> (r: Result<(), String>) {
     let b = git(&m.root, &["symbolic-ref", "--short", "HEAD"])?;
     if b != m.config.trunk { return Err(format!("on {b}; bon works on trunk ({})", m.config.trunk)); }
+    let (r, t) = (&m.config.remote, &m.config.trunk);
+    git(&m.root, &["fetch", "--quiet", r, t]).map_err(|e| format!("fetch {r} {t}: {e}"))?;
+    let local = git(&m.root, &["rev-parse", "HEAD"])?;
+    let remote = git(&m.root, &["rev-parse", &format!("{r}/{t}")])?;
+    if local != remote {
+        return Err(format!("trunk differs from {r}/{t}; pull or push so they match, then run again"));
+    }
     Ok(())
 }
 
@@ -403,10 +434,15 @@ pub fn run(m: &Manifest, kind: &Kind, search: usize, start: &Commit, target: Opt
     })
 }
 
-/// trunk fast-forwards to `commit`; git refuses if trunk moved. (TCB: git)
+/// The remote's trunk fast-forwards to `commit`, then the local trunk follows.
+/// The push is fast-forward only: if the remote's trunk moved, it is refused and
+/// nothing changes. (TCB: git, the remote)
 #[verifier::external_body]
 pub fn fast_forward(m: &Manifest, commit: &Commit) -> (r: Result<(), String>) {
     let c: String = commit.iter().collect();
+    let (r, t) = (&m.config.remote, &m.config.trunk);
+    git(&m.root, &["push", "--quiet", r, &format!("{c}:refs/heads/{t}")])
+        .map_err(|e| format!("blocked: {r}/{t} moved during the search, so the push was refused; run it again ({e})"))?;
     git(&m.root, &["merge", "--ff-only", "--quiet", &c]).map(|_| ())
 }
 
@@ -457,7 +493,8 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
     let _ = std::fs::write(trace.join("prompt"), &text);
     let c = as_agent(config, &dir, &[], &argv);
     let (_, stdout, killed) = supervise(c, Some(text), Duration::from_secs(config.agent_process.time), &trace.join("harness"));
-    let spent = cost(h, config, &stdout).unwrap_or(micro(config.agent_process.limit));
+    // Without token counts there is no measured cost: charge the whole limit.
+    let (spent, harness_cost) = cost(h, config, &stdout).unwrap_or((micro(config.agent_process.limit), None));
     if killed { let _ = std::fs::write(trace.join("killed"), "time limit"); }
     let candidate = capture(m, kind, search, index, start, &dir, target, trace).map_err(|e| {
         let _ = std::fs::write(trace.join("error"), &e);
@@ -468,6 +505,10 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
     let text = |v: &Vec<char>| v.iter().collect::<String>();
     let facts = serde_json::json!({
         "harness": h.name, "model": h.model, "cost_microdollars": spent, "killed": killed,
+        "harness_cost_microdollars": harness_cost,
+        // The harness's own figure differs from bon's by more than 5%: the price table or the harness is stale.
+        "price_mismatch": harness_cost.is_some_and(|c| (c as f64 - spent as f64).abs() > 0.05 * (c.max(spent).max(1) as f64)),
+        "over_limit": spent > micro(config.agent_process.limit),
         "candidate": candidate.as_ref().map(|c| serde_json::json!({
             "commit": text(&c.commit), "base": text(&c.base), "checks_pass": c.checks_pass,
             "changed": c.changed.iter().map(text).collect::<Vec<_>>(), "diff": c.diff, "rank": c.rank,
@@ -626,27 +667,30 @@ mod tests {
             path = ["/usr/bin"]
             agent_process = { limit = 0.5, time = 60 }
             checks = { paths = ["checks/"], verify = ["true"] }
-            harness = [{ name = "claude", model = "haiku", n = 2 }]
-            counterexample = { harness = [{ name = "codex", model = "mini", n = 1 }], path = "c.sh", test = "sh c.sh" }
-            prices = { haiku = { input = 1.0, output = 5.0, cache_read = 0.1, cache_write = 1.25 }, mini = { input = 0.25, output = 2.0 } }
+            harness = [{ name = "claude", model = "claude-haiku-5-5", n = 2 }]
+            counterexample = { harness = [{ name = "codex", model = "gpt-6.1-sol", n = 1 }], path = "c.sh", test = "sh c.sh" }
+            [prices]
+            "claude-haiku-5-5" = { input = 0.10, cached_input = 0.01, output = 0.50, cache_write = 0.125, cache_write_long = 0.20 }
+            "gpt-6.1-sol" = { input = 2.00, cached_input = 0.10, output = 10.00, cache_write = 2.50, cache_write_long = 5.00 }
         "#).unwrap()
     }
 
     #[test]
-    fn claude_cost_is_the_result_usage_priced() {
+    fn claude_cost_matches_its_own_on_a_real_run() {
+        // The modelUsage of the first end-to-end run; Claude Code reported $0.00245213.
         let c = config();
-        let out = r#"{"type":"assistant"}
-{"type":"result","usage":{"input_tokens":1000000,"output_tokens":100000,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}"#;
-        assert_eq!(cost(&c.harness[0], &c, out), Ok(1_500_000));
+        let out = r#"{"type":"result","total_cost_usd":0.00245213,"modelUsage":{"claude-haiku-5-5":{"inputTokens":6,"outputTokens":527,"cacheReadInputTokens":49463,"cacheCreationInputTokens":8467,"cacheCreationEphemeral5mInputTokens":0,"cacheCreationEphemeral1hInputTokens":8467,"costUSD":0.00245213}}}"#;
+        assert_eq!(cost(&c.harness[0], &c, out), Ok((2452, Some(2452))));
     }
 
     #[test]
-    fn codex_cost_sums_turns_and_prices_cached_input_apart() {
+    fn codex_cost_is_the_last_running_total_with_cached_input_apart() {
         let c = config();
         let h = &c.counterexample.harness[0];
-        let out = r#"{"type":"turn.completed","usage":{"input_tokens":1000000,"cached_input_tokens":0,"output_tokens":0}}
-{"type":"turn.completed","usage":{"input_tokens":0,"cached_input_tokens":0,"output_tokens":1000000}}"#;
-        assert_eq!(cost(h, &c, out), Ok(2_250_000));
+        let out = r#"{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}
+{"type":"turn.completed","usage":{"input_tokens":1000000,"cached_input_tokens":500000,"cache_write_input_tokens":0,"output_tokens":100000}}"#;
+        // 500k input at $2, 500k cached at $0.10, 100k output at $10.
+        assert_eq!(cost(h, &c, out), Ok((2_050_000, None)));
     }
 
     #[test]

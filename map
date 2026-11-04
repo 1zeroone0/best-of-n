@@ -17,3 +17,5 @@ Limits nest like the process tree: each agent process's limit is reserved from i
 A compaction search asks for candidates that remove or simplify code at trunk's head; every verified candidate must print the same as trunk's head on each agree check, and the highest rank is selected.
 The SBOM lists every crate, toolchain, TCB tool, service and trusted function bon depends on, as CycloneDX, and a check fails when it differs from the machine.
 A skill ships with the CLI for the model engineer talks to: how to work at the spec level and when to run bon, read from the bon.toml, map and spec of the repo it runs in; agent processes never see it.
+Trunk is the remote's main: a search starts from it, and every fast-forward is pushed to it, or refused if it moved.
+Cost is computed from the harness's token counts and the manifest's prices for the canonical model, and checked against the harness's own figure where it gives one.

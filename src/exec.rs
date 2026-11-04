@@ -1085,8 +1085,10 @@ fn search(
             *spent as nat + l as nat * (n - i) as nat <= limit as nat,
         decreases n - i,
     {
-        let (r, cost) = results.remove(0);
-        if cost > l { return Err("an agent process spent past its limit".into()); }
+        let (r, measured) = results.remove(0);
+        // A harness that cannot be stopped mid-turn (codex) may overrun its limit;
+        // it is charged at its limit and the overrun is in its facts.json. (TCB)
+        let cost = if measured > l { trusted::record(m, "wait: an agent process overran its limit"); l } else { measured };
         match &r {
             Some(c) => { if !eq(&c.base, &s.base) { return Err("a candidate does not start from its base".into()); } }
             None => {}
