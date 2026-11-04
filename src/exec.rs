@@ -139,15 +139,6 @@ pub fn verified(s: &Search, c: &Candidate) -> (r: bool)
 
 // ── selected ────────────────────────────────────────────
 
-/// What the view of a complete search says about index i.
-proof fn result_at(s: &Search, i: int)
-    requires 0 <= i < s.results.len(),
-    ensures
-        s@.results.contains_key(i),
-        s@.results[i] == (match s.results@[i] { Some(c) => Some(c@), None => None::<spec::Candidate> }),
-{
-}
-
 /// Whether each index of a complete search is verified.
 fn verified_each(s: &Search) -> (v: Vec<bool>)
     requires s.results.len() == s.n,
@@ -161,7 +152,6 @@ fn verified_each(s: &Search) -> (v: Vec<bool>)
             forall|j: int| 0 <= j < i ==> v[j] == spec::verified_at(s@, j),
         decreases s.results.len() - i,
     {
-        proof { result_at(s, i as int); }
         let b = match &s.results[i] {
             Some(c) => verified(s, c),
             None => false,
@@ -176,30 +166,13 @@ fn verified_each(s: &Search) -> (v: Vec<bool>)
 fn eq_out(a: &Vec<u64>, b: &Vec<u64>) -> (r: bool)
     ensures r == (hashes(a@) == hashes(b@)),
 {
-    if a.len() != b.len() {
-        assert(hashes(a@).len() != hashes(b@).len());
-        return false;
+    let r = a == b;
+    proof {
+        assert(a@ =~= hashes(a@).map_values(|h: nat| h as u64));
+        assert(b@ =~= hashes(b@).map_values(|h: nat| h as u64));
+        if r { assert(hashes(a@) =~= hashes(b@)); }
     }
-    let mut i = 0;
-    while i < a.len()
-        invariant a.len() == b.len(), 0 <= i <= a.len(), forall|j: int| 0 <= j < i ==> a@[j] == b@[j],
-        decreases a.len() - i,
-    {
-        if a[i] != b[i] {
-            assert(hashes(a@)[i as int] != hashes(b@)[i as int]);
-            return false;
-        }
-        i += 1;
-    }
-    assert(a@ =~= b@);
-    true
-}
-
-/// beats is transitive.
-proof fn beats_transitive(a: spec::Candidate, ai: int, b: spec::Candidate, bi: int, c: spec::Candidate, ci: int)
-    requires spec::beats(a, ai, b, bi), spec::beats(b, bi, c, ci),
-    ensures spec::beats(a, ai, c, ci),
-{
+    r
 }
 
 /// The verified candidate at index i of a complete search.
@@ -207,7 +180,6 @@ fn candidate(s: &Search, i: usize) -> (c: &Candidate)
     requires i < s.results.len(), spec::verified_at(s@, i as int),
     ensures c@ == spec::at(s@, i as int), c@.rank == c.rank as int, c@.diff == c.diff as nat, c@.out == hashes(c.out@),
 {
-    proof { result_at(s, i as int); }
     match &s.results[i] { Some(c) => c, None => vstd::pervasive::unreached() }
 }
 
@@ -327,20 +299,7 @@ pub fn selected(s: &Search) -> (r: Option<usize>)
             let c = candidate(s, i);
             let b = candidate(s, best);
             if c.rank > b.rank || (c.rank == b.rank && c.diff < b.diff) {
-                proof {
-                    let ci = spec::at(sv, i as int);
-                    let bi = spec::at(sv, best as int);
-                    assert(spec::beats(ci, i as int, bi, best as int));
-                    assert forall|j: int| 0 <= j < i + 1 && j != i && v[j] implies
-                        spec::beats(ci, i as int, spec::at(sv, j), j) by {
-                        if j != best { beats_transitive(ci, i as int, bi, best as int, spec::at(sv, j), j); }
-                    }
-                }
                 best = i;
-            } else {
-                proof {
-                    assert(spec::beats(spec::at(sv, best as int), best as int, spec::at(sv, i as int), i as int));
-                }
             }
         }
         i += 1;
@@ -479,7 +438,7 @@ pub fn cleared(x: &Search, t: &Search) -> (r: bool)
 {
     let ghost xv = x@;
     assert(spec::complete(xv)) by {
-        assert forall|i: int| 0 <= i < x.n implies xv.results.contains_key(i) by { result_at(x, i); }
+        assert forall|i: int| 0 <= i < x.n implies xv.results.contains_key(i) by {}
     }
     let vx = verified_each(x);
     let vt = verified_each(t);
@@ -689,43 +648,7 @@ proof fn complete(s: &Search)
     requires s.results.len() == s.n,
     ensures spec::complete(s@),
 {
-    assert forall|i: int| 0 <= i < s.n implies s@.results.contains_key(i) by { result_at(s, i); }
-}
-
-/// Two distinct citers make q agreed, and the shortest citer's intent is proposed.
-proof fn agreed_and_proposed(sv: spec::Search, q: nat, f: int, g: int, best: int, w: Seq<char>)
-    requires
-        sv.kind is Map, spec::complete(sv), f != g,
-        spec::cites(sv, f, q), spec::cites(sv, g, q), spec::cites(sv, best, q),
-        spec::at(sv, best).intents[q] == w,
-        forall|j: int| spec::cites(sv, j, q) ==> shortest(sv, q, best, j),
-    ensures spec::agreed(sv, q), spec::proposed(sv, q, w),
-{
-    assert forall|j: int| spec::cites(sv, j, q) implies
-        w.len() < spec::at(sv, j).intents[q].len()
-        || (w.len() == spec::at(sv, j).intents[q].len() && best <= j) by {
-        assert(shortest(sv, q, best, j));
-    }
-}
-
-/// With at most one citer, q is not agreed.
-proof fn not_agreed(sv: spec::Search, q: nat, first: Option<usize>)
-    requires
-        first is None ==> forall|i: int| !spec::cites(sv, i, q),
-        first matches Some(f) ==> forall|i: int| spec::cites(sv, i, q) ==> i == f,
-    ensures !spec::agreed(sv, q),
-{
-    if spec::agreed(sv, q) {
-        let (a, b) = choose|a: int, b: int| a != b && spec::cites(sv, a, q) && spec::cites(sv, b, q);
-    }
-}
-
-/// Pushing keeps every key already present.
-proof fn push_keeps<A, B>(before: Seq<(A, B)>, e: (A, B))
-    ensures
-        forall|y: int| 0 <= y < before.len() ==> before.push(e)[y] == before[y],
-        before.push(e)[before.len() as int] == e,
-{
+    assert forall|i: int| 0 <= i < s.n implies s@.results.contains_key(i) by {}
 }
 
 #[verifier::rlimit(100)]
@@ -760,15 +683,12 @@ pub fn proposed(s: &Search) -> (r: Vec<(Cue, Intent)>)
         if second.is_some() {
             let c = candidate(s, best);
             let w = match intent(c, q) { Some(w) => w.clone(), None => vstd::pervasive::unreached() };
-            proof {
-                agreed_and_proposed(sv, q as nat, first->Some_0 as int, second->Some_0 as int, best as int, w@);
-            }
+            proof { reveal(spec::proposed); reveal(spec::agreed); }
             r.push((q, w));
         } else {
-            proof { not_agreed(sv, q as nat, first); }
+            proof { reveal(spec::agreed); }
         }
         proof {
-            push_keeps(before, (q, r@.last().1));
             assert forall|x: int| 0 <= x < k + 1 && #[trigger] spec::agreed(sv, qs@[x] as nat) implies
                 exists|y: int| 0 <= y < r.len() && r[y].0 == qs@[x] by {
                 if x < k {
@@ -896,15 +816,6 @@ fn contains(xs: &Vec<Intent>, x: &Intent) -> (r: bool)
     false
 }
 
-/// A copy of a list of paths.
-fn copy(v: &Vec<Path>) -> (r: Vec<Path>)
-    ensures r@.len() == v@.len(), forall|i: int| 0 <= i < v@.len() ==> r@[i]@ == v@[i]@, paths(r@) == paths(v@),
-{
-    let r = v.clone();
-    proof { assert(r@.map_values(|p: Path| p@) =~= v@.map_values(|p: Path| p@)); }
-    r
-}
-
 /// The tokens the bon process holds: one per field of the state machine.
 pub struct Tokens {
     pub instance: spec::bon::Instance,
@@ -994,8 +905,9 @@ fn search(
     if results.len() != n {
         return Err("trusted code returned the wrong number of agent processes".into());
     }
-    let mut s = Search { kind, base: start, n, checks: copy(checks), limit: l, results: Vec::new() };
+    let mut s = Search { kind, base: start, n, checks: checks.clone(), limit: l, results: Vec::new() };
     proof {
+        assert(s.checks@.map_values(|p: Path| p@) =~= checks@.map_values(|p: Path| p@));
         assert(s@.results =~= Map::empty());
         assert(s@.authority == spec::authority(kind@, paths(checks@)));
         assert(t.searches.value()[k] == s@);
@@ -1065,7 +977,7 @@ fn search(
     proof {
         assert(s.results.len() == s.n);
         assert(t.searches.value() =~= before.push(s@));
-        assert forall|j: int| 0 <= j < s.n implies s@.results.contains_key(j) by { result_at(&s, j); }
+        assert forall|j: int| 0 <= j < s.n implies s@.results.contains_key(j) by {}
         assert(spec::complete(s@));
         assert(t.reserved.value() == 0) by(nonlinear_arith) requires t.reserved.value() == l as nat * (n - n) as nat;
     }

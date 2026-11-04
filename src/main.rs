@@ -217,7 +217,7 @@ fn sbom(root: &str, check: bool) -> Result<(), String> {
     let lock: toml::Value = toml::from_str(&std::fs::read_to_string(r.join("Cargo.lock")).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
     let mut components = Vec::new();
-    for p in lock["package"].as_array().cloned().unwrap_or_default() {
+    for p in lock["package"].as_array().into_iter().flatten() {
         let (name, version) = (p["name"].as_str().unwrap_or(""), p["version"].as_str().unwrap_or(""));
         let mut c = serde_json::json!({ "type": "library", "name": name, "version": version,
             "purl": format!("pkg:cargo/{name}@{version}") });

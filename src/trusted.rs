@@ -355,23 +355,23 @@ fn cost(h: &Harness, config: &Config, stdout: &str) -> Result<(u64, Option<u64>,
     let rate = |p: &Price, input: f64, cached: f64, output: f64, write: f64, write_long: f64| {
         (input * p.input + cached * p.cached_input + output * p.output + write * p.cache_write + write_long * p.cache_write_long) / 1_000_000.0
     };
-    let events: Vec<serde_json::Value> = stdout.lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let mut events = stdout.lines().rev().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok());
     if h.name == "claude" {
-        let Some(r) = events.iter().rev().find(|v| v["type"] == "result") else { return Err("no result event".into()) };
+        let Some(r) = events.find(|v| v["type"] == "result") else { return Err("no result event".into()) };
         let mut ours = 0.0;
         let mut theirs = 0.0;
         let mut used = HashMap::new();
-        for (model, u) in r["modelUsage"].as_object().cloned().unwrap_or_default() {
-            used.insert(model.clone(), price(&model)?.clone());
+        for (model, u) in r["modelUsage"].as_object().into_iter().flatten() {
+            used.insert(model.clone(), price(model)?.clone());
             let n = |k: &str| u[k].as_f64().unwrap_or(0.0);
             let (w5, w1) = (n("cacheCreationEphemeral5mInputTokens"), n("cacheCreationEphemeral1hInputTokens"));
             let w5 = if w5 + w1 == 0.0 { n("cacheCreationInputTokens") } else { w5 };
-            ours += rate(price(&model)?, n("inputTokens"), n("cacheReadInputTokens"), n("outputTokens"), w5, w1);
+            ours += rate(price(model)?, n("inputTokens"), n("cacheReadInputTokens"), n("outputTokens"), w5, w1);
             theirs += n("costUSD");
         }
         Ok((micro(ours), Some(micro(theirs)), used))
     } else {
-        let Some(t) = events.iter().rev().find(|v| v["type"] == "turn.completed") else { return Err("no turn.completed event".into()) };
+        let Some(t) = events.find(|v| v["type"] == "turn.completed") else { return Err("no turn.completed event".into()) };
         let n = |k: &str| t["usage"][k].as_f64().unwrap_or(0.0);
         let (cached, write) = (n("cached_input_tokens"), n("cache_write_input_tokens"));
         let input = (n("input_tokens") - cached - write).max(0.0);
@@ -558,7 +558,7 @@ pub fn observe(m: &Manifest, commit: &Commit) -> (r: Result<(Permission, Permiss
 pub fn run(m: &Manifest, kind: &Kind, search: usize, a: usize, start: &Commit, target: Option<&Search>, tests: &Tests) -> Vec<(Option<Candidate>, u64)> {
     let start: String = start.iter().collect();
     warm(m, &start);
-    let hs = match kind { Kind::Counterexample { .. } => m.config.counterexample.harness.clone(), _ => m.config.harness.clone() };
+    let hs = match kind { Kind::Counterexample { .. } => &m.config.counterexample.harness, _ => &m.config.harness };
     let slots: Vec<Harness> = hs.iter().flat_map(|h| std::iter::repeat(h.clone()).take(at(h, a))).collect();
     let map = git(&m.root, &["show", &format!("{start}:map")]).unwrap_or_default();
     let traces = m.root.join(".bon").join("traces").join(format!("{}", std::process::id())).join(search.to_string());
