@@ -79,7 +79,13 @@ fn scrub(root: &str, intent: &str) -> Result<(), String> {
         None => { println!("holds: its test is retained on trunk"); Ok(()) }
         Some(carried) => {
             println!("broken: the agreed test fails on trunk; searching for code that passes it");
-            exec::land(root, Some(goal), carried).map(|_| println!("trunk fast-forwarded"))
+            exec::land(root, Some(goal.clone()), carried)?;
+            println!("trunk fast-forwarded; scrubbing again on the new trunk");
+            // The fix landed: a scrub of the new trunk retains a test for the intent.
+            match exec::scrub(root, goal)? {
+                None => { println!("holds: its test is retained on trunk"); Ok(()) }
+                Some(_) => Err("still broken after the fix landed; see .bon/traces".into()),
+            }
         }
     }
 }
