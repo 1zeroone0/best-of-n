@@ -199,8 +199,16 @@ fn sbom(root: &str, check: bool) -> Result<(), String> {
     }
     let version = |program: &str, args: &[&str]| -> String {
         Command::new(program).args(args).output().ok()
+            .filter(|o| o.status.success())
             .map(|o| { let s = if o.stdout.is_empty() { o.stderr } else { o.stdout }; String::from_utf8_lossy(&s).lines().next().unwrap_or("").trim().to_string() })
+            .filter(|v| !v.is_empty())
             .unwrap_or_else(|| "absent".into())
+    };
+    // The harnesses bon runs are agent's, so their versions are observed as agent.
+    let as_agent = |program: &str, args: &[&str]| -> String {
+        let mut a = vec!["-n", "-u", "agent", "env", "-i", "PATH=/Users/agent/.local/bin:/opt/homebrew/bin:/usr/bin:/bin", "HOME=/Users/agent", program];
+        a.extend_from_slice(args);
+        version("sudo", &a)
     };
     let verus = Command::new("verus").arg("--version").output().ok()
         .and_then(|o| String::from_utf8_lossy(&o.stdout).lines().find(|l| l.contains("Version:")).map(|l| l.replace("Version:", "").trim().to_string()))
@@ -211,8 +219,8 @@ fn sbom(root: &str, check: bool) -> Result<(), String> {
         ("application", "git", version("git", &["--version"])),
         ("application", "sudo", version("sudo", &["-V"])),
         ("application", "tar", version("tar", &["--version"])),
-        ("application", "claude", version("claude", &["--version"])),
-        ("application", "codex", version("codex", &["--version"])),
+        ("application", "claude", as_agent("claude", &["--version"])),
+        ("application", "codex", as_agent("codex", &["--version"])),
         ("operating-system", "macOS", version("sw_vers", &["-productVersion"])),
     ] {
         components.push(serde_json::json!({ "type": kind, "name": name, "version": v, "group": "tcb" }));
