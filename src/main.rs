@@ -10,6 +10,7 @@ const USAGE: &str = "usage:
   bon                     every intent in the map, and whether it is built
   bon code \"<intent>\"     search for code that makes this intent hold; fast-forward trunk
   bon compaction          search for code that removes or simplifies without changing behavior
+  bon background [--plist] one unit of the stalest scrub or compaction, on spare capacity
   bon scrub \"<intent>\"    check an intent against trunk with tests written from the spec and the intent
   bon map                 turn each new transcript into a proposal for the map
   bon setup [--dry-run] [--for <user>]
@@ -27,6 +28,16 @@ fn main() {
     };
     let result = match args.first().map(String::as_str) {
         None => status(&root),
+        Some("code" | "compaction" | "map") => { running(&root); dispatch(&root, &args) }
+        _ => dispatch(&root, &args),
+    };
+    best_of_n::trusted::cleanup(&["/usr/bin".into(), "/bin".into()]);
+    if let Err(e) = result { fail(&e) }
+}
+
+fn dispatch(root: &str, args: &[String]) -> Result<(), String> {
+    let root = root.to_string();
+    match args.first().map(String::as_str) {
         Some("code") => {
             let intent = args[1..].join(" ");
             if intent.is_empty() { fail("which intent? bon code \"<intent>\"") }
@@ -36,16 +47,11 @@ fn main() {
         Some("scrub") => {
             let intent = args[1..].join(" ");
             if intent.is_empty() { fail("which intent? bon scrub \"<intent>\"") }
-            let goal: Vec<char> = intent.chars().collect();
-            match exec::scrub(&root, goal.clone()) {
-                Ok(None) => { println!("holds: its test is retained on trunk"); Ok(()) }
-                Ok(Some(carried)) => {
-                    println!("broken: the agreed test fails on trunk; searching for code that passes it");
-                    exec::land(&root, Some(goal), carried).map(|_| println!("trunk fast-forwarded"))
-                }
-                Err(e) => Err(e),
-            }
+            running(&root);
+            scrub(&root, &intent)
         }
+        Some("background") if args.get(1).map(String::as_str) == Some("--plist") => { plist(&root); Ok(()) }
+        Some("background") => background(&root),
         Some("map") => map(&root),
         Some("setup") => {
             let dry_run = args.iter().any(|a| a == "--dry-run");
@@ -55,9 +61,92 @@ fn main() {
         Some("sbom") => sbom(&root, args.get(1).map(String::as_str) == Some("--check")),
         Some("help" | "-h" | "--help") => { println!("{USAGE}"); Ok(()) }
         Some(other) => Err(format!("unknown command {other}\n{USAGE}")),
-    };
-    best_of_n::trusted::cleanup(&["/usr/bin".into(), "/bin".into()]);
-    if let Err(e) = result { fail(&e) }
+        None => status(&root),
+    }
+}
+
+/// Mark this repository as having a bon command running, for bon background.
+fn running(root: &str) {
+    let d = Path::new(root).join(".bon");
+    let _ = std::fs::create_dir_all(&d);
+    let _ = std::fs::write(d.join("running"), std::process::id().to_string());
+}
+
+/// bon scrub, and if the intent is broken, the code search that carries its test.
+fn scrub(root: &str, intent: &str) -> Result<(), String> {
+    let goal: Vec<char> = intent.chars().collect();
+    match exec::scrub(root, goal.clone())? {
+        None => { println!("holds: its test is retained on trunk"); Ok(()) }
+        Some(carried) => {
+            println!("broken: the agreed test fails on trunk; searching for code that passes it");
+            exec::land(root, Some(goal), carried).map(|_| println!("trunk fast-forwarded"))
+        }
+    }
+}
+
+/// bon background: one unit of the stalest work, only on spare capacity. Staleness
+/// is trunk commits since an intent's last scrub, or since the last compaction.
+/// (intent 25)
+fn background(root: &str) -> Result<(), String> {
+    let r = Path::new(root);
+    // Spare capacity: no bon command running here, and load below the device's jobs.
+    let busy = std::fs::read_to_string(r.join(".bon/running")).ok()
+        .filter(|pid| Command::new("kill").args(["-0", pid.trim()]).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success()));
+    if busy.is_some() { println!("busy: a bon command is running here"); return Ok(()); }
+    let jobs = std::fs::read_to_string(best_of_n::trusted::DEVICE).ok()
+        .and_then(|d| d.lines().find_map(|l| l.strip_prefix("jobs").and_then(|v| v.trim_start_matches([' ', '=']).trim().parse::<f64>().ok())))
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1.0, |n| (n.get() / 2).max(1) as f64));
+    let load: f64 = Command::new("sysctl").args(["-n", "vm.loadavg"]).output().ok()
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().nth(1)?.parse().ok())
+        .unwrap_or(0.0);
+    if load >= jobs { println!("busy: load {load:.1} is at or above jobs {jobs}"); return Ok(()); }
+    // The stalest work, in trunk commits.
+    let total: u64 = git(r, &["rev-list", "--count", "HEAD"])?.trim().parse().unwrap_or(0);
+    let since = |t: u64| git(r, &["rev-list", "--count", &format!("--since={t}"), "HEAD"]).ok()
+        .and_then(|c| c.trim().parse::<u64>().ok()).unwrap_or(total);
+    let scrubs: Vec<serde_json::Value> = std::fs::read_to_string(r.join(".bon/scrubs.jsonl")).unwrap_or_default()
+        .lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let last = git(r, &["log", "-1", "--format=%H", "--fixed-strings", "--grep=compaction"]).unwrap_or_default();
+    let mut stalest: (u64, Option<String>) = (
+        if last.is_empty() { total } else { git(r, &["rev-list", "--count", &format!("{last}..HEAD")])?.trim().parse().unwrap_or(total) },
+        None,
+    );
+    if git(r, &["show", "HEAD:bon.toml"]).unwrap_or_default().contains("[scrub]") {
+        for line in git(r, &["show", "HEAD:map"])?.lines() {
+            let intent = line.split('\t').next().unwrap_or("").trim();
+            if intent.is_empty() { continue; }
+            let n = scrubs.iter().filter(|v| v["intent"] == intent).last()
+                .and_then(|v| v["time"].as_u64()).map_or(total, since);
+            if n > stalest.0 { stalest = (n, Some(intent.to_string())); }
+        }
+    }
+    if stalest.0 == 0 { println!("nothing stale"); return Ok(()); }
+    running(root);
+    match stalest.1 {
+        Some(intent) => { println!("scrub ({} commits stale): {intent}", stalest.0); scrub(root, &intent) }
+        None => {
+            println!("compaction ({} commits stale)", stalest.0);
+            exec::land(root, None, best_of_n::trusted::no_tests()).map(|_| println!("trunk fast-forwarded"))
+        }
+    }
+}
+
+/// A launchd job that runs bon background in this repository every five minutes.
+/// The interval is only how often it looks for spare capacity.
+fn plist(root: &str) {
+    let bon = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or("bon".into());
+    let name = Path::new(root).file_name().map_or("repo".into(), |n| n.to_string_lossy().to_string());
+    println!(r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.bon.background.{name}</string>
+  <key>ProgramArguments</key><array><string>{bon}</string><string>background</string></array>
+  <key>WorkingDirectory</key><string>{root}</string>
+  <key>StartInterval</key><integer>300</integer>
+  <key>Nice</key><integer>10</integer>
+  <key>StandardOutPath</key><string>{root}/.bon/background.log</string>
+  <key>StandardErrorPath</key><string>{root}/.bon/background.log</string>
+</dict></plist>"#);
 }
 
 fn fail(e: &str) -> ! {

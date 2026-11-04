@@ -23,4 +23,4 @@ A scrub search checks an intent against trunk with tests written from the spec a
 Counterexample tests are written from the spec and the intent, never from candidate code, and run on every agreed candidate.
 Checks start from trunk's build of the protected paths, which no candidate can change.
 The device file's jobs caps how many agent processes run at once; width stays what bon.toml says.
-Background work, scrub and compaction, runs only on spare capacity, stalest first: the intent least recently scrubbed against trunk, or the most lines added since the last compaction.
+Background work, scrub and compaction, runs only on spare capacity, stalest first, staleness being trunk commits since an intent's last scrub or since the last compaction.
