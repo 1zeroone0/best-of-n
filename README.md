@@ -55,6 +55,12 @@ remote's trunk is the golden trunk: bon refuses to start unless local trunk
 matches it, and pushes every fast-forward to it (fast-forward only; refused if
 it moved). It may not contain `path` or `prices`.
 
+Each harness's `n` is a list of widths, one per attempt: `n = [2, 4, 8]` runs
+2 agent processes, and if that attempt is blocked (fewer than two verified, a
+disagreement, or a counterexample that splits them), 4, then 8. The longest
+list sets the number of attempts; the bon process's cost limit bounds them all.
+A counterexample's tests join the agree checks of the later attempts.
+
 ## SBOM
 
 `sbom.json` is a [CycloneDX 1.5](https://cyclonedx.org) document listing

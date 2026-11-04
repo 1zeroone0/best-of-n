@@ -92,7 +92,9 @@ pub struct Harness {
     /// The canonical model id (e.g. claude-haiku-5-5, gpt-6.1-sol), never an alias:
     /// it is passed to the harness and keys the price table.
     pub model: String,
-    pub n: usize,
+    /// Agent processes per attempt: attempt a runs n[a]; a shorter list repeats
+    /// its last value. The longest list sets how many attempts a command makes.
+    pub n: Vec<usize>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -372,11 +374,41 @@ pub fn agent_process_limit(m: &Manifest) -> u64 { micro(m.config.agent_process.l
 #[verifier::external_body]
 pub fn checks(m: &Manifest) -> Vec<Path> { m.config.checks.paths.iter().map(|p| p.chars().collect()).collect() }
 
-/// How many agent processes a search of this kind runs.
+/// How many agent processes one harness runs on attempt `a`.
+#[verifier::external]
+fn at(h: &Harness, a: usize) -> usize { h.n.get(a).or(h.n.last()).copied().unwrap_or(0) }
+
+/// How many agent processes a search of this kind runs on attempt `a`.
 #[verifier::external_body]
-pub fn width(m: &Manifest, kind: &Kind) -> usize {
+pub fn width(m: &Manifest, kind: &Kind, a: usize) -> usize {
     let hs = match kind { Kind::Counterexample { .. } => &m.config.counterexample.harness, _ => &m.config.harness };
-    hs.iter().map(|h| h.n).sum()
+    hs.iter().map(|h| at(h, a)).sum()
+}
+
+/// How many attempts a command makes: the longest width list. (intent 15)
+#[verifier::external_body]
+pub fn attempts(m: &Manifest) -> usize {
+    m.config.harness.iter().chain(m.config.counterexample.harness.iter()).map(|h| h.n.len()).max().unwrap_or(1)
+}
+
+/// Tests carried from a counterexample search that did not clear: each joins the
+/// agree checks of the later attempts in this command. (intent 13)
+#[verifier::external_body]
+pub struct Tests { pub files: Vec<Vec<u8>> }
+
+#[verifier::external_body]
+pub fn no_tests() -> Tests { Tests { files: Vec::new() } }
+
+/// Carry every test the counterexample search `x` wrote.
+#[verifier::external_body]
+pub fn carry(m: &Manifest, tests: &mut Tests, x: &Search) {
+    for c in x.results.iter().flatten() {
+        let commit: String = c.commit.iter().collect();
+        if let Ok(out) = Command::new("git").args(["show", &format!("{commit}:{}", m.config.counterexample.path)])
+            .current_dir(&m.root).output() {
+            if out.status.success() { tests.files.push(out.stdout); }
+        }
+    }
 }
 
 /// trunk's head, if trunk is checked out with no uncommitted changes to tracked files.
@@ -439,17 +471,17 @@ pub fn observe(m: &Manifest, commit: &Commit) -> (r: Result<(Permission, Permiss
 /// (None if it produced none) and its cost in microdollars. `target` is the
 /// search a counterexample attacks.
 #[verifier::external_body]
-pub fn run(m: &Manifest, kind: &Kind, search: usize, start: &Commit, target: Option<&Search>) -> Vec<(Option<Candidate>, u64)> {
+pub fn run(m: &Manifest, kind: &Kind, search: usize, a: usize, start: &Commit, target: Option<&Search>, tests: &Tests) -> Vec<(Option<Candidate>, u64)> {
     let start: String = start.iter().collect();
     let hs = match kind { Kind::Counterexample { .. } => m.config.counterexample.harness.clone(), _ => m.config.harness.clone() };
-    let slots: Vec<Harness> = hs.iter().flat_map(|h| std::iter::repeat(h.clone()).take(h.n)).collect();
+    let slots: Vec<Harness> = hs.iter().flat_map(|h| std::iter::repeat(h.clone()).take(at(h, a))).collect();
     let map = git(&m.root, &["show", &format!("{start}:map")]).unwrap_or_default();
     let traces = m.root.join(".bon").join("traces").join(format!("{}", std::process::id())).join(search.to_string());
     let _ = std::fs::create_dir_all(&traces);
     std::thread::scope(|scope| {
         let handles: Vec<_> = slots.iter().enumerate().map(|(i, h)| {
             let (start, map, traces) = (&start, &map, &traces);
-            scope.spawn(move || agent_process(m, kind, search, i, h, start, map, target, &traces.join(i.to_string())))
+            scope.spawn(move || agent_process(m, kind, search, i, h, start, map, target, tests, &traces.join(i.to_string())))
         }).collect();
         handles.into_iter().map(|h| h.join().unwrap_or((None, 0))).collect()
     })
@@ -479,7 +511,7 @@ pub fn record(m: &Manifest, line: &str) {
 
 /// The agree checks' outputs at a commit, hashed: a compaction search's goal.
 #[verifier::external_body]
-pub fn agree_outputs(m: &Manifest, commit: &Commit) -> (r: Result<Vec<u64>, String>) {
+pub fn agree_outputs(m: &Manifest, commit: &Commit, tests: &Tests) -> (r: Result<Vec<u64>, String>) {
     let c: String = commit.iter().collect();
     let dir = scratch("goal");
     check_directory(&m.root, &c, &dir)?;
@@ -489,6 +521,9 @@ pub fn agree_outputs(m: &Manifest, commit: &Commit) -> (r: Result<Vec<u64>, Stri
     let mut out = Vec::new();
     for (k, a) in m.config.checks.agree.iter().enumerate() {
         out.push(hash(&run_check(&m.config, &dir, &build, a, &log.join(format!("goal-agree-{k}"))).1));
+    }
+    for (k, t) in tests.files.iter().enumerate() {
+        out.push(hash(if test_on(m, &c, t, &build, &log.join(format!("goal-carried-{k}"))) { "pass" } else { "fail" }));
     }
     let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
     let _ = std::fs::remove_dir_all(&dir);
@@ -500,7 +535,7 @@ pub fn agree_outputs(m: &Manifest, commit: &Commit) -> (r: Result<Vec<u64>, Stri
 /// One agent process: generate, capture, observe. Its log goes under `trace`.
 #[allow(clippy::too_many_arguments)]
 fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Harness, start: &str, map: &str,
-                 target: Option<&Search>, trace: &std::path::Path) -> (Option<Candidate>, u64) {
+                 target: Option<&Search>, tests: &Tests, trace: &std::path::Path) -> (Option<Candidate>, u64) {
     let _ = std::fs::create_dir_all(trace);
     let config = &m.config;
     let dir = scratch(&format!("{search}-{index}"));
@@ -517,7 +552,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
     // Without token counts there is no measured cost: charge the whole limit.
     let (spent, harness_cost, prices) = cost(h, config, &stdout).unwrap_or((micro(config.agent_process.limit), None, HashMap::new()));
     if killed { let _ = std::fs::write(trace.join("killed"), "time limit"); }
-    let candidate = capture(m, kind, search, index, start, &dir, target, trace).map_err(|e| {
+    let candidate = capture(m, kind, search, index, start, &dir, target, tests, trace).map_err(|e| {
         let _ = std::fs::write(trace.join("error"), &e);
     }).ok();
     let _ = std::fs::remove_dir_all(&dir);
@@ -547,7 +582,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
 /// observe it: changed paths, diff, checks, agree outputs, rank, test results.
 #[allow(clippy::too_many_arguments)]
 fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, dir: &std::path::Path,
-           target: Option<&Search>, trace: &std::path::Path) -> Result<Candidate, String> {
+           target: Option<&Search>, tests: &Tests, trace: &std::path::Path) -> Result<Candidate, String> {
     let root = &m.root;
     let config = &m.config;
     let index_file = trace.join("index");
@@ -603,6 +638,9 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
             let (_, o) = run_check(config, &cdir, &build, a, &trace.join(format!("agree-{k}")));
             out.push(hash(&o));
         }
+        for (k, t) in tests.files.iter().enumerate() {
+            out.push(hash(if test_on(m, &commit, t, &build, &trace.join(format!("carried-{k}"))) { "pass" } else { "fail" }));
+        }
         let which = match kind { Kind::Compaction { .. } => "compaction", _ => "code" };
         if let Some(r) = config.checks.rank.get(which) {
             let (_, o) = run_check(config, &cdir, &build, r, &trace.join("rank"));
@@ -618,20 +656,11 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
             if let Some(c) = r { members.push((j as i64, c.commit.iter().collect())); }
         }
         for (j, mc) in members {
-            let tdir = scratch(&format!("{search}-{index}-test-{j}"));
-            let passes = match (&test, materialize(root, &mc, &tdir)) {
-                (Some(bytes), Ok(())) => {
-                    let p = tdir.join(&config.counterexample.path);
-                    let _ = std::fs::create_dir_all(p.parent().unwrap_or(&tdir));
-                    let _ = std::fs::write(&p, bytes);
-                    let _ = Command::new("chmod").args(["-R", "a-w,g+rX"]).arg(&tdir).status();
-                    run_check(config, &tdir, &build, &config.counterexample.test, &trace.join(format!("test-{j}"))).0
-                }
-                _ => false,
+            let passes = match &test {
+                Some(bytes) => test_on(m, &mc, bytes, &build, &trace.join(format!("test-{j}"))),
+                None => false,
             };
             test_passes.push((j, passes));
-            let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&tdir).status();
-            let _ = std::fs::remove_dir_all(&tdir);
         }
     }
     let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&cdir).status();
@@ -652,6 +681,26 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
         rank,
         diff,
     })
+}
+
+/// Whether a counterexample test passes on `commit`: a read-only checkout of it
+/// with the test at the manifest's counterexample path, run as agent.
+fn test_on(m: &Manifest, commit: &str, test: &[u8], build: &std::path::Path, log: &std::path::Path) -> bool {
+    let config = &m.config;
+    let dir = scratch(&format!("test-{}", hash(&format!("{commit}{log:?}"))));
+    let passes = match materialize(&m.root, commit, &dir) {
+        Ok(()) => {
+            let p = dir.join(&config.counterexample.path);
+            let _ = std::fs::create_dir_all(p.parent().unwrap_or(&dir));
+            let _ = std::fs::write(&p, test);
+            let _ = Command::new("chmod").args(["-R", "a-w,g+rX"]).arg(&dir).status();
+            run_check(config, &dir, build, &config.counterexample.test, log).0
+        }
+        Err(_) => false,
+    };
+    let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
+    let _ = std::fs::remove_dir_all(&dir);
+    passes
 }
 
 /// A map candidate's new lines, by the cue each cites: `intent\tpath#HH:MM:SS.mmm`.
@@ -689,8 +738,8 @@ mod tests {
             rate = 150
             agent_process = { limit = 0.5, time = 60 }
             checks = { paths = ["checks/"], verify = ["true"] }
-            harness = [{ name = "claude", model = "claude-haiku-5-5", n = 2 }]
-            counterexample = { harness = [{ name = "codex", model = "gpt-6.1-sol", n = 1 }], path = "c.sh", test = "sh c.sh" }
+            harness = [{ name = "claude", model = "claude-haiku-5-5", n = [2, 4] }]
+            counterexample = { harness = [{ name = "codex", model = "gpt-6.1-sol", n = [1] }], path = "c.sh", test = "sh c.sh" }
         "#).unwrap();
         let d: Device = toml::from_str(r#"
             path = ["/usr/bin"]
@@ -701,6 +750,13 @@ mod tests {
         c.path = d.path;
         c.prices = d.prices;
         c
+    }
+
+    #[test]
+    fn widths_repeat_their_last_value_and_set_the_attempts() {
+        let c = config();
+        assert_eq!((at(&c.harness[0], 0), at(&c.harness[0], 1), at(&c.harness[0], 5)), (2, 4, 4));
+        assert_eq!(at(&c.counterexample.harness[0], 3), 1);
     }
 
     #[test]

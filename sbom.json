@@ -541,7 +541,7 @@
       },
       {
         "name": "bon:trusted-functions",
-        "value": "Manifest,manifest,limit,agent_process_limit,checks,width,head,on_trunk,intents,observe,run,fast_forward,record,agree_outputs"
+        "value": "Manifest,manifest,limit,agent_process_limit,checks,width,attempts,Tests,no_tests,carry,head,on_trunk,intents,observe,run,fast_forward,record,agree_outputs"
       }
     ]
   },

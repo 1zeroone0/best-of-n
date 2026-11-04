@@ -829,6 +829,7 @@ pub fn proposed(s: &Search) -> (r: Vec<(Cue, Intent)>)
     r
 }
 
+#[verifier::rlimit(100)]
 pub fn contested(s: &Search) -> (r: Vec<Cue>)
     requires s.results.len() == s.n,
     ensures
@@ -1001,8 +1002,8 @@ pub open spec fn returned(r: Option<Candidate>) -> Option<spec::Candidate> {
 /// each, consuming its capability. (intents 2, 7, 9, 16)
 #[verifier::rlimit(100)]
 fn search(
-    m: &trusted::Manifest, index: usize, kind: Kind, start: Commit, checks: &Vec<Path>, l: u64, limit: u64,
-    spent: &mut u64, target: Option<&Search>, Ghost(observed): Ghost<Map<File, Permission>>,
+    m: &trusted::Manifest, index: usize, a: usize, kind: Kind, start: Commit, checks: &Vec<Path>, l: u64, limit: u64,
+    spent: &mut u64, target: Option<&Search>, tests: &trusted::Tests, Ghost(observed): Ghost<Map<File, Permission>>,
     Tracked(t): Tracked<&mut Tokens>,
 ) -> (r: Result<Search, String>)
     requires
@@ -1039,7 +1040,7 @@ fn search(
             &&& final(t).spent.value() == *final(spent) as nat
         },
 {
-    let n = trusted::width(m, &kind);
+    let n = trusted::width(m, &kind, a);
     let reserve = match l.checked_mul(n as u64) { Some(x) => x, None => { return Err("limit overflow".into()); } };
     if reserve > limit || *spent > limit - reserve {
         return Err("the search would pass the bon process's limit".into());
@@ -1049,7 +1050,7 @@ fn search(
     let tracked mut capability = t.instance.grant(kind@, n as nat, l as nat, observed,
         &t.map, &t.checks, &t.trunk, &mut t.searches, &t.limit, &t.spent, &mut t.reserved);
     trusted::record(m, "grant");
-    let mut results = trusted::run(m, &kind, index, &start, target);
+    let mut results = trusted::run(m, &kind, index, a, &start, target, tests);
     if results.len() != n {
         return Err("trusted code returned the wrong number of agent processes".into());
     }
@@ -1132,23 +1133,20 @@ fn search(
 }
 
 
-/// bon code (goal is an intent) or bon compaction (no goal): search, then
-/// fast-forward trunk to the selected candidate once a counterexample search
-/// clears it. (intents 2–9, 13, 16, 17)
+/// bon code (goal is an intent) or bon compaction (no goal). Each attempt is a
+/// search and, if it selects, a counterexample search on the selection; trunk
+/// fast-forwards once one clears. A blocked attempt reruns wider, carrying the
+/// counterexample tests into agreement, until the attempts run out.
+/// (intents 2–9, 13, 15–17)
 pub fn land(root: &str, goal: Option<Intent>) -> (r: Result<(), String>) {
     let head = trusted::head(root)?;
     let m = trusted::manifest(root, &head)?;
     trusted::on_trunk(&m)?;
     let intents = trusted::intents(&m, &head);
-    let kind = match goal {
-        Some(goal) => {
-            if !contains(&intents, &goal) {
-                return Err("that intent is not in the map at trunk's head".into());
-            }
-            Kind::Code { goal }
-        }
-        None => Kind::Compaction { goal: copy_text(&head), out: trusted::agree_outputs(&m, &head)? },
-    };
+    match &goal {
+        Some(g) => { if !contains(&intents, g) { return Err("that intent is not in the map at trunk's head".into()); } }
+        None => {}
+    }
     let checks = trusted::checks(&m);
     let limit = trusted::limit(&m);
     let l = trusted::agent_process_limit(&m);
@@ -1163,41 +1161,79 @@ pub fn land(root: &str, goal: Option<Intent>) -> (r: Result<(), String>) {
     let tracked mut t = Tokens { instance, map, checks: checks_t, trunk, authors, searches, limit: limit_t, spent: spent_t, reserved };
     let mut spent: u64 = 0;
     trusted::record(&m, "initialize");
-    proof { assert(t.trunk.value().last() == head@); }
 
-    let s0 = search(&m, 0, kind, copy_text(&head), &checks, l, limit, &mut spent, None,
-                    Ghost(observed), Tracked(&mut t))?;
-    let i = match selected(&s0) {
-        Some(i) => i,
-        None => {
-            trusted::record(&m, "blocked: no selection");
-            return Err("blocked: fewer than two verified candidates, or they disagree".into());
+    let attempts = trusted::attempts(&m);
+    let mut tests = trusted::no_tests();
+    let mut a: usize = 0;
+    let mut index: usize = 0;
+    while a < attempts
+        invariant
+            t.wf(),
+            spec::isolated(observed),
+            t.searches.value().len() == index as int,
+            forall|k: int| 0 <= k < t.searches.value().len() ==> spec::complete(#[trigger] t.searches.value()[k]),
+            t.reserved.value() == 0,
+            t.spent.value() == spent as nat,
+            t.trunk.value() == Seq::<spec::Commit>::empty().push(head@),
+            t.map.value() == intent_set(intents@),
+            t.checks.value() == paths(checks@),
+            t.limit.value() == limit as nat,
+            goal matches Some(g) ==> intent_set(intents@).contains(g@),
+            index <= 2 * a,
+        decreases attempts - a,
+    {
+        if index > usize::MAX - 2 { return Err("too many searches".into()); }
+        let kind = match &goal {
+            Some(g) => Kind::Code { goal: copy_text(g) },
+            None => Kind::Compaction { goal: copy_text(&head), out: trusted::agree_outputs(&m, &head, &tests)? },
+        };
+        let ghost before = t.searches.value();
+        let s0 = search(&m, index, a, kind, copy_text(&head), &checks, l, limit, &mut spent, None, &tests,
+                        Ghost(observed), Tracked(&mut t))?;
+        proof {
+            assert(t.searches.value()[index as int] == s0@);
+            assert forall|k: int| 0 <= k < t.searches.value().len() implies spec::complete(#[trigger] t.searches.value()[k]) by {
+                if k < index { assert(t.searches.value()[k] == before[k]); }
+            }
         }
-    };
-    let start = copy_text(&candidate(&s0, i).commit);
-    proof {
-        assert(t.searches.value()[0] == s0@);
-        assert(s0@.base == head@);
+        match selected(&s0) {
+            None => {
+                trusted::record(&m, "blocked: fewer than two verified candidates, or they disagree");
+                index = index + 1;
+            }
+            Some(i) => {
+                let start = copy_text(&candidate(&s0, i).commit);
+                let ghost before1 = t.searches.value();
+                let s1 = search(&m, index + 1, a, Kind::Counterexample { goal: AgentProcess { search: index, index: i } }, start,
+                                &checks, l, limit, &mut spent, Some(&s0), &tests, Ghost(observed), Tracked(&mut t))?;
+                proof {
+                    assert(t.searches.value()[index as int] == s0@);
+                    assert(t.searches.value()[index as int + 1] == s1@);
+                    assert forall|k: int| 0 <= k < t.searches.value().len() implies spec::complete(#[trigger] t.searches.value()[k]) by {
+                        if k <= index { assert(t.searches.value()[k] == before1[k]); }
+                    }
+                }
+                if cleared(&s1, &s0) {
+                    let now = trusted::head(root)?;
+                    if !eq(&now, &head) {
+                        trusted::record(&m, "blocked: trunk moved");
+                        return Err("blocked: trunk moved during the search; run it again".into());
+                    }
+                    proof {
+                        t.instance.fast_forward(index as int, i as int, index as int + 1, &mut t.trunk, &mut t.authors, &t.searches);
+                    }
+                    trusted::fast_forward(&m, &candidate(&s0, i).commit)?;
+                    trusted::record(&m, "fast_forward");
+                    return Ok(());
+                }
+                trusted::record(&m, "blocked: a counterexample split the agreed candidates; its tests join agreement");
+                trusted::carry(&m, &mut tests, &s1);
+                index = index + 2;
+            }
+        }
+        a = a + 1;
     }
-    let s1 = search(&m, 1, Kind::Counterexample { goal: AgentProcess { search: 0, index: i } }, start, &checks,
-                    l, limit, &mut spent, Some(&s0), Ghost(observed), Tracked(&mut t))?;
-    if !cleared(&s1, &s0) {
-        trusted::record(&m, "blocked: a counterexample split the agreed candidates");
-        return Err("blocked: a counterexample's test split the agreed candidates".into());
-    }
-    let now = trusted::head(root)?;
-    if !eq(&now, &head) {
-        trusted::record(&m, "blocked: trunk moved");
-        return Err("blocked: trunk moved during the search; run it again".into());
-    }
-    proof {
-        assert(t.searches.value()[0] == s0@ && t.searches.value()[1] == s1@);
-        assert(t.trunk.value().last() == head@);
-        t.instance.fast_forward(0, i as int, 1, &mut t.trunk, &mut t.authors, &t.searches);
-    }
-    trusted::fast_forward(&m, &candidate(&s0, i).commit)?;
-    trusted::record(&m, "fast_forward");
-    Ok(())
+    Err("blocked: no attempt was selected and cleared; see .bon/traces".into())
 }
 
 /// bon map: one map search on a transcript, and its proposal for engineer:
@@ -1221,7 +1257,7 @@ pub fn map(root: &str, transcript: Transcript) -> (r: Result<(Vec<(Cue, Intent)>
     let tracked mut t = Tokens { instance, map, checks: checks_t, trunk, authors, searches, limit: limit_t, spent: spent_t, reserved };
     let mut spent: u64 = 0;
     trusted::record(&m, "initialize");
-    let s = search(&m, 0, Kind::Map { goal: transcript }, copy_text(&head), &checks, l, limit, &mut spent, None,
+    let s = search(&m, 0, 0, Kind::Map { goal: transcript }, copy_text(&head), &checks, l, limit, &mut spent, None, &trusted::no_tests(),
                    Ghost(observed), Tracked(&mut t))?;
     trusted::record(&m, "proposal");
     Ok((proposed(&s), contested(&s)))

@@ -12,7 +12,7 @@ Exec code uses the spec's names: each exec type views the spec type of the same 
 Each trace records every transition under its spec name.
 After agreement and before fast-forward, a counterexample search asks other harnesses for a test that splits the agreed candidates; trunk fast-forwards only if no verified test does, and a test that does joins the agreement of the next search for that intent.
 Each trace records, for every agent process, its harness, model, tokens, cost and time, and for every check its time and exit status, so that cost per verified candidate = (Σ_c (g(c) + k(c)) + r·t) / v, with r the rate in bon.toml and t the search's wall time.
-A blocked search reruns until it reaches a limit; reaching a limit is the only thing that goes to engineer.
+A blocked search reruns, as wide as bon.toml's width list says for that attempt, until the attempts or a limit run out; only that goes to engineer.
 Limits nest like the process tree: each agent process's limit is reserved from its search's, and each search's from the bon process's; wait returns what was unused, and nothing spends past its limit.
 A compaction search asks for candidates that remove or simplify code at trunk's head; every verified candidate must print the same as trunk's head on each agree check, and the highest rank is selected.
 The SBOM lists every crate, toolchain, TCB tool, service and trusted function bon depends on, as CycloneDX, and a check fails when it differs from the machine.
