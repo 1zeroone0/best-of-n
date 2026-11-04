@@ -11,7 +11,7 @@ const USAGE: &str = "usage:
   bon code \"<intent>\"     search for code that makes this intent hold; fast-forward trunk
   bon compaction          search for code that removes or simplifies without changing behavior
   bon map                 turn each new transcript into a proposal for the map
-  bon setup               create user agent and group bon, and let engineer run commands as agent
+  bon setup [--dry-run]   create user agent and group bon, and let engineer run commands as agent
   bon sbom [--check]      write sbom.json, or fail if it differs from this machine";
 
 fn main() {
@@ -30,7 +30,7 @@ fn main() {
         }
         Some("compaction") => exec::land(&root, None).map(|_| println!("trunk fast-forwarded")),
         Some("map") => map(&root),
-        Some("setup") => setup(),
+        Some("setup") => setup(args.get(1).map(String::as_str) == Some("--dry-run")),
         Some("sbom") => sbom(&root, args.get(1).map(String::as_str) == Some("--check")),
         Some("help" | "-h" | "--help") => { println!("{USAGE}"); Ok(()) }
         Some(other) => Err(format!("unknown command {other}\n{USAGE}")),
@@ -131,7 +131,7 @@ fn timestamp(ms: u64) -> String {
 /// Create user agent and group bon, put engineer and agent in bon, and let
 /// engineer run commands as agent (never as root) with no password. Each step
 /// runs with sudo and is printed first. (intents 7, 8)
-fn setup() -> Result<(), String> {
+fn setup(dry_run: bool) -> Result<(), String> {
     let me = std::env::var("USER").map_err(|_| "USER is not set")?;
     let exists = |kind: &str, name: &str| Command::new("dscl").args([".", "-read", &format!("/{kind}/{name}")])
         .output().is_ok_and(|o| o.status.success());
@@ -139,10 +139,10 @@ fn setup() -> Result<(), String> {
     let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<String>>();
     if !exists("Groups", "bon") { steps.push(s(&["dseditgroup", "-o", "create", "bon"])); }
     if !exists("Users", "agent") {
-        let password: String = std::fs::read("/dev/urandom").ok().and_then(|_| {
-            let out = Command::new("openssl").args(["rand", "-base64", "32"]).output().ok()?;
-            Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
-        }).ok_or("could not make a password")?;
+        // A random password no one keeps: agent is never logged in to, only run as.
+        let out = Command::new("openssl").args(["rand", "-base64", "32"]).output().map_err(|e| e.to_string())?;
+        let password = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if password.len() < 40 { return Err("could not make a password".into()); }
         steps.push(vec!["sysadminctl".into(), "-addUser".into(), "agent".into(), "-fullName".into(), "bon agent".into(),
                         "-shell".into(), "/bin/zsh".into(), "-home".into(), "/Users/agent".into(), "-password".into(), password]);
         steps.push(s(&["createhomedir", "-c", "-u", "agent"]));
@@ -151,14 +151,16 @@ fn setup() -> Result<(), String> {
     steps.push(s(&["dseditgroup", "-o", "edit", "-a", "agent", "-t", "user", "bon"]));
     steps.push(s(&["dseditgroup", "-o", "edit", "-a", &me, "-t", "user", "bon"]));
     steps.push(vec!["sh".into(), "-c".into(), format!(
-        "printf '%s ALL=(agent) NOPASSWD: ALL\\n' {me} > /etc/sudoers.d/bon && chmod 0440 /etc/sudoers.d/bon && visudo -cf /etc/sudoers.d/bon")]);
+        "f=$(mktemp) && printf '%s ALL=(agent) NOPASSWD: ALL\\n' {me} > \"$f\" && visudo -cf \"$f\" && install -m 0440 -o root -g wheel \"$f\" /etc/sudoers.d/bon; r=$?; rm -f \"$f\"; exit $r")]);
     steps.push(s(&["sh", "-c", "mkdir -p /tmp/bon && chmod 1777 /tmp/bon"]));
     for step in &steps {
         let shown: Vec<&str> = step.iter().map(|x| if x.len() > 40 && !x.contains(' ') { "<random>" } else { x.as_str() }).collect();
         println!("sudo {}", shown.join(" "));
+        if dry_run { continue; }
         let ok = Command::new("sudo").args(step).status().map_err(|e| e.to_string())?.success();
         if !ok { return Err(format!("failed: sudo {}", shown.join(" "))); }
     }
+    if dry_run { println!("(dry run: nothing changed)"); return Ok(()); }
     let ok = Command::new("sudo").args(["-n", "-u", "agent", "true"]).status().is_ok_and(|s| s.success());
     if !ok { return Err("engineer still cannot run commands as agent".into()); }
     println!("done. Group membership takes effect in a new login session.");

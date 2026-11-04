@@ -158,7 +158,15 @@ fn supervise(mut c: Command, stdin: Option<String>, time: Duration, log: &std::p
 // ── working directories ─────────────────────────────────
 
 /// Every directory bon makes for agent processes and checks lives here.
-fn scratch(name: &str) -> PathBuf { PathBuf::from("/tmp/bon").join(format!("{}-{name}", std::process::id())) }
+fn scratch(name: &str) -> PathBuf {
+    // /tmp is cleared on reboot: keep /tmp/bon world-writable and sticky, like /tmp.
+    let base = PathBuf::from("/tmp/bon");
+    if !base.exists() {
+        let _ = std::fs::create_dir_all(&base);
+        let _ = Command::new("chmod").arg("1777").arg(&base).status();
+    }
+    base.join(format!("{}-{name}", std::process::id()))
+}
 
 /// Write `commit`'s tree into `dir`, owned by engineer, group bon. (TCB: git, tar)
 fn materialize(root: &std::path::Path, commit: &str, dir: &std::path::Path) -> Result<(), String> {
