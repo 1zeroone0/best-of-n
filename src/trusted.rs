@@ -322,7 +322,9 @@ fn cost(h: &Harness, config: &Config, stdout: &str) -> Result<(u64, Option<u64>,
 fn prompt(kind: &Kind, config: &Config, map: &str) -> String {
     let goal = match kind {
         Kind::Code { goal } => format!("Change the code so this intent holds:\n\n{}\n", goal.iter().collect::<String>()),
-        Kind::Compaction { .. } => "Remove or simplify code without changing behavior.\n".to_string(),
+        Kind::Compaction { .. } => "Remove or simplify as much code as you can without changing behavior: \
+             dead code, duplication, needless indirection. Fewer lines is better, as long as every check \
+             still passes and the program prints the same.\n".to_string(),
         Kind::Counterexample { .. } => format!(
             "This code was written for an intent. Write one test, at {}, that passes on this code \
              but would fail on a different reasonable reading of the intent. It runs with: {}\n",
@@ -335,8 +337,10 @@ fn prompt(kind: &Kind, config: &Config, map: &str) -> String {
          The checks are {paths:?}: read and run them, never change them; you cannot.\n\
          They run with: {verify:?}\n\
          The current intents, for context:\n{map}\n\
-         Make the smallest change that does this. Reply with one line saying what you changed.",
-        paths = config.checks.paths, verify = config.checks.verify)
+         {scope} Reply with one line saying what you changed.",
+        paths = config.checks.paths, verify = config.checks.verify,
+        // Smallest change is right for every kind but compaction, whose goal is to remove.
+        scope = if matches!(kind, Kind::Compaction { .. }) { "" } else { "Make the smallest change that does this." })
 }
 
 // ── trusted interface ───────────────────────────────────
