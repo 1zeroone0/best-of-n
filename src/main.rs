@@ -34,7 +34,11 @@ fn main() {
         Some("code" | "compaction" | "map") => { running(&root); dispatch(&root, &args) }
         _ => dispatch(&root, &args),
     };
-    best_of_n::trusted::cleanup(&["/usr/bin".into(), "/bin".into()]);
+    // Only commands that grant capabilities make directories under /tmp/bon, so
+    // only they clean up; bon run inside a check (help, sbom) never touches it.
+    if matches!(args.first().map(String::as_str), Some("code" | "compaction" | "map" | "scrub" | "background")) {
+        best_of_n::trusted::cleanup(&["/usr/bin".into(), "/bin".into()]);
+    }
     if let Err(e) = result { fail(&e) }
 }
 

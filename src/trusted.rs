@@ -360,7 +360,9 @@ fn build_directory(config: &Config, name: &str) -> Result<PathBuf, String> {
 /// removes its ACLs, agent removes what it can, engineer removes the rest.
 pub fn cleanup(path: &[String]) {
     let me = std::process::id().to_string();
-    let running = |pid: &str| pid == me || Command::new("kill").args(["-0", pid]).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    // ps, not kill -0: kill -0 fails on another user's live process (EPERM),
+    // which would read as dead.
+    let running = |pid: &str| pid == me || Command::new("ps").args(["-p", pid]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
     for e in std::fs::read_dir("/tmp/bon").into_iter().flatten().flatten() {
         let name = e.file_name().to_string_lossy().to_string();
         let Some((pid, _)) = name.split_once('-') else { continue };
