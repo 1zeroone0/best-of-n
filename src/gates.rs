@@ -155,6 +155,80 @@ pub open spec fn observed(checks: Permission, transcripts: Permission, working_d
     ]
 }
 
+// ── encoding ────────────────────────────────────────────
+//
+// How the kernel writes a search to a trace and reads it back, compiled into
+// the bon process and into the gates in WebAssembly alike: words (u64), each
+// list led by its length. (intents 27, 28)
+
+/// A char as a word. Reading one back uses char::from_u32. (TCB: Rust std)
+pub assume_specification[ core::char::from_u32 ](i: u32) -> (r: Option<char>)
+    ensures
+        r matches Some(c) ==> c as u32 == i,
+        i < 0xD800 || (0xE000 <= i && i <= 0x10FFFF) ==> r is Some;
+
+/// Text: its length, then each char.
+pub open spec fn text(t: Seq<char>) -> Seq<u64> {
+    seq![t.len() as u64] + t.map_values(|c: char| c as u32 as u64)
+}
+
+/// A list of texts: its length, then each text.
+pub open spec fn texts(ts: Seq<Vec<char>>) -> Seq<u64> {
+    seq![ts.len() as u64] + ts.map_values(|t: Vec<char>| text(t@)).flatten()
+}
+
+/// A kind: a tag (0 code, 1 map, 2 counterexample, 3 compaction, 4 scrub), then its fields.
+pub open spec fn kind_words(k: Kind) -> Seq<u64> {
+    match k {
+        Kind::Code { goal } => seq![0u64] + text(goal@),
+        Kind::Map { goal } => seq![1u64] + text(goal@),
+        Kind::Counterexample { goal } => seq![2u64, goal.search as u64, goal.index as u64],
+        Kind::Compaction { goal, out } => seq![3u64] + text(goal@) + seq![out.len() as u64] + out@,
+        Kind::Scrub { goal, path } => seq![4u64] + text(goal@) + text(path@),
+    }
+}
+
+/// A candidate, field by field in declaration order; a bool is 0 or 1, and
+/// rank is its two's complement.
+pub open spec fn candidate_words(c: Candidate) -> Seq<u64> {
+    text(c.commit@) + text(c.base@) + seq![if c.checks_pass { 1u64 } else { 0u64 }] + texts(c.changed@)
+        + seq![c.out.len() as u64] + c.out@
+        + seq![c.intents.len() as u64] + c.intents@.map_values(|e: (Cue, Intent)| seq![e.0] + text(e.1@)).flatten()
+        + seq![c.test_passes.len() as u64]
+        + c.test_passes@.map_values(|e: (i64, bool)| seq![e.0 as u64, if e.1 { 1u64 } else { 0u64 }]).flatten()
+        + seq![c.rank as u64, c.diff]
+}
+
+/// A result: 0 for none, or 1 and the candidate.
+pub open spec fn result_words(r: Option<Candidate>) -> Seq<u64> {
+    match r { Some(c) => seq![1u64] + candidate_words(c), None => seq![0u64] }
+}
+
+/// A search, field by field in declaration order.
+pub open spec fn encoded(s: Search) -> Seq<u64> {
+    kind_words(s.kind) + text(s.base@) + seq![s.n as u64] + texts(s.checks@) + seq![s.limit]
+        + seq![s.results.len() as u64] + s.results@.map_values(|r: Option<Candidate>| result_words(r)).flatten()
+}
+
+/// Encoding and reading back preserve what the gates decide on. (intent 28)
+pub trait Encoding {
+    /// A search as words.
+    fn encode(s: &Search) -> (r: Vec<u64>)
+        ensures r@ == encoded(*s);
+
+    /// Words back to a search: exactly the one they encode, with a result for
+    /// each agent process; None for anything else.
+    fn decode(w: &Vec<u64>) -> (r: Option<Search>)
+        ensures
+            r matches Some(s) ==> encoded(s) == w@ && s.results.len() == s.n,
+            (exists|s: Search| #[trigger] encoded(s) == w@ && s.results.len() == s.n) ==> r is Some;
+
+    /// Two searches with the same words are the same search to the spec.
+    proof fn injective(a: Search, b: Search)
+        requires encoded(a) == encoded(b),
+        ensures a@ == b@;
+}
+
 // ── gates ───────────────────────────────────────────────
 
 /// Each gate is named for the spec predicate it decides, and its contract is
