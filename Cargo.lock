@@ -3,7 +3,7 @@
 version = 4
 
 [[package]]
-name = "bon"
+name = "best-of-n"
 version = "0.0.1"
 dependencies = [
  "verus_state_machines_macros",

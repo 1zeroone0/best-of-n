@@ -10,25 +10,8 @@ broadcast use {vstd::seq_lib::group_seq_properties, vstd::seq::group_seq_axioms}
 
 // ── text ────────────────────────────────────────────────
 
-/// a and b are the same text.
-fn same(a: &Vec<char>, b: &Vec<char>) -> (r: bool)
-    ensures r == (a@ == b@),
-{
-    if a.len() != b.len() { return false; }
-    let mut i = 0;
-    while i < a.len()
-        invariant a.len() == b.len(), 0 <= i <= a.len(), forall|j: int| 0 <= j < i ==> a@[j] == b@[j],
-        decreases a.len() - i,
-    {
-        if a[i] != b[i] { return false; }
-        i += 1;
-    }
-    assert(a@ =~= b@);
-    true
-}
-
 /// a is a prefix of b.
-fn prefix(a: &Vec<char>, b: &Vec<char>) -> (r: bool)
+fn is_prefix_of(a: &Vec<char>, b: &Vec<char>) -> (r: bool)
     ensures r == a@.is_prefix_of(b@),
 {
     if a.len() > b.len() { return false; }
@@ -119,7 +102,7 @@ fn protected(checks: &Vec<Path>, p: &Path) -> (r: bool)
             forall|j: int| 0 <= j < i ==> !checks@[j]@.is_prefix_of(p@),
         decreases checks.len() - i,
     {
-        if prefix(&checks[i], p) {
+        if is_prefix_of(&checks[i], p) {
             proof {
                 let c = checks@[i as int]@;
                 assert(checks@.map_values(|q: Path| q@)[i as int] == c);
@@ -141,7 +124,7 @@ fn protected(checks: &Vec<Path>, p: &Path) -> (r: bool)
 }
 
 /// p is within the authority of a search of this kind.
-fn authorized(kind: &Kind, checks: &Vec<Path>, p: &Path) -> (r: bool)
+fn authority_contains(kind: &Kind, checks: &Vec<Path>, p: &Path) -> (r: bool)
     ensures r == spec::authority(kind@, paths(checks@)).contains(p@),
 {
     match kind {
@@ -162,7 +145,7 @@ pub fn verified(s: &Search, c: &Candidate) -> (r: bool)
         decreases c.changed.len() - i,
     {
         proof { assert(s@.authority == spec::authority(s.kind@, paths(s.checks@))); }
-        if !authorized(&s.kind, &s.checks, &c.changed[i]) {
+        if !authority_contains(&s.kind, &s.checks, &c.changed[i]) {
             proof {
                 let p = c.changed@[i as int]@;
                 assert(c.changed@.map_values(|q: Path| q@)[i as int] == p);
@@ -221,8 +204,8 @@ fn verified_each(s: &Search) -> (v: Vec<bool>)
     v
 }
 
-/// The two outputs are the same, as the spec sees them.
-fn same_out(a: &Vec<u64>, b: &Vec<u64>) -> (r: bool)
+/// The two outputs are the eq, as the spec sees them.
+fn eq_out(a: &Vec<u64>, b: &Vec<u64>) -> (r: bool)
     ensures r == (hashes(a@) == hashes(b@)),
 {
     if a.len() != b.len() {
@@ -331,7 +314,7 @@ pub fn selected(s: &Search) -> (r: Option<usize>)
     {
         if v[i] {
             let c = candidate(s, i);
-            if !same_out(&c.out, reference) {
+            if !eq_out(&c.out, reference) {
                 proof {
                     assert(spec::at(sv, i as int).out != hashes(reference@));
                     match &s.kind {
@@ -400,7 +383,7 @@ pub fn selected(s: &Search) -> (r: Option<usize>)
 // ── cleared ─────────────────────────────────────────────
 
 /// The first pair with a key is unique.
-proof fn first_is<K, V>(s: Seq<(K, V)>, k: K, i: int)
+proof fn first_by_key_at<K, V>(s: Seq<(K, V)>, k: K, i: int)
     requires 0 <= i < s.len(), s[i].0 == k, forall|j: int| 0 <= j < i ==> s[j].0 != k,
     ensures first(s, k) == i, first_by_key(s).contains_key(k), first_by_key(s)[k] == s[i].1,
 {
@@ -412,7 +395,7 @@ proof fn first_is<K, V>(s: Seq<(K, V)>, k: K, i: int)
 }
 
 /// No pair has the key.
-proof fn absent<K, V>(s: Seq<(K, V)>, k: K)
+proof fn first_by_key_absent<K, V>(s: Seq<(K, V)>, k: K)
     requires forall|j: int| 0 <= j < s.len() ==> s[j].0 != k,
     ensures !first_by_key(s).contains_key(k),
 {
@@ -430,7 +413,7 @@ spec fn key(j: Option<usize>) -> int {
 }
 
 /// Whether the test passes on member j, if the candidate reported it.
-fn passes_on(c: &Candidate, j: Option<usize>) -> (r: Option<bool>)
+fn test_passes_on(c: &Candidate, j: Option<usize>) -> (r: Option<bool>)
     ensures
         r matches Some(b) ==> c@.test_passes.contains_key(key(j)) && c@.test_passes[key(j)] == b,
         r is None ==> !c@.test_passes.contains_key(key(j)),
@@ -447,20 +430,20 @@ fn passes_on(c: &Candidate, j: Option<usize>) -> (r: Option<bool>)
         let (k, b) = c.test_passes[i];
         let hit = match j { Some(j) => (k as i128) == (j as i128), None => k == -1 };
         if hit {
-            proof { first_is(s, key(j), i as int); }
+            proof { first_by_key_at(s, key(j), i as int); }
             return Some(b);
         }
         i += 1;
     }
-    proof { absent(s, key(j)); }
+    proof { first_by_key_absent(s, key(j)); }
     None
 }
 
-/// c's test does not split t's members.
-fn holds(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
+/// c's test splits t's members.
+fn splits(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
     requires t.results.len() == t.n, vt.len() == t.n,
         forall|j: int| 0 <= j < t.n ==> vt[j] == spec::verified_at(t@, j),
-    ensures r == !spec::splits(t@, c@),
+    ensures r == spec::splits(t@, c@),
 {
     let ghost tv = t@;
     let ghost tp = c@.test_passes;
@@ -468,10 +451,10 @@ fn holds(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
     let ghost mut w: int = -1;
     match &t.kind {
         Kind::Compaction { .. } => {
-            match passes_on(c, None) {
+            match test_passes_on(c, None) {
                 None => {
                     assert(spec::member(tv, -1));
-                    return false;
+                    return true;
                 }
                 Some(b) => { value = Some(b); proof { w = -1; } }
             }
@@ -490,10 +473,10 @@ fn holds(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
         decreases vt.len() - j,
     {
         if vt[j] {
-            match passes_on(c, Some(j)) {
+            match test_passes_on(c, Some(j)) {
                 None => {
                     assert(spec::member(tv, j as int));
-                    return false;
+                    return true;
                 }
                 Some(b) => {
                     match value {
@@ -503,7 +486,7 @@ fn holds(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
                                     assert(spec::member(tv, w) && spec::member(tv, j as int));
                                     assert(tp[w] != tp[j as int]);
                                 }
-                                return false;
+                                return true;
                             }
                         }
                         None => { value = Some(b); proof { w = j as int; } }
@@ -519,7 +502,7 @@ fn holds(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
             assert(j1 < t.n && j2 < t.n);
         }
     }
-    true
+    false
 }
 
 pub fn cleared(x: &Search, t: &Search) -> (r: bool)
@@ -545,7 +528,7 @@ pub fn cleared(x: &Search, t: &Search) -> (r: bool)
     {
         if vx[i] {
             let c = candidate(x, i);
-            if !holds(t, &vt, c) {
+            if splits(t, &vt, c) {
                 assert(spec::verified_at(xv, i as int) && spec::splits(t@, spec::at(xv, i as int)));
                 return false;
             }
@@ -562,8 +545,8 @@ pub fn cleared(x: &Search, t: &Search) -> (r: bool)
 
 // ── proposed, contested ─────────────────────────────────
 
-/// The wording candidate c gives cue q, if it cites q.
-fn wording(c: &Candidate, q: Cue) -> (r: Option<&Intent>)
+/// The intent candidate c gives cue q, if it cites q.
+fn intent(c: &Candidate, q: Cue) -> (r: Option<&Intent>)
     ensures
         r matches Some(w) ==> c@.intents.contains_key(q as nat) && c@.intents[q as nat] == w@,
         r is None ==> !c@.intents.contains_key(q as nat),
@@ -578,12 +561,12 @@ fn wording(c: &Candidate, q: Cue) -> (r: Option<&Intent>)
         decreases c.intents.len() - i,
     {
         if c.intents[i].0 == q {
-            proof { first_is(s, q as nat, i as int); }
+            proof { first_by_key_at(s, q as nat, i as int); }
             return Some(&c.intents[i].1);
         }
         i += 1;
     }
-    proof { absent(s, q as nat); }
+    proof { first_by_key_absent(s, q as nat); }
     None
 }
 
@@ -593,9 +576,9 @@ spec fn shortest(s: spec::Search, q: nat, i: int, j: int) -> bool {
     || (spec::at(s, i).intents[q].len() == spec::at(s, j).intents[q].len() && i <= j)
 }
 
-/// Who cites q: the first two citing indices, and the one with the shortest wording.
+/// Who cites q: the first two citing indices, and the one with the shortest intent.
 #[verifier::rlimit(100)]
-fn tally(s: &Search, v: &Vec<bool>, q: Cue) -> (r: (Option<usize>, Option<usize>, usize))
+fn cites(s: &Search, v: &Vec<bool>, q: Cue) -> (r: (Option<usize>, Option<usize>, usize))
     requires s.results.len() == s.n, v.len() == s.n,
         forall|j: int| 0 <= j < s.n ==> v[j] == spec::verified_at(s@, j),
     ensures
@@ -625,7 +608,7 @@ fn tally(s: &Search, v: &Vec<bool>, q: Cue) -> (r: (Option<usize>, Option<usize>
     {
         if v[i] {
             let c = candidate(s, i);
-            match wording(c, q) {
+            match intent(c, q) {
                 None => {}
                 Some(w) => {
                     match first {
@@ -633,7 +616,7 @@ fn tally(s: &Search, v: &Vec<bool>, q: Cue) -> (r: (Option<usize>, Option<usize>
                         Some(_) => {
                             if second.is_none() { second = Some(i); }
                             let b = candidate(s, best);
-                            let bw = match wording(b, q) { Some(bw) => bw, None => vstd::pervasive::unreached() };
+                            let bw = match intent(b, q) { Some(bw) => bw, None => vstd::pervasive::unreached() };
                             if w.len() < bw.len() {
                                 proof {
                                     assert forall|j: int| 0 <= j < i + 1 && spec::cites(sv, j, q as nat)
@@ -741,7 +724,7 @@ proof fn complete(s: &Search)
     assert forall|i: int| 0 <= i < s.n implies s@.results.contains_key(i) by { result_at(s, i); }
 }
 
-/// Two distinct citers make q agreed, and the shortest citer's wording is proposed.
+/// Two distinct citers make q agreed, and the shortest citer's intent is proposed.
 proof fn agreed_and_proposed(sv: spec::Search, q: nat, f: int, g: int, best: int, w: Seq<char>)
     requires
         sv.kind is Map, spec::complete(sv), f != g,
@@ -804,11 +787,11 @@ pub fn proposed(s: &Search) -> (r: Vec<(Cue, Intent)>)
         decreases qs.len() - k,
     {
         let q = qs[k];
-        let (first, second, best) = tally(s, &v, q);
+        let (first, second, best) = cites(s, &v, q);
         let ghost before = r@;
         if second.is_some() {
             let c = candidate(s, best);
-            let w = match wording(c, q) { Some(w) => w.clone(), None => vstd::pervasive::unreached() };
+            let w = match intent(c, q) { Some(w) => w.clone(), None => vstd::pervasive::unreached() };
             proof {
                 agreed_and_proposed(sv, q as nat, first->Some_0 as int, second->Some_0 as int, best as int, w@);
             }
@@ -867,7 +850,7 @@ pub fn contested(s: &Search) -> (r: Vec<Cue>)
         decreases qs.len() - k,
     {
         let q = qs[k];
-        let (first, second, _) = tally(s, &v, q);
+        let (first, second, _) = cites(s, &v, q);
         let ghost before = r@;
         if first.is_some() && second.is_none() {
             r.push(q);
