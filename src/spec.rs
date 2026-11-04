@@ -241,6 +241,15 @@ pub open spec fn proposed(s: Search, q: Cue, w: Intent) -> bool {
             w.len() < at(s, j).intents[q].len() || (w.len() == at(s, j).intents[q].len() && i <= j)
 }
 
+/// Where a search's candidates start: trunk's head, or for a counterexample
+/// search, the candidate it attacks, so its test is written against that code.
+pub open spec fn start(kind: Kind, searches: Seq<Search>, head: Commit) -> Commit {
+    match kind {
+        Kind::Counterexample { goal } => at(searches[goal.search], goal.index).commit,
+        _ => head,
+    }
+}
+
 /// The agent processes of search k: one per index.
 pub open spec fn agent_processes(k: int, n: nat) -> Seq<AgentProcess> {
     Seq::new(n, |i: int| AgentProcess { search: k, index: i })
@@ -317,7 +326,7 @@ tokenized_state_machine!{ bon {
             && selected(pre.searches[goal.search], goal.index)
             && pre.searches[goal.search].base == pre.trunk.last();
         let k = pre.searches.len() as int;
-        let base = pre.trunk.last();
+        let base = start(kind, pre.searches, pre.trunk.last());
         let a = authority(kind, pre.checks);
         update searches = pre.searches.push(Search { kind, base, n, authority: a, limit: l, results: Map::empty() });
         update reserved = pre.reserved + l * n;
