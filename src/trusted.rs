@@ -44,6 +44,9 @@ pub struct Config {
     /// Prices by canonical model, from the device file.
     #[serde(skip)]
     pub prices: HashMap<String, Price>,
+    /// How many agent processes run at once, from the device file. (intent 24)
+    #[serde(skip)]
+    pub jobs: usize,
 }
 
 /// What is true of this machine rather than of a repository, written by
@@ -55,6 +58,10 @@ pub const DEVICE: &str = "/etc/bon/device.toml";
 struct Device {
     path: Vec<String>,
     prices: HashMap<String, Price>,
+    /// How many agent processes run at once; width stays what bon.toml says.
+    /// Default: half the cores.
+    #[serde(default)]
+    jobs: Option<usize>,
 }
 
 fn trunk_default() -> String { "main".into() }
@@ -361,6 +368,7 @@ pub fn manifest(root: &str, commit: &Commit) -> (r: Result<Manifest, String>) {
         .map_err(|e| format!("{DEVICE}: {e}"))?;
     config.path = device.path;
     config.prices = device.prices;
+    config.jobs = device.jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1)));
     for h in config.harness.iter().chain(config.counterexample.harness.iter()) {
         if !config.prices.contains_key(&h.model) {
             return Err(format!("{DEVICE}: no price for {}; bon.toml must name canonical model ids", h.model));
@@ -491,13 +499,19 @@ pub fn run(m: &Manifest, kind: &Kind, search: usize, a: usize, start: &Commit, t
     let map = git(&m.root, &["show", &format!("{start}:map")]).unwrap_or_default();
     let traces = m.root.join(".bon").join("traces").join(format!("{}", std::process::id())).join(search.to_string());
     let _ = std::fs::create_dir_all(&traces);
+    // At most `jobs` agent processes at once; each worker takes the next index.
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let out: Vec<std::sync::Mutex<(Option<Candidate>, u64)>> = slots.iter().map(|_| std::sync::Mutex::new((None, 0))).collect();
     std::thread::scope(|scope| {
-        let handles: Vec<_> = slots.iter().enumerate().map(|(i, h)| {
-            let (start, map, traces) = (&start, &map, &traces);
-            scope.spawn(move || agent_process(m, kind, search, i, h, start, map, target, tests, &traces.join(i.to_string())))
-        }).collect();
-        handles.into_iter().map(|h| h.join().unwrap_or((None, 0))).collect()
-    })
+        for _ in 0..m.config.jobs.max(1).min(slots.len()) {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(h) = slots.get(i) else { break };
+                *out[i].lock().unwrap() = agent_process(m, kind, search, i, h, &start, &map, target, tests, &traces.join(i.to_string()));
+            });
+        }
+    });
+    out.into_iter().map(|c| c.into_inner().unwrap_or((None, 0))).collect()
 }
 
 /// The remote's trunk fast-forwards to `commit`, then the local trunk follows.

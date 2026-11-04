@@ -194,6 +194,10 @@ fn setup(dry_run: bool, user: Option<String>) -> Result<(), String> {
 const DEVICE_TEMPLATE: &str = r#"# bon's device file: facts about this machine, not about any repository.
 # Owned by root; edit with sudo. Every trace records the prices it was costed at.
 
+# How many agent processes run at once (default: half the cores). Width per
+# search stays what each repository's bon.toml says.
+jobs = 7
+
 # PATH for agent processes and checks. Nothing else is inherited.
 path = ["/Users/agent/.local/bin", "/Users/agent/.cargo/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
 
