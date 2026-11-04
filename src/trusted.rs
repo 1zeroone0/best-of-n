@@ -512,6 +512,7 @@ fn prompt(kind: &Kind, config: &Config, map: &str, target: Option<&Search>) -> S
     format!(
         "You are working in a copy of a repository, with no git. {goal}\n\
          The checks are {paths:?}: read and run them, never change them; you cannot.\n\
+         Run the checks first: any that fail are yours to make pass.\n\
          They run with: {verify:?}\n\
          The current intents, for context:\n{map}\n\
          {scope} Reply with one line saying what you changed.",
@@ -877,7 +878,9 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
     }).ok();
     let _ = std::fs::remove_dir_all(&dir);
     let build = scratch(&format!("{search}.{index}/build"));
-    let _ = as_agent(config, std::path::Path::new("/tmp"), &[], &["rm".into(), "-rf".into(), build.to_string_lossy().into()]).status();
+    // agent empties its build directory; engineer removes the directory itself at cleanup.
+    let _ = as_agent(config, std::path::Path::new("/tmp"), &[], &["rm".into(), "-rf".into(), build.to_string_lossy().into()])
+        .stderr(Stdio::null()).status();
     let text = |v: &Vec<char>| v.iter().collect::<String>();
     let facts = serde_json::json!({
         "harness": h.name, "model": h.model, "cost_microdollars": spent, "killed": killed,

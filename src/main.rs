@@ -394,7 +394,9 @@ fn sbom(root: &str, check: bool) -> Result<(), String> {
         ("application", "rustc", as_agent("rustc", &["--version"])),
         ("application", "verus", verus),
         ("application", "git", version("git", &["--version"])),
-        ("application", "sudo", version("sudo", &["-V"])),
+        // sudo is setuid, so a sandboxed harness cannot run it; it ships with
+        // macOS, so its version is the OS build, which reads the same anywhere.
+        ("application", "sudo", format!("macOS {}", version("sw_vers", &["-buildVersion"]))),
         ("application", "tar", version("tar", &["--version"])),
         ("application", "claude", as_agent("claude", &["--version"])),
         ("application", "codex", as_agent("codex", &["--version"])),
