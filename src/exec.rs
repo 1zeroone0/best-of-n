@@ -31,61 +31,28 @@ fn is_prefix_of(a: &Vec<char>, b: &Vec<char>) -> (r: bool)
     true
 }
 
-fn is_map_path(p: &Vec<char>) -> (r: bool)
-    ensures r == (p@ == spec::map_path()),
-{
-    let r = p.len() == 3 && p[0] == 'm' && p[1] == 'a' && p[2] == 'p';
-    if r { assert(p@ =~= spec::map_path()); }
-    r
-}
-
-fn is_manifest_path(p: &Vec<char>) -> (r: bool)
-    ensures r == (p@ == spec::manifest_path()),
-{
-    let r = p.len() == 8 && p[0] == 'b' && p[1] == 'o' && p[2] == 'n' && p[3] == '.'
-        && p[4] == 't' && p[5] == 'o' && p[6] == 'm' && p[7] == 'l';
-    if r { assert(p@ =~= spec::manifest_path()); }
-    r
-}
-
 // ── isolated ────────────────────────────────────────────
-
-fn permission_is(p: &Permission, read: bool, write: bool, execute: bool) -> (r: bool)
-    ensures r == (*p == Permission { read, write, execute }),
-{
-    p.read == read && p.write == write && p.execute == execute
-}
 
 pub fn isolated(checks: Permission, transcripts: Permission, working_directory: Permission, repository: Permission) -> (r: bool)
     ensures r == spec::isolated(observed(checks, transcripts, working_directory, repository)),
 {
     let ghost o = observed(checks, transcripts, working_directory, repository);
-    let r = permission_is(&checks, true, false, true)
-        && permission_is(&transcripts, true, false, true)
-        && permission_is(&working_directory, true, true, true)
-        && permission_is(&repository, false, false, false);
+    let r = (checks.read && !checks.write && checks.execute)
+        && (transcripts.read && !transcripts.write && transcripts.execute)
+        && (working_directory.read && working_directory.write && working_directory.execute)
+        && (!repository.read && !repository.write && !repository.execute);
+    assert forall|f: File| o.contains_key(f) && (r ==> o[f] == spec::policy(User::agent, f)) by {
+        match f { File::Checks => {}, File::Transcripts => {}, File::WorkingDirectory => {}, File::Repository => {} }
+    }
     proof {
-        if r {
-            assert forall|f: File| o.contains_key(f) && o[f] == spec::policy(User::agent, f) by {
-                match f { File::Checks => {}, File::Transcripts => {}, File::WorkingDirectory => {}, File::Repository => {} }
-            }
-        } else {
-            if !permission_is_spec(checks, true, false, true) {
-                assert(o[File::Checks] != spec::policy(User::agent, File::Checks));
-            } else if !permission_is_spec(transcripts, true, false, true) {
-                assert(o[File::Transcripts] != spec::policy(User::agent, File::Transcripts));
-            } else if !permission_is_spec(working_directory, true, true, true) {
-                assert(o[File::WorkingDirectory] != spec::policy(User::agent, File::WorkingDirectory));
-            } else {
-                assert(o[File::Repository] != spec::policy(User::agent, File::Repository));
-            }
+        if spec::isolated(o) {
+            assert(o[File::Checks] == spec::policy(User::agent, File::Checks));
+            assert(o[File::Transcripts] == spec::policy(User::agent, File::Transcripts));
+            assert(o[File::WorkingDirectory] == spec::policy(User::agent, File::WorkingDirectory));
+            assert(o[File::Repository] == spec::policy(User::agent, File::Repository));
         }
     }
     r
-}
-
-spec fn permission_is_spec(p: Permission, read: bool, write: bool, execute: bool) -> bool {
-    p == Permission { read, write, execute }
 }
 
 // ── verified ────────────────────────────────────────────
@@ -94,7 +61,7 @@ spec fn permission_is_spec(p: Permission, read: bool, write: bool, execute: bool
 fn protected(checks: &Vec<Path>, p: &Path) -> (r: bool)
     ensures r == spec::protected(paths(checks@), p@),
 {
-    if is_map_path(p) || is_manifest_path(p) { return true; }
+    if eq(p, &vec!['m', 'a', 'p']) || eq(p, &vec!['b', 'o', 'n', '.', 't', 'o', 'm', 'l']) { return true; }
     let mut i = 0;
     while i < checks.len()
         invariant
@@ -129,7 +96,7 @@ fn authority_contains(kind: &Kind, checks: &Vec<Path>, p: &Path) -> (r: bool)
     ensures r == spec::authority(kind@, paths(checks@)).contains(p@),
 {
     match kind {
-        Kind::Map { .. } => is_map_path(p),
+        Kind::Map { .. } => eq(p, &vec!['m', 'a', 'p']),
         _ => !protected(checks, p),
     }
 }
