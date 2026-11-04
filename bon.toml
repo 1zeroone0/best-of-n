@@ -1,10 +1,10 @@
 # bon's own bon.toml: bon builds bon.
-limit = 40.00
+limit = 200.00
 rate = 150
 
 [agent_process]
-limit = 1.00
-time = 1800
+limit = 5.00
+time = 3600
 
 [checks]
 paths = ["src/spec.rs", "src/gates.rs"]
