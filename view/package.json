@@ -1,0 +1,13 @@
+{
+  "name": "bon-view",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit && esbuild src/main.ts --bundle --format=esm --target=es2022 --minify --outfile=dist/app.js && cp src/app.css dist/app.css && cp src/index.html dist/index.html",
+    "check": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.10",
+    "typescript": "5.9.3"
+  }
+}

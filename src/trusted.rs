@@ -296,6 +296,20 @@ fn check_directory(root: &std::path::Path, commit: &str, dir: &std::path::Path) 
 static WARM: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 /// This bon process's runs so far: names its working directories, traces and refs.
 static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The latest run's kind and goal, for its line in searches.jsonl.
+static LATEST: std::sync::Mutex<(String, String)> = std::sync::Mutex::new((String::new(), String::new()));
+
+/// A kind's name and goal, as the trace records them.
+fn label(kind: &Kind) -> (String, String) {
+    let text = |v: &Vec<char>| v.iter().collect::<String>();
+    match kind {
+        Kind::Code { goal } => ("code".into(), text(goal)),
+        Kind::Map { goal } => ("map".into(), text(goal)),
+        Kind::Counterexample { goal } => ("counterexample".into(), format!("search {} candidate {}", goal.search, goal.index)),
+        Kind::Compaction { .. } => ("compaction".into(), String::new()),
+        Kind::Scrub { goal, .. } => ("scrub".into(), text(goal)),
+    }
+}
 static WARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Start building trunk in the background, once.
@@ -672,6 +686,7 @@ pub fn run(m: &Manifest, kind: &Kind, _index: usize, a: usize, start: &Commit, t
     // Number runs once per bon process, so a command that runs several drivers
     // (a scrub, then a code search) never reuses a working directory, trace or ref.
     let search = RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if let Ok(mut l) = LATEST.lock() { *l = label(kind); }
     let start: String = start.iter().collect();
     warm(m, &start);
     let hs = harnesses(&m.config, kind);
@@ -732,14 +747,24 @@ pub fn report(m: &Manifest, _index: usize, n: usize, verified: usize, generation
     eprintln!("bon: {line}");
     let d = m.root.join(".bon").join("traces").join(format!("{}", std::process::id()));
     let _ = std::fs::create_dir_all(&d);
+    let (kind, goal) = LATEST.lock().map(|l| l.clone()).unwrap_or_default();
     let summary = serde_json::json!({
-        "search": search, "agent_processes": n, "verified": verified, "generation_dollars": generation,
+        "search": search, "kind": kind, "goal": goal,
+        "time": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
+        "agent_processes": n, "verified": verified, "generation_dollars": generation,
         "seconds": hours * 3600.0, "rate": m.config.rate, "time_dollars": time,
         "cost_per_verified_candidate": per,
     });
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(d.join("searches.jsonl")) {
         let _ = writeln!(f, "{summary}");
     }
+}
+
+/// Record which candidate of the latest search was selected. (intent 14)
+#[verifier::external_body]
+pub fn record_selected(m: &Manifest, i: usize) {
+    let search = RUNS.load(std::sync::atomic::Ordering::SeqCst).saturating_sub(1);
+    record(m, &format!("selected {search} {i}"));
 }
 
 /// Append one line to this command's trace. (intent 14)

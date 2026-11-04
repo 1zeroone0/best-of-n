@@ -6,10 +6,13 @@ use std::process::Command;
 
 use best_of_n::exec;
 
+mod view;
+
 const USAGE: &str = "usage:
   bon                     every intent in the map, and whether it is built
   bon code \"<intent>\"     search for code that makes this intent hold; fast-forward trunk
   bon compaction          search for code that removes or simplifies without changing behavior
+  bon view [--port N]     one live page: map, spec, searches, trunk, reports
   bon background [--plist] one unit of the stalest scrub or compaction, on spare capacity
   bon scrub \"<intent>\"    check an intent against trunk with tests written from the spec and the intent
   bon map                 turn each new transcript into a proposal for the map
@@ -52,6 +55,14 @@ fn dispatch(root: &str, args: &[String]) -> Result<(), String> {
         }
         Some("background") if args.get(1).map(String::as_str) == Some("--plist") => { plist(&root); Ok(()) }
         Some("background") => background(&root),
+        Some("view") if args.iter().any(|a| a == "--state") => {
+            println!("{}", serde_json::to_string_pretty(&view::state(std::path::Path::new(&root))).unwrap_or_default());
+            Ok(())
+        }
+        Some("view") => {
+            let port = args.iter().position(|a| a == "--port").and_then(|i| args.get(i + 1)).and_then(|p| p.parse().ok()).unwrap_or(4747);
+            view::serve(&root, port, !args.iter().any(|a| a == "--no-open"))
+        }
         Some("map") => map(&root),
         Some("setup") => {
             let dry_run = args.iter().any(|a| a == "--dry-run");

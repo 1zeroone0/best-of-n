@@ -1068,6 +1068,7 @@ pub fn land(root: &str, goal: Option<Intent>, carried: trusted::Tests) -> (r: Re
                 index = index + 1;
             }
             Some(i) => {
+                trusted::record_selected(&m, i);
                 let start = head.clone();
                 let ghost before1 = t.searches.value();
                 let s1 = search(&m, index + 1, a, Kind::Counterexample { goal: AgentProcess { search: index, index: i } }, start,
@@ -1158,6 +1159,7 @@ pub fn scrub(root: &str, goal: Intent) -> (r: Result<Option<trusted::Tests>, Str
         match selected(&s0) {
             None => { trusted::record(&m, "blocked: fewer than two verified tests, or they disagree"); }
             Some(i) => {
+                trusted::record_selected(&m, i);
                 let c = candidate(&s0, i);
                 match test_passes_on(c, None) {
                     Some(true) => {

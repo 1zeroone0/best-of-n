@@ -1,0 +1,3612 @@
+{
+  "device": {
+    "path": [
+      "/Users/agent/.local/bin",
+      "/Users/agent/.cargo/bin",
+      "/opt/homebrew/bin",
+      "/usr/bin",
+      "/bin",
+      "/usr/sbin",
+      "/sbin"
+    ],
+    "prices": {
+      "claude-haiku-5-5": {
+        "cache_write": 0.125,
+        "cache_write_long": 0.2,
+        "cached_input": 0.01,
+        "input": 0.1,
+        "output": 0.5
+      },
+      "claude-opus-5-5": {
+        "cache_write": 5.0,
+        "cache_write_long": 8.0,
+        "cached_input": 0.2,
+        "input": 4.0,
+        "output": 20.0
+      },
+      "gpt-6.1-sol": {
+        "cache_write": 2.5,
+        "cache_write_long": 5.0,
+        "cached_input": 0.1,
+        "input": 2.0,
+        "output": 10.0
+      }
+    }
+  },
+  "manifest": {
+    "agent_process": {
+      "limit": 1.0,
+      "time": 1800
+    },
+    "checks": {
+      "agree": [
+        "cargo run -q -- help"
+      ],
+      "paths": [
+        "src/spec.rs",
+        "src/gates.rs"
+      ],
+      "rank": {
+        "code": "echo 0",
+        "compaction": "echo $((0 - $(cat src/*.rs | wc -l)))"
+      },
+      "verify": [
+        "cargo verus verify",
+        "cargo test --lib -q",
+        "cargo run -q -- sbom --check"
+      ]
+    },
+    "counterexample": {
+      "harness": [
+        {
+          "model": "claude-opus-5-5",
+          "n": [
+            2
+          ],
+          "name": "claude"
+        }
+      ],
+      "path": "tests/counterexample.rs",
+      "test": "cargo test -q --test counterexample"
+    },
+    "harness": [
+      {
+        "model": "gpt-6.1-sol",
+        "n": [
+          8,
+          12
+        ],
+        "name": "codex"
+      }
+    ],
+    "limit": 40.0,
+    "rate": 150
+  },
+  "map": [
+    {
+      "intent": "The map holds the current intents, one per line; git history records how they changed.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "Candidates are sibling commits of one base.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "The checks are Verus (the spec and proofs) and the tests; a candidate is verified when every check passes and it changes neither the checks, the manifest, nor the map.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "A search selects a candidate only when at least two candidates are verified and every verified candidate prints the same output for each agree check.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "Among the verified candidates, the highest rank is selected; ties go to the smallest diff.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "Trunk fast-forwards to exactly the selected candidate; engineer decides by committing the map and the checks, not by accepting candidates.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "Each candidate is written by one process running as user agent in its own working directory, holding one capability.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "agent has read and execute permission on the checks, read permission on the transcripts, and no permission on the repository.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "No capability is granted until isolation is confirmed.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "Each new transcript becomes a proposal: candidates change only the map, each new intent cites its cue, a cue is agreed when at least two verified candidates cite it, and the shortest wording is selected.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "Exec code uses the spec's names: each exec type views the spec type of the same name, and the gates are a trait in the spec.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "Each trace records every transition under its spec name.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "After agreement and before fast-forward, a counterexample search asks other harnesses for a test that splits the agreed candidates; trunk fast-forwards only if no verified test does, and a test that does joins the agreement of the next search for that intent.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "Each trace records, for every agent process, its harness, model, tokens, cost and time, and for every check its time and exit status, so that cost per verified candidate = (Σ_c (g(c) + k(c)) + r·t) / v, with r the rate in bon.toml and t the search's wall time.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "A blocked search reruns, as wide as bon.toml's width list says for that attempt, until the attempts or a limit run out; only that goes to engineer.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "Limits nest like the process tree: each agent process's limit is reserved from its search's, and each search's from the bon process's; wait returns what was unused, and nothing spends past its limit.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "A compaction search asks for candidates that remove or simplify code at trunk's head; every verified candidate must print the same as trunk's head on each agree check, and the highest rank is selected.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "The SBOM lists every crate, toolchain, TCB tool, service and trusted function bon depends on, as CycloneDX, and a check fails when it differs from the machine.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "A skill ships with the CLI for the model engineer talks to: how to work at the spec level and when to run bon, read from the bon.toml, map and spec of the repo it runs in; agent processes never see it.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "Trunk is the remote's main: a search starts from it, and every fast-forward is pushed to it, or refused if it moved.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "Cost is computed from the harness's token counts and the manifest's prices for the canonical model, and checked against the harness's own figure where it gives one.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "A scrub search checks an intent against trunk with tests written from the spec and the intent, never the implementation: an agreed pass lands the test as a check, and an agreed fail marks the intent broken and starts a code search that carries the test.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "Counterexample tests are written from the spec and the intent, never from candidate code, and run on every agreed candidate.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "Checks start from trunk's build of the protected paths, which no candidate can change.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "The device file's jobs caps how many agent processes run at once; width stays what bon.toml says.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    },
+    {
+      "intent": "Background work, scrub and compaction, runs only on spare capacity, stalest first, staleness being trunk commits since an intent's last scrub or since the last compaction.",
+      "landed": null,
+      "scrub": null,
+      "source": "",
+      "status": "open"
+    }
+  ],
+  "processes": [
+    {
+      "modified": 1793761672,
+      "pid": 694,
+      "running": false,
+      "searches": [
+        {
+          "candidates": [
+            {
+              "facts": {
+                "candidate": {
+                  "base": "aa3245758f6b6ebae153c5ba9b50d61cf611c026",
+                  "changed": [
+                    "sbom.json",
+                    "src/exec.rs"
+                  ],
+                  "checks_pass": false,
+                  "commit": "3eebf9d54530041fc75298af2960940bcce166b6",
+                  "diff": 766,
+                  "intents": [],
+                  "out": [],
+                  "rank": 0,
+                  "test_passes": []
+                },
+                "cost_microdollars": 466830,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 0,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "prompt",
+                "facts.json",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "aa3245758f6b6ebae153c5ba9b50d61cf611c026",
+                  "changed": [
+                    "src/exec.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "15b2888f41541131f8807f4b4c81c31b35ab7278",
+                  "diff": 21,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3184,
+                  "test_passes": []
+                },
+                "cost_microdollars": 312560,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 1,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "aa3245758f6b6ebae153c5ba9b50d61cf611c026",
+                  "changed": [
+                    "src/exec.rs",
+                    "src/trusted.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "83bb9437b7fc7a6f923ffb6ae36ac2f26ae98760",
+                  "diff": 49,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3200,
+                  "test_passes": []
+                },
+                "cost_microdollars": 279226,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 2,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "aa3245758f6b6ebae153c5ba9b50d61cf611c026",
+                  "changed": [
+                    "src/exec.rs",
+                    "src/trusted.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "a3f8d9edb8549bc67b668469a7a11f6e00728886",
+                  "diff": 61,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3194,
+                  "test_passes": []
+                },
+                "cost_microdollars": 333864,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 3,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "aa3245758f6b6ebae153c5ba9b50d61cf611c026",
+                  "changed": [
+                    "src/exec.rs",
+                    "src/trusted.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "f146f316280afbf8fc7c1defdff57e9ce04cffd9",
+                  "diff": 100,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3171,
+                  "test_passes": []
+                },
+                "cost_microdollars": 599012,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 4,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "aa3245758f6b6ebae153c5ba9b50d61cf611c026",
+                  "changed": [
+                    "src/exec.rs",
+                    "src/trusted.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "e13beb07a4d1de989b01119ceb7496794aa9f2eb",
+                  "diff": 64,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3185,
+                  "test_passes": []
+                },
+                "cost_microdollars": 258694,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 5,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "aa3245758f6b6ebae153c5ba9b50d61cf611c026",
+                  "changed": [
+                    "src/exec.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "77bf81f6ab4c1d8a808417611fd6f1ea7b5b294e",
+                  "diff": 55,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3178,
+                  "test_passes": []
+                },
+                "cost_microdollars": 443083,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 6,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "aa3245758f6b6ebae153c5ba9b50d61cf611c026",
+                  "changed": [
+                    "src/exec.rs",
+                    "src/main.rs",
+                    "src/trusted.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "9485839241897d31edd260215942b65b40763bf3",
+                  "diff": 130,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3113,
+                  "test_passes": []
+                },
+                "cost_microdollars": 567856,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 7,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            }
+          ],
+          "search": 0,
+          "selected": null,
+          "summary": {
+            "agent_processes": 8,
+            "cost_per_verified_candidate": 3.193405082589286,
+            "generation_dollars": 3.261125,
+            "rate": 150.0,
+            "search": 0,
+            "seconds": 458.225053875,
+            "time_dollars": 19.092710578125,
+            "verified": 7
+          }
+        },
+        {
+          "candidates": [
+            {
+              "facts": {
+                "candidate": {
+                  "base": "aa3245758f6b6ebae153c5ba9b50d61cf611c026",
+                  "changed": [
+                    "tests/counterexample.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "edafe261f39335d1ea567c196851475aa40b9b6b",
+                  "diff": 25,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": 0,
+                  "test_passes": [
+                    [
+                      -1,
+                      true
+                    ],
+                    [
+                      0,
+                      true
+                    ],
+                    [
+                      1,
+                      true
+                    ],
+                    [
+                      2,
+                      true
+                    ],
+                    [
+                      3,
+                      true
+                    ],
+                    [
+                      4,
+                      true
+                    ],
+                    [
+                      5,
+                      true
+                    ],
+                    [
+                      6,
+                      true
+                    ],
+                    [
+                      7,
+                      true
+                    ]
+                  ]
+                },
+                "cost_microdollars": 197614,
+                "harness": "claude",
+                "harness_cost_microdollars": 197614,
+                "killed": false,
+                "model": "claude-opus-5-5",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "claude-opus-5-5": {
+                    "cache_write": 5.0,
+                    "cache_write_long": 8.0,
+                    "cached_input": 0.2,
+                    "input": 4.0,
+                    "output": 20.0
+                  }
+                }
+              },
+              "index": 0,
+              "logs": [
+                "test--1",
+                "test-1",
+                "test-6",
+                "argv",
+                "test-7",
+                "test-0",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "test-5",
+                "test-2",
+                "test-3",
+                "test-4",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "aa3245758f6b6ebae153c5ba9b50d61cf611c026",
+                  "changed": [
+                    "tests/counterexample.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "812df4258bd1aacba7475c538f1c7e6dad7245e1",
+                  "diff": 48,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": 0,
+                  "test_passes": [
+                    [
+                      -1,
+                      true
+                    ],
+                    [
+                      0,
+                      true
+                    ],
+                    [
+                      1,
+                      true
+                    ],
+                    [
+                      2,
+                      true
+                    ],
+                    [
+                      3,
+                      true
+                    ],
+                    [
+                      4,
+                      true
+                    ],
+                    [
+                      5,
+                      true
+                    ],
+                    [
+                      6,
+                      true
+                    ],
+                    [
+                      7,
+                      true
+                    ]
+                  ]
+                },
+                "cost_microdollars": 221830,
+                "harness": "claude",
+                "harness_cost_microdollars": 221830,
+                "killed": false,
+                "model": "claude-opus-5-5",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "claude-opus-5-5": {
+                    "cache_write": 5.0,
+                    "cache_write_long": 8.0,
+                    "cached_input": 0.2,
+                    "input": 4.0,
+                    "output": 20.0
+                  }
+                }
+              },
+              "index": 1,
+              "logs": [
+                "test--1",
+                "test-1",
+                "test-6",
+                "argv",
+                "test-7",
+                "test-0",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "test-5",
+                "test-2",
+                "test-3",
+                "test-4",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            }
+          ],
+          "search": 1,
+          "selected": null,
+          "summary": {
+            "agent_processes": 2,
+            "cost_per_verified_candidate": 1.4155499097083335,
+            "generation_dollars": 0.419444,
+            "rate": 150.0,
+            "search": 1,
+            "seconds": 57.879739666000006,
+            "time_dollars": 2.411655819416667,
+            "verified": 2
+          }
+        }
+      ],
+      "transitions": [
+        "initialize",
+        "grant",
+        "wait",
+        "wait",
+        "wait",
+        "wait",
+        "wait",
+        "wait",
+        "wait",
+        "wait",
+        "grant",
+        "wait",
+        "wait",
+        "fast_forward"
+      ]
+    },
+    {
+      "modified": 1793759270,
+      "pid": 42032,
+      "running": false,
+      "searches": [
+        {
+          "candidates": [
+            {
+              "facts": {
+                "candidate": {
+                  "base": "d6225e8e25437d5e102f9a4007862a9c6c34a028",
+                  "changed": [
+                    "src/exec.rs",
+                    "src/trusted.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "2ac8d86ae5834a835cd1202df661520bacae6a99",
+                  "diff": 59,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3132,
+                  "test_passes": []
+                },
+                "cost_microdollars": 631672,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 0,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "d6225e8e25437d5e102f9a4007862a9c6c34a028",
+                  "changed": [
+                    "src/exec.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "136f1fade32cdae4fc579f33c287ab25cf3bc8bd",
+                  "diff": 40,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3135,
+                  "test_passes": []
+                },
+                "cost_microdollars": 346250,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 1,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "d6225e8e25437d5e102f9a4007862a9c6c34a028",
+                  "changed": [
+                    "sbom.json",
+                    "src/exec.rs"
+                  ],
+                  "checks_pass": false,
+                  "commit": "84fbd90791e0e0ccb3c04dbc2a3d0c4185dbb0ee",
+                  "diff": 40,
+                  "intents": [],
+                  "out": [],
+                  "rank": 0,
+                  "test_passes": []
+                },
+                "cost_microdollars": 277143,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 2,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "prompt",
+                "facts.json",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "d6225e8e25437d5e102f9a4007862a9c6c34a028",
+                  "changed": [
+                    "src/exec.rs",
+                    "src/trusted.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "f840cf0a544ab2ac19bd48812175cb84a118d70d",
+                  "diff": 41,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3144,
+                  "test_passes": []
+                },
+                "cost_microdollars": 433077,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 3,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "d6225e8e25437d5e102f9a4007862a9c6c34a028",
+                  "changed": [
+                    "src/exec.rs",
+                    "src/trusted.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "6b1e4d5563d8a418c613f02ecc344252aae92920",
+                  "diff": 60,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3143,
+                  "test_passes": []
+                },
+                "cost_microdollars": 445254,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 4,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "d6225e8e25437d5e102f9a4007862a9c6c34a028",
+                  "changed": [
+                    "sbom.json",
+                    "src/exec.rs",
+                    "src/trusted.rs"
+                  ],
+                  "checks_pass": false,
+                  "commit": "abf9f78fcc71a0c897c75d6dea7758cc063d32fa",
+                  "diff": 75,
+                  "intents": [],
+                  "out": [],
+                  "rank": 0,
+                  "test_passes": []
+                },
+                "cost_microdollars": 518114,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 5,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "prompt",
+                "facts.json",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "d6225e8e25437d5e102f9a4007862a9c6c34a028",
+                  "changed": [
+                    "src/exec.rs",
+                    "src/trusted.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "ffceb1c38a52dd380da0118a193e79e7ffd1b252",
+                  "diff": 75,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3130,
+                  "test_passes": []
+                },
+                "cost_microdollars": 407342,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 6,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "d6225e8e25437d5e102f9a4007862a9c6c34a028",
+                  "changed": [
+                    "sbom.json",
+                    "src/exec.rs",
+                    "src/trusted.rs"
+                  ],
+                  "checks_pass": false,
+                  "commit": "62fde28374a9013361c0e020710f311b391a9a2d",
+                  "diff": 88,
+                  "intents": [],
+                  "out": [],
+                  "rank": 0,
+                  "test_passes": []
+                },
+                "cost_microdollars": 515680,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 7,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "prompt",
+                "facts.json",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "d6225e8e25437d5e102f9a4007862a9c6c34a028",
+                  "changed": [
+                    "src/exec.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "6025629cb1914eb2ac75bb7d721dd62d743157d5",
+                  "diff": 61,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3120,
+                  "test_passes": []
+                },
+                "cost_microdollars": 297671,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 8,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "d6225e8e25437d5e102f9a4007862a9c6c34a028",
+                  "changed": [
+                    "src/exec.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "c2caebe0eadefef635cb6c8097a2646f9c757640",
+                  "diff": 26,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3143,
+                  "test_passes": []
+                },
+                "cost_microdollars": 243084,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 9,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "d6225e8e25437d5e102f9a4007862a9c6c34a028",
+                  "changed": [
+                    "sbom.json",
+                    "src/exec.rs",
+                    "src/trusted.rs"
+                  ],
+                  "checks_pass": false,
+                  "commit": "b08d1dbf7155ff8c82723e3be87a6c75455cc2be",
+                  "diff": 39,
+                  "intents": [],
+                  "out": [],
+                  "rank": 0,
+                  "test_passes": []
+                },
+                "cost_microdollars": 285131,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 10,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "prompt",
+                "facts.json",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "d6225e8e25437d5e102f9a4007862a9c6c34a028",
+                  "changed": [
+                    "sbom.json",
+                    "src/exec.rs",
+                    "src/trusted.rs"
+                  ],
+                  "checks_pass": false,
+                  "commit": "fdaf6e7452878d1501ea7ba30e0fe71263fee083",
+                  "diff": 35,
+                  "intents": [],
+                  "out": [],
+                  "rank": 0,
+                  "test_passes": []
+                },
+                "cost_microdollars": 384563,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 11,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "prompt",
+                "facts.json",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "d6225e8e25437d5e102f9a4007862a9c6c34a028",
+                  "changed": [
+                    "src/exec.rs",
+                    "src/main.rs",
+                    "src/trusted.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "15735578f63fc0c4cce335ef8180bd9fbdd725ff",
+                  "diff": 53,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3122,
+                  "test_passes": []
+                },
+                "cost_microdollars": 359923,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 12,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "d6225e8e25437d5e102f9a4007862a9c6c34a028",
+                  "changed": [
+                    "src/exec.rs",
+                    "src/trusted.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "375d23aadf23d108f6bd3b4bb5f1758dde630731",
+                  "diff": 71,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3126,
+                  "test_passes": []
+                },
+                "cost_microdollars": 372527,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 13,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "d6225e8e25437d5e102f9a4007862a9c6c34a028",
+                  "changed": [
+                    "sbom.json",
+                    "src/exec.rs",
+                    "src/trusted.rs"
+                  ],
+                  "checks_pass": false,
+                  "commit": "536b83884409be5ecd26e8768f6a5898eb1135d4",
+                  "diff": 33,
+                  "intents": [],
+                  "out": [],
+                  "rank": 0,
+                  "test_passes": []
+                },
+                "cost_microdollars": 284496,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 14,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "prompt",
+                "facts.json",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "d6225e8e25437d5e102f9a4007862a9c6c34a028",
+                  "changed": [
+                    "src/exec.rs",
+                    "src/trusted.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "de6285a92284c02aed0d8e9670d7cd5154d941f0",
+                  "diff": 50,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3131,
+                  "test_passes": []
+                },
+                "cost_microdollars": 365284,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 15,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            }
+          ],
+          "search": 0,
+          "selected": null,
+          "summary": {
+            "agent_processes": 16,
+            "cost_per_verified_candidate": 2.3493920737833336,
+            "generation_dollars": 6.167211,
+            "rate": 150.0,
+            "search": 0,
+            "seconds": 415.841033708,
+            "time_dollars": 17.326709737833333,
+            "verified": 10
+          }
+        },
+        {
+          "candidates": [
+            {
+              "facts": {
+                "candidate": {
+                  "base": "6025629cb1914eb2ac75bb7d721dd62d743157d5",
+                  "changed": [
+                    "tests/counterexample.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "1dfbf278f0162bb7f3fd6d40c9ed96626171b6b3",
+                  "diff": 34,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": 0,
+                  "test_passes": [
+                    [
+                      -1,
+                      true
+                    ],
+                    [
+                      0,
+                      true
+                    ],
+                    [
+                      1,
+                      true
+                    ],
+                    [
+                      2,
+                      true
+                    ],
+                    [
+                      3,
+                      true
+                    ],
+                    [
+                      4,
+                      true
+                    ],
+                    [
+                      5,
+                      true
+                    ],
+                    [
+                      6,
+                      true
+                    ],
+                    [
+                      7,
+                      true
+                    ],
+                    [
+                      8,
+                      true
+                    ],
+                    [
+                      9,
+                      true
+                    ],
+                    [
+                      10,
+                      true
+                    ],
+                    [
+                      11,
+                      true
+                    ],
+                    [
+                      12,
+                      true
+                    ],
+                    [
+                      13,
+                      true
+                    ],
+                    [
+                      14,
+                      true
+                    ],
+                    [
+                      15,
+                      true
+                    ]
+                  ]
+                },
+                "cost_microdollars": 198868,
+                "harness": "claude",
+                "harness_cost_microdollars": 198868,
+                "killed": false,
+                "model": "claude-opus-5-5",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "claude-opus-5-5": {
+                    "cache_write": 5.0,
+                    "cache_write_long": 8.0,
+                    "cached_input": 0.2,
+                    "input": 4.0,
+                    "output": 20.0
+                  }
+                }
+              },
+              "index": 0,
+              "logs": [
+                "test--1",
+                "test-1",
+                "test-6",
+                "test-11",
+                "test-8",
+                "argv",
+                "test-10",
+                "test-9",
+                "test-7",
+                "test-0",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "test-5",
+                "test-2",
+                "test-12",
+                "test-15",
+                "test-14",
+                "test-13",
+                "test-3",
+                "test-4",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "6025629cb1914eb2ac75bb7d721dd62d743157d5",
+                  "changed": [
+                    "tests/counterexample.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "c0d16128ff9d60b24282ebf86fad43d8e8e526a4",
+                  "diff": 11,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": 0,
+                  "test_passes": [
+                    [
+                      -1,
+                      true
+                    ],
+                    [
+                      0,
+                      true
+                    ],
+                    [
+                      1,
+                      true
+                    ],
+                    [
+                      2,
+                      true
+                    ],
+                    [
+                      3,
+                      true
+                    ],
+                    [
+                      4,
+                      true
+                    ],
+                    [
+                      5,
+                      true
+                    ],
+                    [
+                      6,
+                      true
+                    ],
+                    [
+                      7,
+                      true
+                    ],
+                    [
+                      8,
+                      true
+                    ],
+                    [
+                      9,
+                      true
+                    ],
+                    [
+                      10,
+                      true
+                    ],
+                    [
+                      11,
+                      true
+                    ],
+                    [
+                      12,
+                      true
+                    ],
+                    [
+                      13,
+                      true
+                    ],
+                    [
+                      14,
+                      true
+                    ],
+                    [
+                      15,
+                      true
+                    ]
+                  ]
+                },
+                "cost_microdollars": 206054,
+                "harness": "claude",
+                "harness_cost_microdollars": 206054,
+                "killed": false,
+                "model": "claude-opus-5-5",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "claude-opus-5-5": {
+                    "cache_write": 5.0,
+                    "cache_write_long": 8.0,
+                    "cached_input": 0.2,
+                    "input": 4.0,
+                    "output": 20.0
+                  }
+                }
+              },
+              "index": 1,
+              "logs": [
+                "test--1",
+                "test-1",
+                "test-6",
+                "test-11",
+                "test-8",
+                "argv",
+                "test-10",
+                "test-9",
+                "test-7",
+                "test-0",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "test-5",
+                "test-2",
+                "test-12",
+                "test-15",
+                "test-14",
+                "test-13",
+                "test-3",
+                "test-4",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            }
+          ],
+          "search": 1,
+          "selected": null,
+          "summary": {
+            "agent_processes": 2,
+            "cost_per_verified_candidate": 2.270382714416667,
+            "generation_dollars": 0.404922,
+            "rate": 150.0,
+            "search": 1,
+            "seconds": 99.260242292,
+            "time_dollars": 4.135843428833334,
+            "verified": 2
+          }
+        }
+      ],
+      "transitions": [
+        "initialize",
+        "grant",
+        "wait",
+        "wait",
+        "wait",
+        "wait",
+        "wait",
+        "wait",
+        "wait",
+        "wait",
+        "wait",
+        "wait",
+        "wait",
+        "wait",
+        "wait",
+        "wait",
+        "wait",
+        "wait",
+        "grant",
+        "wait",
+        "wait",
+        "fast_forward"
+      ]
+    },
+    {
+      "modified": 1793758527,
+      "pid": 24907,
+      "running": false,
+      "searches": [
+        {
+          "candidates": [
+            {
+              "facts": {
+                "candidate": {
+                  "base": "de0ce5b66c3691a654ed3b46e23d0d0ae9ee94d7",
+                  "changed": [
+                    "sbom.json",
+                    "src/exec.rs"
+                  ],
+                  "checks_pass": false,
+                  "commit": "8bbd44c1fb967fc913dbad44b4c2c59b4627e9be",
+                  "diff": 66,
+                  "intents": [],
+                  "out": [],
+                  "rank": 0,
+                  "test_passes": []
+                },
+                "cost_microdollars": 394467,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 0,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "prompt",
+                "facts.json",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "de0ce5b66c3691a654ed3b46e23d0d0ae9ee94d7",
+                  "changed": [
+                    "src/exec.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "212e74e850c406cdfc9e636e47236007a8c64127",
+                  "diff": 61,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3153,
+                  "test_passes": []
+                },
+                "cost_microdollars": 180716,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 1,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "de0ce5b66c3691a654ed3b46e23d0d0ae9ee94d7",
+                  "changed": [
+                    "src/exec.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "0bfeb861c97f05ea2f27dae7078e3e15793bb98d",
+                  "diff": 40,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3172,
+                  "test_passes": []
+                },
+                "cost_microdollars": 198498,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 2,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "de0ce5b66c3691a654ed3b46e23d0d0ae9ee94d7",
+                  "changed": [
+                    "src/exec.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "13a71dcc3b42e342a295171d6a5a666a9b112877",
+                  "diff": 61,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3153,
+                  "test_passes": []
+                },
+                "cost_microdollars": 192938,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 3,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            }
+          ],
+          "search": 0,
+          "selected": null,
+          "summary": {
+            "agent_processes": 4,
+            "cost_per_verified_candidate": 2.689578686347222,
+            "generation_dollars": 0.966619,
+            "rate": 150.0,
+            "search": 0,
+            "seconds": 170.450809417,
+            "time_dollars": 7.1021170590416665,
+            "verified": 3
+          }
+        },
+        {
+          "candidates": [
+            {
+              "facts": {
+                "candidate": {
+                  "base": "212e74e850c406cdfc9e636e47236007a8c64127",
+                  "changed": [
+                    "tests/counterexample.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "a4129648dfc93ff05adb4515a4d7870da5bd5b43",
+                  "diff": 23,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": 0,
+                  "test_passes": [
+                    [
+                      -1,
+                      true
+                    ],
+                    [
+                      0,
+                      true
+                    ],
+                    [
+                      1,
+                      true
+                    ],
+                    [
+                      2,
+                      true
+                    ],
+                    [
+                      3,
+                      true
+                    ]
+                  ]
+                },
+                "cost_microdollars": 234967,
+                "harness": "claude",
+                "harness_cost_microdollars": 234967,
+                "killed": false,
+                "model": "claude-opus-5-5",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "claude-opus-5-5": {
+                    "cache_write": 5.0,
+                    "cache_write_long": 8.0,
+                    "cached_input": 0.2,
+                    "input": 4.0,
+                    "output": 20.0
+                  }
+                }
+              },
+              "index": 0,
+              "logs": [
+                "test--1",
+                "test-1",
+                "argv",
+                "test-0",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "test-2",
+                "test-3",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "212e74e850c406cdfc9e636e47236007a8c64127",
+                  "changed": [
+                    "tests/counterexample.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "8fec02dc0ead9329641de8c30836c56c9b999752",
+                  "diff": 12,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": 0,
+                  "test_passes": [
+                    [
+                      -1,
+                      true
+                    ],
+                    [
+                      0,
+                      true
+                    ],
+                    [
+                      1,
+                      true
+                    ],
+                    [
+                      2,
+                      true
+                    ],
+                    [
+                      3,
+                      true
+                    ]
+                  ]
+                },
+                "cost_microdollars": 152073,
+                "harness": "claude",
+                "harness_cost_microdollars": 152073,
+                "killed": false,
+                "model": "claude-opus-5-5",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "claude-opus-5-5": {
+                    "cache_write": 5.0,
+                    "cache_write_long": 8.0,
+                    "cached_input": 0.2,
+                    "input": 4.0,
+                    "output": 20.0
+                  }
+                }
+              },
+              "index": 1,
+              "logs": [
+                "test--1",
+                "test-1",
+                "argv",
+                "test-0",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "test-2",
+                "test-3",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            }
+          ],
+          "search": 1,
+          "selected": null,
+          "summary": {
+            "agent_processes": 2,
+            "cost_per_verified_candidate": 1.5816444409791668,
+            "generation_dollars": 0.38704,
+            "rate": 150.0,
+            "search": 1,
+            "seconds": 66.629973167,
+            "time_dollars": 2.7762488819583337,
+            "verified": 2
+          }
+        }
+      ],
+      "transitions": [
+        "initialize",
+        "grant",
+        "wait",
+        "wait",
+        "wait",
+        "wait",
+        "grant",
+        "wait",
+        "wait",
+        "fast_forward"
+      ]
+    },
+    {
+      "modified": 1793758236,
+      "pid": 9805,
+      "running": false,
+      "searches": [
+        {
+          "candidates": [
+            {
+              "facts": {
+                "candidate": {
+                  "base": "759cc6d0658542a5c31420eb7441555701ab4418",
+                  "changed": [
+                    "src/main.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "1e4809a10f6408ee42bf096a9edde51b065d1448",
+                  "diff": 2,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3196,
+                  "test_passes": []
+                },
+                "cost_microdollars": 156801,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 0,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "759cc6d0658542a5c31420eb7441555701ab4418",
+                  "changed": [
+                    "src/main.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "c7a2ef1857a6790f73d9beb5716d3324c58d14db",
+                  "diff": 2,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3196,
+                  "test_passes": []
+                },
+                "cost_microdollars": 82312,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 1,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "759cc6d0658542a5c31420eb7441555701ab4418",
+                  "changed": [
+                    "src/main.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "6d1896ffa44a2db990d258f22990c3c8803dca6f",
+                  "diff": 2,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3196,
+                  "test_passes": []
+                },
+                "cost_microdollars": 102186,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 2,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "759cc6d0658542a5c31420eb7441555701ab4418",
+                  "changed": [
+                    "src/main.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "8bb33428cded847a4aad1202f82e8ab5389d89f3",
+                  "diff": 2,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": -3196,
+                  "test_passes": []
+                },
+                "cost_microdollars": 113758,
+                "harness": "codex",
+                "harness_cost_microdollars": null,
+                "killed": false,
+                "model": "gpt-6.1-sol",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "gpt-6.1-sol": {
+                    "cache_write": 2.5,
+                    "cache_write_long": 5.0,
+                    "cached_input": 0.1,
+                    "input": 2.0,
+                    "output": 10.0
+                  }
+                }
+              },
+              "index": 3,
+              "logs": [
+                "argv",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            }
+          ],
+          "search": 0,
+          "selected": null,
+          "summary": {
+            "agent_processes": 4,
+            "cost_per_verified_candidate": 1.5904376783854166,
+            "generation_dollars": 0.455057,
+            "rate": 150.0,
+            "search": 0,
+            "seconds": 141.760649125,
+            "time_dollars": 5.906693713541666,
+            "verified": 4
+          }
+        },
+        {
+          "candidates": [
+            {
+              "facts": {
+                "candidate": {
+                  "base": "1e4809a10f6408ee42bf096a9edde51b065d1448",
+                  "changed": [
+                    "tests/counterexample.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "aaadb1c6e129a24f314bfdafc0014339d852baa2",
+                  "diff": 12,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": 0,
+                  "test_passes": [
+                    [
+                      -1,
+                      true
+                    ],
+                    [
+                      0,
+                      true
+                    ],
+                    [
+                      1,
+                      true
+                    ],
+                    [
+                      2,
+                      true
+                    ],
+                    [
+                      3,
+                      true
+                    ]
+                  ]
+                },
+                "cost_microdollars": 163986,
+                "harness": "claude",
+                "harness_cost_microdollars": 163986,
+                "killed": false,
+                "model": "claude-opus-5-5",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "claude-opus-5-5": {
+                    "cache_write": 5.0,
+                    "cache_write_long": 8.0,
+                    "cached_input": 0.2,
+                    "input": 4.0,
+                    "output": 20.0
+                  }
+                }
+              },
+              "index": 0,
+              "logs": [
+                "test--1",
+                "test-1",
+                "argv",
+                "test-0",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "test-2",
+                "test-3",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            },
+            {
+              "facts": {
+                "candidate": {
+                  "base": "1e4809a10f6408ee42bf096a9edde51b065d1448",
+                  "changed": [
+                    "tests/counterexample.rs"
+                  ],
+                  "checks_pass": true,
+                  "commit": "b624c55c2dc58742c2ffbb301414587e4cbee6a5",
+                  "diff": 23,
+                  "intents": [],
+                  "out": [
+                    5276956862258435173
+                  ],
+                  "rank": 0,
+                  "test_passes": [
+                    [
+                      -1,
+                      true
+                    ],
+                    [
+                      0,
+                      true
+                    ],
+                    [
+                      1,
+                      true
+                    ],
+                    [
+                      2,
+                      true
+                    ],
+                    [
+                      3,
+                      true
+                    ]
+                  ]
+                },
+                "cost_microdollars": 244276,
+                "harness": "claude",
+                "harness_cost_microdollars": 244276,
+                "killed": false,
+                "model": "claude-opus-5-5",
+                "over_limit": false,
+                "price_mismatch": false,
+                "prices": {
+                  "claude-opus-5-5": {
+                    "cache_write": 5.0,
+                    "cache_write_long": 8.0,
+                    "cached_input": 0.2,
+                    "input": 4.0,
+                    "output": 20.0
+                  }
+                }
+              },
+              "index": 1,
+              "logs": [
+                "test--1",
+                "test-1",
+                "argv",
+                "test-0",
+                "verify-2",
+                "harness",
+                "agree-0",
+                "prompt",
+                "facts.json",
+                "test-2",
+                "test-3",
+                "rank",
+                "verify-1",
+                "verify-0"
+              ]
+            }
+          ],
+          "search": 1,
+          "selected": null,
+          "summary": {
+            "agent_processes": 2,
+            "cost_per_verified_candidate": 1.7906926006875,
+            "generation_dollars": 0.408262,
+            "rate": 150.0,
+            "search": 1,
+            "seconds": 76.154956833,
+            "time_dollars": 3.1731232013749997,
+            "verified": 2
+          }
+        }
+      ],
+      "transitions": [
+        "initialize",
+        "grant",
+        "wait",
+        "wait",
+        "wait",
+        "wait",
+        "grant",
+        "wait",
+        "wait",
+        "fast_forward"
+      ]
+    }
+  ],
+  "repo": {
+    "head": "ceede07883a9cd0d459099974259a5fb12d05c5a",
+    "name": "bon",
+    "now": 1793764308,
+    "pushed": true,
+    "remote": "origin",
+    "remote_head": "ceede07883a9cd0d459099974259a5fb12d05c5a",
+    "trunk": "main"
+  },
+  "spec": {
+    "fields": [
+      {
+        "doc": "The current intents: the map at trunk's head. (intent 1)",
+        "name": "map",
+        "sharding": "variable",
+        "type": "Set<Intent>"
+      },
+      {
+        "doc": "The check paths the manifest declares at trunk's head.",
+        "name": "checks",
+        "sharding": "variable",
+        "type": "Set<Path>"
+      },
+      {
+        "doc": "Trunk's history; last() is the head.",
+        "name": "trunk",
+        "sharding": "variable",
+        "type": "Seq<Commit>"
+      },
+      {
+        "doc": "The git author of each trunk commit, in step with trunk.",
+        "name": "authors",
+        "sharding": "variable",
+        "type": "Seq<User>"
+      },
+      {
+        "doc": "",
+        "name": "searches",
+        "sharding": "variable",
+        "type": "Seq<Search>"
+      },
+      {
+        "doc": "The bon process's limit, and what it has spent and reserved against it. (intent 16)",
+        "name": "limit",
+        "sharding": "variable",
+        "type": "nat"
+      },
+      {
+        "doc": "",
+        "name": "spent",
+        "sharding": "variable",
+        "type": "nat"
+      },
+      {
+        "doc": "",
+        "name": "reserved",
+        "sharding": "variable",
+        "type": "nat"
+      },
+      {
+        "doc": "Outstanding capabilities, keyed by the agent process that holds each. Each is a Verus token: the token is how Verus represents a capability; capability is the term. An agent process holds exactly one, and waiting on it consumes it. (intent 7)",
+        "name": "capability",
+        "sharding": "map",
+        "type": "Map<AgentProcess, Capability>"
+      }
+    ],
+    "items": [
+      {
+        "doc": "A git commit, by its hash. (TCB: git)",
+        "kind": "type",
+        "name": "Commit"
+      },
+      {
+        "doc": "A path in a commit's tree, as git reports it. (TCB: git)",
+        "kind": "type",
+        "name": "Path"
+      },
+      {
+        "doc": "One line of the map: what is wanted.",
+        "kind": "type",
+        "name": "Intent"
+      },
+      {
+        "doc": "A WebVTT file, one per recorded call. (TCB: WebVTT)",
+        "kind": "type",
+        "name": "Transcript"
+      },
+      {
+        "doc": "A WebVTT cue, by its start time in milliseconds. (TCB: WebVTT)",
+        "kind": "type",
+        "name": "Cue"
+      },
+      {
+        "doc": "A POSIX user. Names match the users on this machine. Also a commit's git author.",
+        "kind": "type",
+        "name": "User"
+      },
+      {
+        "doc": "The files the policy covers. A directory is a file (OSTEP).",
+        "kind": "type",
+        "name": "File"
+      },
+      {
+        "doc": "POSIX permission bits.",
+        "kind": "type",
+        "name": "Permission"
+      },
+      {
+        "doc": "A process running as agent that writes one candidate: index `index` of the n in search `search`. (OSTEP: process)",
+        "kind": "type",
+        "name": "AgentProcess"
+      },
+      {
+        "doc": "What a search is for: its kind, carrying its goal. Each kind's goal has its own type.",
+        "kind": "type",
+        "name": "Kind"
+      },
+      {
+        "doc": "One generated change, as trusted code observed it after its agent process exited.",
+        "kind": "type",
+        "name": "Candidate"
+      },
+      {
+        "doc": "What an agent process holds to write one candidate.",
+        "kind": "type",
+        "name": "Capability"
+      },
+      {
+        "doc": "One search: n agent processes from one base.",
+        "kind": "type",
+        "name": "Search"
+      },
+      {
+        "doc": "The map's path.",
+        "kind": "predicate",
+        "name": "map_path"
+      },
+      {
+        "doc": "The manifest's path. It declares the checks, so it is protected like them.",
+        "kind": "predicate",
+        "name": "manifest_path"
+      },
+      {
+        "doc": "No candidate may change p: the map, the manifest, or a path under a check. A check path covers itself and every path it is a prefix of.",
+        "kind": "predicate",
+        "name": "protected"
+      },
+      {
+        "doc": "Attenuation at grant: what a capability for this kind may change. (intents 3, 10)",
+        "kind": "predicate",
+        "name": "authority"
+      },
+      {
+        "doc": "Who may do what. (intent 8)",
+        "kind": "predicate",
+        "name": "policy"
+      },
+      {
+        "doc": "agent's permissions, as trusted code observed them, match the policy. (intent 9)",
+        "kind": "predicate",
+        "name": "isolated"
+      },
+      {
+        "doc": "The candidate at index i. Meaningful only when one exists.",
+        "kind": "predicate",
+        "name": "at"
+      },
+      {
+        "doc": "Passed the vertical bottleneck: every check passes, and every changed path is within the search's authority. (intent 3)",
+        "kind": "predicate",
+        "name": "verified"
+      },
+      {
+        "doc": "",
+        "kind": "predicate",
+        "name": "verified_at"
+      },
+      {
+        "doc": "Every agent process has returned.",
+        "kind": "predicate",
+        "name": "complete"
+      },
+      {
+        "doc": "At least two verified candidates, and every verified pair prints the same. (intent 4) Compaction also measures them against its goal: every verified candidate prints the same as the goal. The goal never votes; it is measured. (intent 17)",
+        "kind": "predicate",
+        "name": "agree"
+      },
+      {
+        "doc": "Scrub: candidate c's test passes on trunk, as trusted code observed it (index -1).",
+        "kind": "predicate",
+        "name": "passes_on_trunk"
+      },
+      {
+        "doc": "Candidate i of search k may land on trunk: a code or compaction candidate once a counterexample search on it cleared; a scrub candidate when its test passes on trunk. (intents 13, 21)",
+        "kind": "predicate",
+        "name": "landable"
+      },
+      {
+        "doc": "a at index ai outranks b at index bi: rank, then smaller diff, then earlier. (intent 5)",
+        "kind": "predicate",
+        "name": "beats"
+      },
+      {
+        "doc": "Code or compaction: index i is selected. (intents 4, 5, 17)",
+        "kind": "predicate",
+        "name": "selected"
+      },
+      {
+        "doc": "What a counterexample's test runs on: t's verified candidates, and for a compaction search its goal, as index -1. The goal is measured, not a voter.",
+        "kind": "predicate",
+        "name": "member"
+      },
+      {
+        "doc": "Counterexample: x's test splits the members of t. A test with no result on a member counts as splitting. (intents 13, 17)",
+        "kind": "predicate",
+        "name": "splits"
+      },
+      {
+        "doc": "Counterexample: some verified candidate of x splits t.",
+        "kind": "predicate",
+        "name": "found"
+      },
+      {
+        "doc": "Counterexample: every agent process of x returned, and no verified test splits t.",
+        "kind": "predicate",
+        "name": "cleared"
+      },
+      {
+        "doc": "Map: verified candidate i cites cue q.",
+        "kind": "predicate",
+        "name": "cites"
+      },
+      {
+        "doc": "Map: at least two verified candidates cite q. (intent 10)",
+        "kind": "predicate",
+        "name": "agreed"
+      },
+      {
+        "doc": "Map: exactly one verified candidate cites q. Shown to engineer apart from the proposal.",
+        "kind": "predicate",
+        "name": "contested"
+      },
+      {
+        "doc": "Map: w is the proposal's wording for q: the shortest among the citing candidates, ties to the earliest. (intent 10)",
+        "kind": "predicate",
+        "name": "proposed"
+      },
+      {
+        "doc": "Where a search's candidates start: always trunk's head. A counterexample's test is written from the spec and the intent, never from candidate code. (intent 22)",
+        "kind": "predicate",
+        "name": "start"
+      },
+      {
+        "doc": "The agent processes of search k: one per index.",
+        "kind": "predicate",
+        "name": "agent_processes"
+      },
+      {
+        "doc": "The capabilities grant adds: one per agent process, each with the search's authority and limit.",
+        "kind": "predicate",
+        "name": "granted"
+      },
+      {
+        "doc": "",
+        "kind": "init",
+        "name": "initialize",
+        "reads": [],
+        "updates": [
+          "map",
+          "checks",
+          "trunk",
+          "authors",
+          "searches",
+          "limit",
+          "spent",
+          "reserved",
+          "capability"
+        ]
+      },
+      {
+        "doc": "engineer committed to trunk, e.g. the map or the checks. (intent 6)",
+        "kind": "transition",
+        "name": "advance",
+        "reads": [
+          "trunk",
+          "authors"
+        ],
+        "updates": [
+          "map",
+          "checks",
+          "trunk",
+          "authors"
+        ]
+      },
+      {
+        "doc": "Open a search and grant one capability per agent process, reserving each one's limit. One search runs at a time; its agent processes run in parallel. (intents 2, 7, 9, 10, 13, 16, 17)",
+        "kind": "transition",
+        "name": "grant",
+        "reads": [
+          "searches",
+          "spent",
+          "reserved",
+          "limit",
+          "map",
+          "trunk",
+          "checks"
+        ],
+        "updates": [
+          "searches",
+          "reserved",
+          "capability"
+        ]
+      },
+      {
+        "doc": "The bon process waits on an agent process and records what it returned and what it cost, consuming its capability and settling its limit. (OSTEP: wait) (intents 2, 7, 16)",
+        "kind": "transition",
+        "name": "wait",
+        "reads": [
+          "searches",
+          "spent",
+          "reserved"
+        ],
+        "updates": [
+          "capability",
+          "searches",
+          "spent",
+          "reserved"
+        ]
+      },
+      {
+        "doc": "Code or compaction: trunk fast-forwards to the selected candidate, if a counterexample search on it cleared and trunk hasn't moved. (intents 6, 13)",
+        "kind": "transition",
+        "name": "fast_forward",
+        "reads": [
+          "searches",
+          "trunk",
+          "authors"
+        ],
+        "updates": [
+          "trunk",
+          "authors"
+        ]
+      },
+      {
+        "doc": "Scrub: trunk retains the selected test when it passes on trunk and trunk hasn't moved. (intent 21)",
+        "kind": "transition",
+        "name": "retain",
+        "reads": [
+          "searches",
+          "trunk",
+          "authors"
+        ],
+        "updates": [
+          "trunk",
+          "authors"
+        ]
+      },
+      {
+        "doc": "What's selected is verified: exec code can rely on this.",
+        "kind": "property",
+        "name": "selection_verified",
+        "reads": [
+          "searches"
+        ],
+        "updates": []
+      },
+      {
+        "doc": "",
+        "kind": "invariant",
+        "name": "trunk_nonempty"
+      },
+      {
+        "doc": "Each capability is held by an agent process for one open index of the running search, with that search's base, authority and limit. (intent 7)",
+        "kind": "invariant",
+        "name": "capability_open"
+      },
+      {
+        "doc": "Every agent process of every search has either returned or still holds its capability.",
+        "kind": "invariant",
+        "name": "accounted"
+      },
+      {
+        "doc": "Nothing spends past its limit: what is reserved is exactly the limits of the outstanding capabilities. (intent 16)",
+        "kind": "invariant",
+        "name": "within_limit"
+      },
+      {
+        "doc": "Candidates of a search are siblings of its base. (intent 2)",
+        "kind": "invariant",
+        "name": "siblings"
+      },
+      {
+        "doc": "Every trunk commit authored by agent is exactly a selected, landable candidate of a search on the previous head. (intents 3–6, 13, 21)",
+        "kind": "invariant",
+        "name": "trunk_exact"
+      }
+    ],
+    "path": "src/spec.rs"
+  },
+  "trunk": [
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "ceede07883a9cd0d459099974259a5fb12d05c5a",
+      "pushed": true,
+      "subject": "skill: one file for the model the owner talks to, patterns from a sampled session review",
+      "time": 1793764137,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "79091230c83dd270b62b4de0aff8765014d3385b",
+      "pushed": true,
+      "subject": "a broken intent's fix is followed by a scrub of the new trunk",
+      "time": 1793763156,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "c26d53e996804329994b9abd8f0dbb023aaeddac",
+      "pushed": true,
+      "subject": "bon background: one unit of the stalest scrub or compaction, on spare capacity",
+      "time": 1793762850,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "7ccd2b23c6aa9acf48d027c56edcffdd9bda40bf",
+      "pushed": true,
+      "subject": "number runs once per bon process",
+      "time": 1793762737,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "a392dcc0190db0aae2fc2352db8949a1d49ec91d",
+      "pushed": true,
+      "subject": "scrub: a search kind that checks an intent with tests written blind",
+      "time": 1793762579,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "c7961bedc491d3afdded6e9b32dbc55a10dafeae",
+      "pushed": true,
+      "subject": "cleanup: engineer drops its ACLs, agent removes its output, engineer the rest",
+      "time": 1793761830,
+      "trace": ""
+    },
+    {
+      "author": "agent",
+      "by_agent": true,
+      "commit": "9485839241897d31edd260215942b65b40763bf3",
+      "pushed": true,
+      "subject": "compaction",
+      "time": 1793761651,
+      "trace": ".bon/traces/694/0/7"
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "aa3245758f6b6ebae153c5ba9b50d61cf611c026",
+      "pushed": true,
+      "subject": "checks start from trunk's build: built once as agent, cloned per candidate",
+      "time": 1793761206,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "1479d3618178e61c6e5fcee43900889718b6cb72",
+      "pushed": true,
+      "subject": "counterexample tests come from the spec and the intent, never candidate code",
+      "time": 1793761132,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "57b4dddf0db8419841d9a848e941eb48b6c36218",
+      "pushed": true,
+      "subject": "jobs: the device file caps how many agent processes run at once",
+      "time": 1793761016,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "a59ed761dbab86018905e951b072b8d2ec79b0d7",
+      "pushed": true,
+      "subject": "map: scrub, counterexample from the spec, build reuse, jobs, background",
+      "time": 1793760979,
+      "trace": ""
+    },
+    {
+      "author": "agent",
+      "by_agent": true,
+      "commit": "6025629cb1914eb2ac75bb7d721dd62d743157d5",
+      "pushed": true,
+      "subject": "compaction",
+      "time": 1793759054,
+      "trace": ".bon/traces/42032/0/8"
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "d6225e8e25437d5e102f9a4007862a9c6c34a028",
+      "pushed": true,
+      "subject": "bon.toml: compaction pressure test at widths 16, 24",
+      "time": 1793758846,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "8733742e5336695d84df4e56f710d035f7b6ca0a",
+      "pushed": true,
+      "subject": "ignore traces and .DS_Store",
+      "time": 1793758627,
+      "trace": ""
+    },
+    {
+      "author": "agent",
+      "by_agent": true,
+      "commit": "212e74e850c406cdfc9e636e47236007a8c64127",
+      "pushed": true,
+      "subject": "compaction",
+      "time": 1793758454,
+      "trace": ".bon/traces/24907/0/1"
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "de0ce5b66c3691a654ed3b46e23d0d0ae9ee94d7",
+      "pushed": true,
+      "subject": "prompt: compaction is told to remove as much as it can, not to make the smallest change",
+      "time": 1793758349,
+      "trace": ""
+    },
+    {
+      "author": "agent",
+      "by_agent": true,
+      "commit": "1e4809a10f6408ee42bf096a9edde51b065d1448",
+      "pushed": true,
+      "subject": "compaction",
+      "time": 1793758155,
+      "trace": ".bon/traces/9805/0/0"
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "759cc6d0658542a5c31420eb7441555701ab4418",
+      "pushed": true,
+      "subject": "observe a check file's execute as readability; compaction with Sol 4/6/8, Opus counterexamples",
+      "time": 1793758043,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "a433088e9457dfa960dc9310aa49ad6107f4d0d3",
+      "pushed": true,
+      "subject": "bon.toml: bon builds bon",
+      "time": 1793757849,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "7fb17a7c2eb7f920b4c8e9daf22ed6b2e317541b",
+      "pushed": true,
+      "subject": "SBOM observes rustc and Verus as agent, and runs as a check",
+      "time": 1793757849,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "cd532526f3e31a6cca5cf21fb7b37b6205d03d8e",
+      "pushed": true,
+      "subject": "transcripts: agent reads and traverses them (r-x), never changes them",
+      "time": 1793757228,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "871a61e06cf53112aa0a0ec261a17fae2d04c5a6",
+      "pushed": true,
+      "subject": "report cost per verified candidate for each search",
+      "time": 1793757182,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "12518d2bb4a25962ee86b9d5bc41376ef8abadb7",
+      "pushed": true,
+      "subject": "reruns: width lists per attempt; counterexample tests carry into agreement",
+      "time": 1793756912,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "602fbbabba705adc057151ba08623c0883646d17",
+      "pushed": true,
+      "subject": "device file: path and prices move to /etc/bon/device.toml; traces snapshot prices",
+      "time": 1793756144,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "be1e0a04a19aeae1098d4d03458777500333b3c4",
+      "pushed": true,
+      "subject": "remote main is trunk; cost from tokens and list prices, cross-checked",
+      "time": 1793755637,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "d1f8a604781b2f23ddb133f8e951623ec18476e3",
+      "pushed": true,
+      "subject": "SBOM: harness versions observed as agent; README documents use and the SBOM",
+      "time": 1793755250,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "e3568c2dffcce95c3c940c0069334602e3ccc54f",
+      "pushed": true,
+      "subject": "trusted: traces record facts, exit status and time; agent authors candidates",
+      "time": 1793754911,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "d1bb6a11c40078f891cbc920d1dea44a05d05349",
+      "pushed": true,
+      "subject": "setup: agent's primary group is bon, not staff",
+      "time": 1793754353,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "e8e7c13388480dcc708ebbfa282092b46791a9e1",
+      "pushed": true,
+      "subject": "setup: --for <user>, so an administrator can set up bon for engineer",
+      "time": 1793753896,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "60eeb9b8080922fcfdf2721bda86b2e972c41a8f",
+      "pushed": true,
+      "subject": "setup: dry run; validate sudoers before installing it; fix the password source",
+      "time": 1793753549,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "214d1f1e3e8e5403f9e4cff58bcf3fa775a4b190",
+      "pushed": true,
+      "subject": "skill: the driving model's guide to working at the spec level and running bon",
+      "time": 1793753135,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "8d21f2e7143979e8e539af3902fdb656a8b9cc8d",
+      "pushed": true,
+      "subject": "CLI: status, code, compaction, map, setup, sbom; land and map drivers",
+      "time": 1793752820,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "8b1292fc92b1d299eb874c7485b2d381ee87aefa",
+      "pushed": true,
+      "subject": "trusted code and the verified driver for bon code",
+      "time": 1793752612,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "ff19a85d6d4041bad066152673bc25f964d4d483",
+      "pushed": true,
+      "subject": "spec: a counterexample search starts from the candidate it attacks",
+      "time": 1793751882,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "12c422894b882288c89efe98facac95cc77094f5",
+      "pushed": true,
+      "subject": "map: SBOM and the skill for the driving model",
+      "time": 1793751845,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "1ff07627e2d3b1b0bc2bd915701d4c541fb0e103",
+      "pushed": true,
+      "subject": "exec: name helpers in spec, vstd and Rust terms; drop an unused one",
+      "time": 1793751361,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "a1b22ec8a8dc3c488f4f9ea23b7402d43f24488b",
+      "pushed": true,
+      "subject": "gates: exec types with the spec's names, trait Gates, proved implementation",
+      "time": 1793751024,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "826115f014e5f7c18f721ff5bd65749a70f99b77",
+      "pushed": true,
+      "subject": "spec: compaction agreement needs two verified; the goal is measured, never a voter",
+      "time": 1793749973,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "7999e844b1bc93787c800b0be60c8101bb55a750",
+      "pushed": true,
+      "subject": "spec + map: compaction search",
+      "time": 1793749653,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "432a576e0eab06450b6f191f85d718323f1c9de1",
+      "pushed": true,
+      "subject": "spec: goals, counterexample search, nested limits",
+      "time": 1793749387,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "b382fe03dd1c8f250cc836ae39b30e1b2fae5dff",
+      "pushed": true,
+      "subject": "map: cost per verified candidate includes wall time at a rate",
+      "time": 1793748973,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "2698c207ed7a86c9283376d244f7cbce104bc331",
+      "pushed": true,
+      "subject": "map: blocked searches rerun until a limit; limits nest like the process tree",
+      "time": 1793748929,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "73f7c5bcfa04192a934ae8a58208ffa5c478da93",
+      "pushed": true,
+      "subject": "map: a counterexample feeds agreement instead of engineer",
+      "time": 1793748612,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "d13804cf831b7292a91f1a311f3f1e3b5c55e7a5",
+      "pushed": true,
+      "subject": "map: traces yield cost per verified candidate",
+      "time": 1793747408,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "78730fbd204da90d4701c109d87c4c7992e80e88",
+      "pushed": true,
+      "subject": "map: counterexample search; traces record cost and time",
+      "time": 1793746751,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "1d406079c620be571ce0a94d12da3f9186bffe6d",
+      "pushed": true,
+      "subject": "spec: wait, AgentProcess, Commit as hash; map: names carry into code, traces record transitions",
+      "time": 1793746208,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "9dc7e33248a06f97c4f47a5f78fd28e2e12e9cc2",
+      "pushed": true,
+      "subject": "spec: bon's tokenized state machine, verified; package best-of-n",
+      "time": 1793744548,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "013bf6a62aa0e79853f535f6324505642f4445a0",
+      "pushed": true,
+      "subject": "map: candidates change neither the checks nor the map",
+      "time": 1793743094,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "0fa8a32a571e3b526e2ac58bf5173f82a73ac433",
+      "pushed": true,
+      "subject": "map: transcripts become proposals, agreed per cue",
+      "time": 1793742449,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "b5489287ab7d7837e79ba26b034c0ede9e5d735d",
+      "pushed": true,
+      "subject": "map: selection fast-forwards trunk; engineer decides upstream",
+      "time": 1793742380,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "684a8b2968f77328a278124b5ddc2170bc13d3f0",
+      "pushed": true,
+      "subject": "map: current intents in agreed terms; git history is the log",
+      "time": 1793740951,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "d2db76ad9578a4cdc78a93f53d6c42f8d917fe66",
+      "pushed": true,
+      "subject": "map: agreement needs two; candidates run as their own POSIX user",
+      "time": 1793739687,
+      "trace": ""
+    },
+    {
+      "author": "Roone",
+      "by_agent": false,
+      "commit": "19aa168f8f93aa3a13c010259c634706843258c3",
+      "pushed": true,
+      "subject": "map: bon's first six intents",
+      "time": 1793738077,
+      "trace": ""
+    }
+  ]
+}
