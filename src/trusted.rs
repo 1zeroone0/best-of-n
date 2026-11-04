@@ -294,6 +294,8 @@ fn check_directory(root: &std::path::Path, commit: &str, dir: &std::path::Path) 
 /// the candidate changed; cargo's own change detection (TCB) keeps it correct.
 /// (intent 23)
 static WARM: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+/// This bon process's runs so far: names its working directories, traces and refs.
+static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static WARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Start building trunk in the background, once.
@@ -666,7 +668,10 @@ pub fn observe(m: &Manifest, commit: &Commit) -> (r: Result<(Permission, Permiss
 /// (None if it produced none) and its cost in microdollars. `target` is the
 /// search a counterexample attacks.
 #[verifier::external_body]
-pub fn run(m: &Manifest, kind: &Kind, search: usize, a: usize, start: &Commit, target: Option<&Search>, tests: &Tests) -> Vec<(Option<Candidate>, u64)> {
+pub fn run(m: &Manifest, kind: &Kind, _index: usize, a: usize, start: &Commit, target: Option<&Search>, tests: &Tests) -> Vec<(Option<Candidate>, u64)> {
+    // Number runs once per bon process, so a command that runs several drivers
+    // (a scrub, then a code search) never reuses a working directory, trace or ref.
+    let search = RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let start: String = start.iter().collect();
     warm(m, &start);
     let hs = harnesses(&m.config, kind);
@@ -714,7 +719,8 @@ pub fn clock() -> Clock { Clock { at: Instant::now() } }
 /// rate; t is the search's wall time; v is how many candidates the verified gate
 /// passed. (intent 14)
 #[verifier::external_body]
-pub fn report(m: &Manifest, search: usize, n: usize, verified: usize, generation: u64, started: Clock) {
+pub fn report(m: &Manifest, _index: usize, n: usize, verified: usize, generation: u64, started: Clock) {
+    let search = RUNS.load(std::sync::atomic::Ordering::SeqCst).saturating_sub(1);
     let hours = started.at.elapsed().as_secs_f64() / 3600.0;
     let generation = generation as f64 / 1_000_000.0;
     let time = m.config.rate * hours;
