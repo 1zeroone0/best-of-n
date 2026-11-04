@@ -54,6 +54,7 @@ interface Process {
     modified?: number;
     transitions?: string[];
     searches?: Search[];
+    fast_forwards?: { commit?: string; searches?: number; generation_dollars?: number; time_dollars?: number; cost?: number; derived?: boolean }[];
 }
 interface SpecItem {
     kind: string;
@@ -133,9 +134,9 @@ const n = (v?: number): string => v == null ? '—' : nf.format(v);
 const money = (v?: number | null): string => v == null || !Number.isFinite(v) ? '—' : '$' + v.toFixed(v !== 0 && v < .01 ? 4 : 2);
 const short = (v?: string): string => v ? v.slice(0, 8) : '—';
 const intentArg = (value: string): string => '"' + value.replace(/["\\$`]/g, '\\$&') + '"';
-const verifiedCandidates = new WeakSet<Candidate>();
 const decisions = new WeakMap<Search, { selected: number | null; cleared?: boolean; error?: string }>();
-const verified = (c: Candidate): boolean => verifiedCandidates.has(c);
+// bon view reports the kernel's verdict, or the trace's where it has no kernel words.
+const verified = (c: Candidate): boolean => c.verified === true;
 // This program supplies bytes and renders answers; the compiled kernel decides.
 const gates = WebAssembly.instantiateStreaming(fetch('/gates.wasm'));
 async function derive(state: State): Promise<void> {
@@ -176,9 +177,6 @@ async function derive(state: State): Promise<void> {
                     }
                 }
                 decisions.set(s, decision);
-                for (const c of s.candidates ?? []) {
-                    if (c.verified === true) verifiedCandidates.add(c);
-                }
             } finally { call('dealloc', ptr, len); }
         }
     }
@@ -242,7 +240,7 @@ function project(): void {
             // The commit is also useful when older traces have no selected index.
             const landed = exact ?? cs.map(c => commitByHash.get(c.facts?.candidate?.commit ?? '')).find(Boolean);
             if (landed) matched.add(landed.commit);
-            const entry: Entry = { key: keyOf(p, s), p, s, trace, children: [], landed, selected: decisions.get(s)?.selected ?? undefined, count: cs.length, v, cost, outcome: 'returned', tone: 'neutral', reason: 'Agent processes returned. No further transition recorded.', time: s.summary?.time ?? p.modified ?? 0 };
+            const entry: Entry = { key: keyOf(p, s), p, s, trace, children: [], landed, selected: decisions.has(s) ? decisions.get(s)?.selected ?? undefined : s.selected ?? undefined, count: cs.length, v, cost, outcome: 'returned', tone: 'neutral', reason: 'Agent processes returned. No further transition recorded.', time: s.summary?.time ?? p.modified ?? 0 };
             entries.set(entry.key, entry);
             totals.count += cs.length; totals.verified += v; totals.cost += cost ?? 0;
         }
@@ -270,7 +268,8 @@ function resolve(en: Entry): void {
         en.tone = en.outcome === 'broken' ? 'red' : 'yellow';
         en.reason = terminal.replace(/^(blocked|broken):?\s*/, '') + '. ' + (en.outcome === 'broken' ? 'bon starts a code search carrying the test.' : 'bon reruns wider, as the width list allows.');
     } else if (s.summary?.kind === 'counterexample') {
-        const cleared = decisions.get(s)?.cleared;
+        // The kernel re-derives it when the trace has its words; otherwise a fast_forward after it means it cleared.
+        const cleared = decisions.get(s)?.cleared ?? (trace.some(t => /^fast_forward/.test(t)) ? true : undefined);
         const split = cleared === false;
         const complete = cleared != null;
         en.outcome = complete ? split ? 'split' : 'cleared' : p.running ? 'running' : 'returned';
@@ -279,7 +278,9 @@ function resolve(en: Entry): void {
     } else if (trace.some(t => /^retain/.test(t)) || en.landed?.subject?.startsWith('scrub:')) {
         en.outcome = 'retained'; en.tone = 'violet'; en.reason = 'The agreed scrub test passes on trunk and is retained.';
     } else if (en.landed || trace.some(t => /^fast_forward/.test(t)) || en.children.some(c => c.trace.some(t => /^fast_forward/.test(t)))) {
-        en.outcome = 'fast_forward'; en.tone = 'indigo'; en.reason = 'Trunk fast-forwarded to the selected candidate.';
+        en.outcome = 'fast_forward'; en.tone = 'indigo';
+        const ff = p.fast_forwards?.at(-1);
+        en.reason = 'Trunk fast-forwarded to the selected candidate.' + (ff?.cost != null ? ` It cost ${money(ff.cost)} to reach: ${ff.searches ?? '?'} searches, generation ${money(ff.generation_dollars ?? 0)} + time ${money(ff.time_dollars ?? 0)}.` : '');
     } else if (p.running && s === p.searches?.at(-1)) {
         en.outcome = 'running'; en.tone = 'orange'; en.reason = `${en.count} agent processes returned; ${en.v} candidates verified.`;
     }
@@ -297,7 +298,7 @@ function stages(en: Entry): Stage[] {
     const cs = s.candidates ?? [];
     const v = cs.filter(verified);
     const decision = decisions.get(s);
-    const agreed = decision?.selected != null;
+    const agreed = decision ? decision.selected != null : s.selected != null;
     const differs = decision != null && !agreed && v.length >= 2;
     const ce = en.children.at(-1);
     const counter = s.summary?.kind === 'counterexample';
@@ -322,7 +323,7 @@ function dots(en: Entry): string {
     return `<span class="path-dots" aria-label="${e(ss.map(a => a.label + ': ' + a.value).join(' → '))}">${ss.map(a => `<i class="${a.tone} ${a.done ? 'filled' : ''}" title="${e(a.label + ': ' + a.value)}"></i>`).join('')}</span>`;
 }
 function headerHTML(): string {
-    return `<div class="repository">${icon('branch')}<strong>${e(data.repo?.name ?? 'repository')}</strong><span class="head">${word('trunk', data.repo?.trunk ?? 'main')} <code>${e(short(data.repo?.head))}</code></span>${pill(data.repo?.pushed ? 'pushed' : 'not pushed', data.repo?.pushed ? 'indigo' : 'blue')}</div><div class="header-cost">${totals.verified ? money(totals.cost / totals.verified) : '—'} per ${word('verified', 'verified candidate')} <span>·</span> ${totals.count ? Math.round(totals.verified / totals.count * 100) : 0}% of candidates verified</div><span class="live ${connection ? '' : 'offline'}"><i class="dot ${connection ? 'violet' : 'red'}"></i>${connection ? 'live' : 'waiting'}</span>`;
+    return `<div class="repository">${icon('branch')}<strong>${e(data.repo?.name ?? 'repository')}</strong><span class="head">${word('trunk', data.repo?.trunk ?? 'main')} <code>${e(short(data.repo?.head))}</code></span>${pill(data.repo?.pushed ? 'pushed' : 'not pushed', data.repo?.pushed ? 'indigo' : 'blue')}</div><div class="header-cost">${totals.verified ? money(totals.cost / totals.verified) : '—'} per ${word('verified', 'verified candidate')} <span>·</span> ${(() => { const ff = (data.processes ?? []).flatMap(p => p.fast_forwards ?? []); return ff.length ? money(ff.reduce((a, f) => a + (f.cost ?? 0), 0) / ff.length) : '—'; })()} per ${word('fast_forward', 'fast-forward')} <span>·</span> ${totals.count ? Math.round(totals.verified / totals.count * 100) : 0}% of candidates verified</div><span class="live ${connection ? '' : 'offline'}"><i class="dot ${connection ? 'violet' : 'red'}"></i>${connection ? 'live' : 'waiting'}</span>`;
 }
 function nowHTML(): string {
     const running = (data.processes ?? []).filter(p => p.running);

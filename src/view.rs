@@ -174,8 +174,12 @@ pub fn state(root: &Path) -> Value {
             });
             let kernel = read_words(&rdir.join("search.words")).as_ref().and_then(|w| Kernel::decode(w));
             for (i, candidate) in &mut candidates {
-                candidate["verified"] = json!(kernel.as_ref().and_then(|s| s.results.get(*i))
-                    .and_then(|r| r.as_ref()).is_some_and(|c| Kernel::verified(kernel.as_ref().unwrap(), c)));
+                // The kernel's verdict when the trace has its words; otherwise what the trace recorded.
+                let recorded = candidate["facts"]["candidate"]["checks_pass"].as_bool().unwrap_or(false);
+                candidate["verified"] = json!(match &kernel {
+                    Some(k) => k.results.get(*i).and_then(|r| r.as_ref()).is_some_and(|c| Kernel::verified(k, c)),
+                    None => recorded,
+                });
             }
             list.push(json!({
                 "search": n, "summary": summary, "selected": selected,
@@ -187,7 +191,17 @@ pub fn state(root: &Path) -> Value {
         }
         let modified = std::fs::metadata(&dir).and_then(|m| m.modified()).ok()
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
-        searches.push(json!({ "pid": pid, "running": running, "modified": modified, "transitions": transitions, "searches": list }));
+        // Each fast-forward's cost, as bon recorded it; for a bon process from before
+        // it recorded them, the same sum over its searches.jsonl.
+        let mut fast_forwards = jsonl(&dir.join("fast_forwards.jsonl"));
+        if fast_forwards.is_empty() && transitions.iter().any(|t| t.starts_with("fast_forward")) {
+            let sum = |k: &str| summaries.iter().filter_map(|s| s[k].as_f64()).sum::<f64>();
+            let (generation, time) = (sum("generation_dollars"), sum("time_dollars"));
+            fast_forwards.push(json!({ "searches": summaries.len(), "generation_dollars": generation,
+                "time_dollars": time, "cost": generation + time, "derived": true }));
+        }
+        searches.push(json!({ "pid": pid, "running": running, "modified": modified, "transitions": transitions,
+            "searches": list, "fast_forwards": fast_forwards }));
     }
 
     json!({

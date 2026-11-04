@@ -753,7 +753,32 @@ pub fn fast_forward(m: &Manifest, commit: &Commit) -> (r: Result<(), String>) {
     let (r, t) = (&m.config.remote, &m.config.trunk);
     git(&m.root, &["push", "--quiet", r, &format!("{c}:refs/heads/{t}")])
         .map_err(|e| format!("blocked: {r}/{t} moved during the search, so the push was refused; run it again ({e})"))?;
-    git(&m.root, &["merge", "--ff-only", "--quiet", &c]).map(|_| ())
+    git(&m.root, &["merge", "--ff-only", "--quiet", &c])?;
+    record_fast_forward(m, &c);
+    Ok(())
+}
+
+/// Each fast-forward's cost: the generation and time cost of every search this
+/// bon process ran to reach it (blocked attempts, reruns and counterexample
+/// searches included), from its searches.jsonl, appended to fast_forwards.jsonl.
+/// (intent 14)
+#[verifier::external_body]
+pub fn record_fast_forward(m: &Manifest, commit: &str) {
+    let d = m.root.join(".bon").join("traces").join(format!("{}", std::process::id()));
+    let searches: Vec<serde_json::Value> = std::fs::read_to_string(d.join("searches.jsonl")).unwrap_or_default()
+        .lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+    let sum = |k: &str| searches.iter().filter_map(|s| s[k].as_f64()).sum::<f64>();
+    let (generation, time) = (sum("generation_dollars"), sum("time_dollars"));
+    eprintln!("bon: fast-forward {}: {} searches; generation ${generation:.4} + time ${time:.4} = ${:.4}",
+              &commit[..commit.len().min(8)], searches.len(), generation + time);
+    let line = serde_json::json!({
+        "commit": commit, "searches": searches.len(), "generation_dollars": generation, "time_dollars": time,
+        "cost": generation + time,
+        "time": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
+    });
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(d.join("fast_forwards.jsonl")) {
+        let _ = writeln!(f, "{line}");
+    }
 }
 
 /// A point in time, for a search's wall time.
