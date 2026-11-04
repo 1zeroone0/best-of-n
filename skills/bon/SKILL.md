@@ -1,6 +1,6 @@
 ---
 name: bon
-description: Work with a repository's owner at the spec level and run bon (best-of-N) for everything below it. Use when the owner wants to capture intents, change the spec or checks, set a repository up for bon, or build, scrub, compact or map with it.
+description: Work with a repository's owner at the spec level and run bon (best-of-N) for everything below it. Use when the owner starts a new project with bon, migrates an existing repository to bon, captures intents, changes the spec or checks, or builds, scrubs, compacts or maps with it.
 ---
 
 # bon
@@ -64,20 +64,27 @@ many run at once. Report the spread, not just the winner.
 
 ## Setting up a repository
 
-New, or moving to bon. Assess, then bring the owner one decision at a time.
+Two ways in: a **new** project started with bon, or an **existing**
+repository the owner is migrating. Assess, then bring the owner one decision
+at a time.
 
 1. **Host:** `host.toml` exists and `sudo -u agent -i true` works. If not,
    the owner runs `bon setup`; show its dry run.
-2. **Assess, in a few lines:** language and build; what is already checked,
-   and how long checks take; what decides (chooses, validates, schedules)
-   and what does effects (I/O, UI, network); the remote and trunk.
-3. **The seam:** what decides becomes the kernel (Rust and Verus: spec,
-   gates, implementation); what does effects becomes programs over it. An
-   existing repository moves one gate at a time, each a search.
-4. **The map:** intents drafted from what the code does, its README and any
-   transcripts. The owner's words, the spec's nouns. The owner commits it.
-5. **The checks:** the spec, the gates' contracts, and tests that must hold.
-   They verify on trunk, except the gap the first search closes.
+2. **Assess.** *New:* ask what it is for, and what will decide (choose,
+   validate, schedule) versus do effects (I/O, UI, network). *Existing:*
+   language and build; what is already checked, and how long checks take;
+   what decides and what does effects; the remote and trunk.
+3. **The seam.** *New:* the kernel from the start: a spec, its gates, an
+   empty implementation (Rust and Verus); effects become programs over it.
+   *Existing:* what decides becomes the kernel, one gate at a time, each a
+   search; what does effects becomes programs.
+4. **The map.** *New:* intents from the owner's transcripts. *Existing:*
+   intents from what the code does, its README and any transcripts. The
+   owner's words, the spec's nouns; the owner commits it.
+5. **The checks.** *New:* the spec and the gates' contracts; on trunk they
+   fail, and searches close the gap one intent at a time. *Existing:* the
+   spec, the contracts and the current tests; they pass on trunk, except the
+   gap the first search closes.
 6. **The manifest:** wide width lists, limits sized to the work (proofs cost
    more), counterexample, and scrub once intents are built. Commit and push.
 7. **First search:** the smallest open intent. Read its trace with the owner.
@@ -117,6 +124,8 @@ JSONL directly).
 - `.bon/traces/<pid>/<search>/<index>/facts.json`: each agent process's
   `harness`, `model`, cost and `prices`, and its `candidate` (`commit`,
   `checks_pass`, `changed`, `diff`, `rank`, `out`, `test_passes`).
+- `.bon/traces/<pid>/fast_forwards.jsonl`: each fast-forward's `commit`, `searches`,
+  `generation_dollars`, `time_dollars` and `cost`: what it took to reach trunk.
 - `.bon/scrubs.jsonl`: each scrub's `intent`, `passes`, `time`.
 - `refs/bon/<pid>/<search>/<index>`: every candidate commit.
 

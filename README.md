@@ -6,7 +6,9 @@ Several agent processes each write a candidate. Checks they cannot change
 verify each one. Two must agree. The highest rank is selected, and trunk
 fast-forwards to it.
 
-<img src="readme/search.svg" width="880" alt="One search: agent processes fan out from trunk, checks verify their candidates, two agree, the highest rank is selected, trunk fast-forwards. Code, counterexample, compaction, scrub and map searches run the same path toward different goals.">
+<img src="readme/loop.svg" width="880" alt="One iteration, transcript to transcript: a map search turns a transcript into intents; the owner decides the spec and checks; code and counterexample searches write and test the code; it lands on trunk; scrub and compaction keep trunk true and small; people try it and talk again.">
+
+<img src="readme/search.svg" width="880" alt="Inside one search: generate, verify, agree, counterexample, select. Five kinds share it: code, counterexample, compaction, scrub, map.">
 
 ## Who decides
 
@@ -18,7 +20,7 @@ The kernel is the spec, the [gates](src/gates.rs) and their
 [implementation](src/exec.rs), proven by Verus. The terminal, `bon view` and
 the gates in WebAssembly are built from it.
 
-<img src="readme/levels.svg" width="880" alt="The owner's level above: map, spec, checks. Search below: searches, trunk, scrub and compaction in the background. The kernel at the center, its programs around it.">
+<img src="readme/kernel.svg" width="880" alt="The kernel at the center: spec, gates and their Rust implementation, proven by Verus. Programs around it, the terminal, the web view and WebAssembly, use what it emits and decide nothing.">
 
 ## Start
 
