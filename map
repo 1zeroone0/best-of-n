@@ -19,3 +19,8 @@ The SBOM lists every crate, toolchain, TCB tool, service and trusted function bo
 A skill ships with the CLI for the model engineer talks to: how to work at the spec level and when to run bon, read from the bon.toml, map and spec of the repo it runs in; agent processes never see it.
 Trunk is the remote's main: a search starts from it, and every fast-forward is pushed to it, or refused if it moved.
 Cost is computed from the harness's token counts and the manifest's prices for the canonical model, and checked against the harness's own figure where it gives one.
+A scrub search checks an intent against trunk with tests written from the spec and the intent, never the implementation: an agreed pass lands the test as a check, and an agreed fail marks the intent broken and starts a code search that carries the test.
+Counterexample tests are written from the spec and the intent, never from candidate code, and run on every agreed candidate.
+Checks start from trunk's build of the protected paths, which no candidate can change.
+The device file's jobs caps how many agent processes run at once; width stays what bon.toml says.
+Background work, scrub and compaction, runs only on spare capacity, stalest first: the intent least recently scrubbed against trunk, or the most lines added since the last compaction.
