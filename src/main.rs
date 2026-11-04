@@ -42,6 +42,7 @@ fn main() {
         Some("help" | "-h" | "--help") => { println!("{USAGE}"); Ok(()) }
         Some(other) => Err(format!("unknown command {other}\n{USAGE}")),
     };
+    best_of_n::trusted::cleanup(&["/usr/bin".into(), "/bin".into()]);
     if let Err(e) = result { fail(&e) }
 }
 

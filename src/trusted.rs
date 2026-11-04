@@ -250,12 +250,66 @@ fn check_directory(root: &std::path::Path, commit: &str, dir: &std::path::Path) 
     Ok(())
 }
 
+/// Trunk's build, made once per bon process as agent. Every candidate's build
+/// directory starts as a copy-on-write clone of it, so cargo rebuilds only what
+/// the candidate changed; cargo's own change detection (TCB) keeps it correct.
+/// (intent 23)
+static WARM: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+static WARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Start building trunk in the background, once.
+fn warm(m: &Manifest, head: &str) {
+    if WARMING.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
+    let (config, root, head) = (m.config.clone(), m.root.clone(), head.to_string());
+    std::thread::spawn(move || {
+        let built = (|| -> Option<PathBuf> {
+            let dir = scratch("trunk");
+            check_directory(&root, &head, &dir).ok()?;
+            let build = scratch("trunk-build");
+            as_agent(&config, std::path::Path::new("/tmp"), &[], &["mkdir".into(), "-p".into(), build.to_string_lossy().into()]).status().ok()?;
+            let log = root.join(".bon").join("traces").join(format!("{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&log);
+            for (k, v) in config.checks.verify.iter().enumerate() {
+                run_check(&config, &dir, &build, v, &log.join(format!("trunk-verify-{k}")));
+            }
+            let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
+            let _ = std::fs::remove_dir_all(&dir);
+            Some(build)
+        })();
+        let _ = WARM.set(built);
+    });
+}
+
 fn build_directory(config: &Config, name: &str) -> Result<PathBuf, String> {
     let d = scratch(name);
-    let mut c = as_agent(config, std::path::Path::new("/tmp"), &[], &["mkdir".into(), "-p".into(), d.to_string_lossy().into()]);
-    let ok = c.status().map_err(|e| e.to_string())?.success();
-    if !ok { return Err(format!("mkdir {} as agent", d.display())); }
+    // Once trunk's build is under way, wait for it and start from a clone of it.
+    let warm = if WARMING.load(std::sync::atomic::Ordering::SeqCst) {
+        let start = Instant::now();
+        while WARM.get().is_none() && start.elapsed() < Duration::from_secs(config.agent_process.time) {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+        WARM.get().cloned().flatten()
+    } else { None };
+    let argv: Vec<String> = match &warm {
+        Some(w) => vec!["cp".into(), "-cR".into(), w.to_string_lossy().into(), d.to_string_lossy().into()],
+        None => vec!["mkdir".into(), "-p".into(), d.to_string_lossy().into()],
+    };
+    let ok = as_agent(config, std::path::Path::new("/tmp"), &[], &argv).status().map_err(|e| e.to_string())?.success();
+    if !ok { return Err(format!("{} as agent", argv.join(" "))); }
     Ok(d)
+}
+
+/// Remove this bon process's directories under /tmp/bon, as agent where agent owns them.
+pub fn cleanup(path: &[String]) {
+    let mine = format!("{}-", std::process::id());
+    for e in std::fs::read_dir("/tmp/bon").into_iter().flatten().flatten() {
+        if !e.file_name().to_string_lossy().starts_with(&mine) { continue; }
+        let p = e.path();
+        if std::fs::remove_dir_all(&p).is_err() {
+            let _ = Command::new("sudo").args(["-n", "-u", "agent", "env", "-i", &format!("PATH={}", path.join(":")), "rm", "-rf"])
+                .arg(&p).current_dir("/tmp").status();
+        }
+    }
 }
 
 // ── checks ──────────────────────────────────────────────
@@ -503,6 +557,7 @@ pub fn observe(m: &Manifest, commit: &Commit) -> (r: Result<(Permission, Permiss
 #[verifier::external_body]
 pub fn run(m: &Manifest, kind: &Kind, search: usize, a: usize, start: &Commit, target: Option<&Search>, tests: &Tests) -> Vec<(Option<Candidate>, u64)> {
     let start: String = start.iter().collect();
+    warm(m, &start);
     let hs = match kind { Kind::Counterexample { .. } => m.config.counterexample.harness.clone(), _ => m.config.harness.clone() };
     let slots: Vec<Harness> = hs.iter().flat_map(|h| std::iter::repeat(h.clone()).take(at(h, a))).collect();
     let map = git(&m.root, &["show", &format!("{start}:map")]).unwrap_or_default();
