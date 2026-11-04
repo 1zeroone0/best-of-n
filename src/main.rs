@@ -20,7 +20,8 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let root = match git(Path::new("."), &["rev-parse", "--show-toplevel"]) {
         Ok(r) => r,
-        Err(_) if matches!(args.first().map(String::as_str), Some("setup" | "help" | "-h" | "--help")) => ".".into(),
+        // setup and help need no repository; sbom also runs in a checkout with no .git (a check).
+        Err(_) if matches!(args.first().map(String::as_str), Some("setup" | "sbom" | "help" | "-h" | "--help")) => ".".into(),
         Err(e) => fail(&format!("not in a git repository: {e}")),
     };
     let result = match args.first().map(String::as_str) {
@@ -194,7 +195,7 @@ const DEVICE_TEMPLATE: &str = r#"# bon's device file: facts about this machine, 
 # Owned by root; edit with sudo. Every trace records the prices it was costed at.
 
 # PATH for agent processes and checks. Nothing else is inherited.
-path = ["/Users/agent/.local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+path = ["/Users/agent/.local/bin", "/Users/agent/.cargo/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
 
 # Dollars per million tokens, API list prices, by canonical model id. Keep only
 # the models in use. cache_write is the shorter TTL (Claude 5m, OpenAI 30m),
@@ -220,24 +221,33 @@ fn sbom(root: &str, check: bool) -> Result<(), String> {
         }
         components.push(c);
     }
+    // From /tmp: agent cannot enter engineer's repository, and rustup reads the current directory.
     let version = |program: &str, args: &[&str]| -> String {
-        Command::new(program).args(args).output().ok()
+        Command::new(program).args(args).current_dir("/tmp").output().ok()
             .filter(|o| o.status.success())
             .map(|o| { let s = if o.stdout.is_empty() { o.stderr } else { o.stdout }; String::from_utf8_lossy(&s).lines().next().unwrap_or("").trim().to_string() })
             .filter(|v| !v.is_empty())
             .unwrap_or_else(|| "absent".into())
     };
-    // The harnesses bon runs are agent's, so their versions are observed as agent.
+    // agent runs the harnesses and the checks, so the toolchain and harness
+    // versions are observed as agent: the SBOM describes what candidates are judged with.
+    // As a check, bon sbom already runs as agent, which cannot sudo.
+    let is_agent = version("id", &["-un"]) == "agent";
     let as_agent = |program: &str, args: &[&str]| -> String {
-        let mut a = vec!["-n", "-u", "agent", "env", "-i", "PATH=/Users/agent/.local/bin:/opt/homebrew/bin:/usr/bin:/bin", "HOME=/Users/agent", program];
+        let mut a = vec!["env", "-i", "PATH=/Users/agent/.local/bin:/Users/agent/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin", "HOME=/Users/agent", program];
         a.extend_from_slice(args);
-        version("sudo", &a)
+        if is_agent { version(a[0], &a[1..]) } else { version("sudo", &[&["-n", "-u", "agent"][..], &a[..]].concat()) }
     };
-    let verus = Command::new("verus").arg("--version").output().ok()
-        .and_then(|o| String::from_utf8_lossy(&o.stdout).lines().find(|l| l.contains("Version:")).map(|l| l.replace("Version:", "").trim().to_string()))
-        .unwrap_or_else(|| "absent".into());
+    let verus = {
+        let mut a = vec!["env", "-i", "PATH=/Users/agent/.local/bin:/Users/agent/.cargo/bin:/usr/bin:/bin", "HOME=/Users/agent", "verus", "--version"];
+        if !is_agent { a = [&["-n", "-u", "agent"][..], &a[..]].concat(); }
+        let program = if is_agent { "env" } else { "sudo" };
+        Command::new(program).args(if is_agent { &a[1..] } else { &a[..] }).current_dir("/tmp").output().ok().filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8_lossy(&o.stdout).lines().find(|l| l.contains("Version:")).map(|l| l.replace("Version:", "").trim().to_string()))
+            .unwrap_or_else(|| "absent".into())
+    };
     for (kind, name, v) in [
-        ("application", "rustc", version("rustc", &["--version"])),
+        ("application", "rustc", as_agent("rustc", &["--version"])),
         ("application", "verus", verus),
         ("application", "git", version("git", &["--version"])),
         ("application", "sudo", version("sudo", &["-V"])),
