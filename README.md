@@ -14,7 +14,9 @@ cargo verus build          # verify, then build target/debug/bon
 ```
 
 `bon setup`, run once as an administrator, creates user `agent` and group
-`bon` and lets you run commands as agent (never as root):
+`bon`, lets you run commands as agent (never as root), and makes `/tmp/bon`,
+the directory holding the working directories: yours, mode 0711, so an agent
+process can reach only the working directory it was given.
 
 ```sh
 su admin -c "/path/to/bon setup --for $USER"   # --dry-run prints each step
@@ -81,5 +83,15 @@ a dependency, tool or trusted function changes.
 
 ## Trust
 
-Verus proves the spec and the gates (`src/spec.rs`, `src/gates.rs`,
-`src/exec.rs`). Everything else is trusted and listed in the SBOM.
+The kernel is the spec, the gates and their implementation (`src/spec.rs`,
+`src/gates.rs`, `src/exec.rs`), proven by Verus. Programs (the terminal, the
+view, the gates in WebAssembly) are built from it. Everything else is trusted
+and listed in the SBOM: `src/trusted.rs` and the entry points (`main.rs`,
+`view.rs`, `wasm.rs`), plus git, sudo, tar, POSIX ACLs, the harnesses and the
+checks.
+
+Each agent process works in `/tmp/bon/<pid>.<search>.<index>/<repository>`.
+`/tmp/bon` is searchable but not listable by agent, so no agent process can
+find another's working directory by looking. Every agent process is the same
+POSIX user, so one that set out to (guessing a path, or `ps` and `lsof`)
+could still reach a sibling's.

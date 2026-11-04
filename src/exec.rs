@@ -32,23 +32,25 @@ fn is_prefix_of(a: &Vec<char>, b: &Vec<char>) -> (r: bool)
 
 // ── isolated ────────────────────────────────────────────
 
-pub fn isolated(checks: Permission, transcripts: Permission, working_directory: Permission, repository: Permission) -> (r: bool)
-    ensures r == spec::isolated(observed(checks, transcripts, working_directory, repository)),
+pub fn isolated(checks: Permission, transcripts: Permission, working_directory: Permission, repository: Permission, working_directories: Permission) -> (r: bool)
+    ensures r == spec::isolated(observed(checks, transcripts, working_directory, repository, working_directories)),
 {
-    let ghost o = observed(checks, transcripts, working_directory, repository);
+    let ghost o = observed(checks, transcripts, working_directory, repository, working_directories);
     let r = (checks.read && !checks.write && checks.execute)
         && (transcripts.read && !transcripts.write && transcripts.execute)
         && (working_directory.read && working_directory.write && working_directory.execute)
-        && (!repository.read && !repository.write && !repository.execute);
-    assert forall|f: File| o.contains_key(f) && (r ==> o[f] == spec::policy(User::agent, f)) by {
-        match f { File::Checks => {}, File::Transcripts => {}, File::WorkingDirectory => {}, File::Repository => {} }
+        && (!repository.read && !repository.write && !repository.execute)
+        && (!working_directories.read && !working_directories.write && working_directories.execute);
+    assert forall|f: Object| o.contains_key(f) && (r ==> o[f] == spec::policy(User::agent, f)) by {
+        match f { Object::Checks => {}, Object::Transcripts => {}, Object::WorkingDirectory => {}, Object::Repository => {}, Object::WorkingDirectories => {} }
     }
     proof {
         if spec::isolated(o) {
-            assert(o[File::Checks] == spec::policy(User::agent, File::Checks));
-            assert(o[File::Transcripts] == spec::policy(User::agent, File::Transcripts));
-            assert(o[File::WorkingDirectory] == spec::policy(User::agent, File::WorkingDirectory));
-            assert(o[File::Repository] == spec::policy(User::agent, File::Repository));
+            assert(o[Object::Checks] == spec::policy(User::agent, Object::Checks));
+            assert(o[Object::Transcripts] == spec::policy(User::agent, Object::Transcripts));
+            assert(o[Object::WorkingDirectory] == spec::policy(User::agent, Object::WorkingDirectory));
+            assert(o[Object::Repository] == spec::policy(User::agent, Object::Repository));
+            assert(o[Object::WorkingDirectories] == spec::policy(User::agent, Object::WorkingDirectories));
         }
     }
     r
@@ -822,8 +824,8 @@ pub fn contains(xs: &Vec<Intent>, x: &Intent) -> (r: bool)
 pub struct Kernel;
 
 impl Gates for Kernel {
-    fn isolated(checks: Permission, transcripts: Permission, working_directory: Permission, repository: Permission) -> (r: bool) {
-        isolated(checks, transcripts, working_directory, repository)
+    fn isolated(checks: Permission, transcripts: Permission, working_directory: Permission, repository: Permission, working_directories: Permission) -> (r: bool) {
+        isolated(checks, transcripts, working_directory, repository, working_directories)
     }
     fn verified(s: &Search, c: &Candidate) -> (r: bool) { verified(s, c) }
     fn selected(s: &Search) -> (r: Option<usize>) { selected(s) }

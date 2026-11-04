@@ -5,7 +5,7 @@ A search selects a candidate only when at least two candidates are verified and 
 Among the verified candidates, the highest rank is selected; ties go to the smallest diff.
 Trunk fast-forwards to exactly the selected candidate; engineer decides by committing the map and the checks, not by accepting candidates.
 Each candidate is written by one process running as user agent in its own working directory, holding one capability.
-agent has read and execute permission on the checks, read permission on the transcripts, and no permission on the repository.
+agent has read and execute permission on the checks, read permission on the transcripts, no permission on the repository, and only search permission on the directory holding the working directories, so an agent process reaches only its own.
 No capability is granted until isolation is confirmed.
 Each new transcript becomes a proposal: candidates change only the map, each new intent cites its cue, a cue is agreed when at least two verified candidates cite it, and the shortest wording is selected.
 Exec code uses the spec's names: each exec type views the spec type of the same name, and the gates are a trait in the spec.

@@ -8,8 +8,8 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::exec::Kernel;
-use crate::gates::Encoding;
+use best_of_n::exec::Kernel;
+use best_of_n::gates::Encoding;
 use serde_json::{json, Value};
 
 const INDEX: &str = include_str!("../view/dist/index.html");

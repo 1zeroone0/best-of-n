@@ -298,7 +298,11 @@ fn setup(dry_run: bool, user: Option<String>) -> Result<(), String> {
     steps.push(s(&["dseditgroup", "-o", "edit", "-a", &me, "-t", "user", "bon"]));
     steps.push(vec!["sh".into(), "-c".into(), format!(
         "f=$(mktemp) && printf '%s ALL=(agent) NOPASSWD: ALL\\n' {me} > \"$f\" && visudo -cf \"$f\" && install -m 0440 -o root -g wheel \"$f\" /etc/sudoers.d/bon; r=$?; rm -f \"$f\"; exit $r")]);
-    steps.push(s(&["sh", "-c", "mkdir -p /tmp/bon && chmod 1777 /tmp/bon"]));
+    // The directory holding every working directory: the owner's, mode 0711, so
+    // agent may pass through to a path it was given but not list or add to it.
+    // bon remakes it after a reboot clears /tmp. (intent 8)
+    steps.push(vec!["sh".into(), "-c".into(), format!(
+        "mkdir -p {d} && chown {me} {d} && chmod 0711 {d}", d = best_of_n::trusted::WORKING_DIRECTORIES)]);
     // The device file: written once, then edited by hand (with sudo) as models and prices change.
     if !std::path::Path::new(best_of_n::trusted::DEVICE).exists() {
         let draft = std::env::temp_dir().join(format!("bon-device-{}.toml", std::process::id()));

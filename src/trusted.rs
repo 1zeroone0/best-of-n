@@ -221,15 +221,45 @@ fn supervise(mut c: Command, stdin: Option<String>, time: Duration, log: &std::p
 
 // ── working directories ─────────────────────────────────
 
-/// Every directory bon makes for agent processes and checks lives here.
+/// The directory holding every working directory: owned by engineer, mode 0711,
+/// so agent may search it (pass through to a path it was given) but not list it
+/// or add to it. /tmp is cleared on reboot, so bon makes it when it is missing;
+/// the isolated gate checks it. (intent 8)
+pub const WORKING_DIRECTORIES: &str = "/tmp/bon";
+
+/// The repository's name, the last part of every working directory's path, so
+/// an agent process works in a directory named like any checkout of it.
+fn repository_name(root: &std::path::Path) -> String {
+    root.file_name().map_or("repository".into(), |n| n.to_string_lossy().to_string())
+}
+
+/// A directory for this bon process under WORKING_DIRECTORIES:
+/// `<pid>.<owner>/<rest>`, where owner names what it is for (`<search>.<index>`
+/// for an agent process, `trunk`, `goal`, `probe`, `test.<hash>`). The owner's
+/// directory is engineer's, group bon, mode 2750: agent may enter it, not add
+/// to it. (intent 8)
 fn scratch(name: &str) -> PathBuf {
-    // /tmp is cleared on reboot: keep /tmp/bon world-writable and sticky, like /tmp.
-    let base = PathBuf::from("/tmp/bon");
+    let base = PathBuf::from(WORKING_DIRECTORIES);
     if !base.exists() {
         let _ = std::fs::create_dir_all(&base);
-        let _ = Command::new("chmod").arg("1777").arg(&base).status();
     }
-    base.join(format!("{}-{name}", std::process::id()))
+    let _ = Command::new("chmod").arg("0711").arg(&base).stderr(Stdio::null()).status();
+    let (owner, rest) = name.split_once('/').unwrap_or((name, ""));
+    let dir = base.join(format!("{}.{owner}", std::process::id()));
+    if !dir.exists() {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = Command::new("chgrp").arg("bon").arg(&dir).status();
+        let _ = Command::new("chmod").arg("2750").arg(&dir).status();
+    }
+    if rest.is_empty() { dir } else { dir.join(rest) }
+}
+
+/// A directory made by engineer that agent (through group bon) may write in.
+fn writable_dir(d: &std::path::Path) -> Result<(), String> {
+    std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    let ok = Command::new("chgrp").arg("bon").arg(d).status().is_ok_and(|s| s.success())
+        && Command::new("chmod").arg("2770").arg(d).status().is_ok_and(|s| s.success());
+    if ok { Ok(()) } else { Err(format!("cannot make {} writable by group bon", d.display())) }
 }
 
 /// Write `commit`'s tree into `dir`, owned by engineer, group bon. (TCB: git, tar)
@@ -318,10 +348,10 @@ fn warm(m: &Manifest, head: &str) {
     let (config, root, head) = (m.config.clone(), m.root.clone(), head.to_string());
     std::thread::spawn(move || {
         let built = (|| -> Option<PathBuf> {
-            let dir = scratch("trunk");
+            let dir = scratch(&format!("trunk/{}", repository_name(&root)));
             check_directory(&root, &head, &dir).ok()?;
-            let build = scratch("trunk-build");
-            as_agent(&config, std::path::Path::new("/tmp"), &[], &["mkdir".into(), "-p".into(), build.to_string_lossy().into()]).status().ok()?;
+            let build = scratch("trunk/build");
+            writable_dir(&build).ok()?;
             let log = root.join(".bon").join("traces").join(format!("{}", std::process::id()));
             let _ = std::fs::create_dir_all(&log);
             for (k, v) in config.checks.verify.iter().enumerate() {
@@ -345,12 +375,13 @@ fn build_directory(config: &Config, name: &str) -> Result<PathBuf, String> {
         }
         WARM.get().cloned().flatten()
     } else { None };
-    let argv: Vec<String> = match &warm {
-        Some(w) => vec!["cp".into(), "-cR".into(), w.to_string_lossy().into(), d.to_string_lossy().into()],
-        None => vec!["mkdir".into(), "-p".into(), d.to_string_lossy().into()],
-    };
-    let ok = as_agent(config, std::path::Path::new("/tmp"), &[], &argv).status().map_err(|e| e.to_string())?.success();
-    if !ok { return Err(format!("{} as agent", argv.join(" "))); }
+    // engineer makes the directory; agent fills it with a clone of trunk's build.
+    writable_dir(&d)?;
+    if let Some(w) = &warm {
+        let argv: Vec<String> = vec!["cp".into(), "-cR".into(), format!("{}/", w.display()), d.to_string_lossy().into()];
+        let ok = as_agent(config, std::path::Path::new("/tmp"), &[], &argv).status().map_err(|e| e.to_string())?.success();
+        if !ok { return Err(format!("{} as agent", argv.join(" "))); }
+    }
     Ok(d)
 }
 
@@ -363,9 +394,10 @@ pub fn cleanup(path: &[String]) {
     // ps, not kill -0: kill -0 fails on another user's live process (EPERM),
     // which would read as dead.
     let running = |pid: &str| pid == me || Command::new("ps").args(["-p", pid]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
-    for e in std::fs::read_dir("/tmp/bon").into_iter().flatten().flatten() {
+    for e in std::fs::read_dir(WORKING_DIRECTORIES).into_iter().flatten().flatten() {
         let name = e.file_name().to_string_lossy().to_string();
-        let Some((pid, _)) = name.split_once('-') else { continue };
+        // <pid>.<owner>; <pid>-<name> from before the working directories were 0711.
+        let Some(pid) = name.split(['.', '-']).next() else { continue };
         if !pid.chars().all(|c| c.is_ascii_digit()) || (pid != me && running(pid)) { continue; }
         let p = e.path();
         let _ = Command::new("chmod").args(["-R", "-N"]).arg(&p).stderr(Stdio::null()).status();
@@ -654,9 +686,9 @@ pub fn intents(m: &Manifest, commit: &Commit) -> Vec<Intent> {
 /// agent's effective permissions on each file the policy covers, observed by
 /// asking as agent, on a probe working directory made the same way as real ones.
 #[verifier::external_body]
-pub fn observe(m: &Manifest, commit: &Commit) -> (r: Result<(Permission, Permission, Permission, Permission), String>) {
+pub fn observe(m: &Manifest, commit: &Commit) -> (r: Result<(Permission, Permission, Permission, Permission, Permission), String>) {
     let c: String = commit.iter().collect();
-    let probe = scratch("probe");
+    let probe = scratch(&format!("probe/{}", repository_name(&m.root)));
     if let Err(e) = working_directory(&m.root, &m.config, &c, &probe) {
         let _ = std::fs::remove_dir_all(&probe);
         return Err(format!("agent is not set up ({e}); run bon setup"));
@@ -675,7 +707,7 @@ pub fn observe(m: &Manifest, commit: &Commit) -> (r: Result<(Permission, Permiss
     // The transcripts as agent meets them: in a working directory.
     let transcripts = probe.join(m.config.transcripts.clone().unwrap_or("transcripts".into()));
     let r = (check_perm(&check), if transcripts.exists() { perm(&transcripts) } else { Permission { read: true, write: false, execute: true } },
-             perm(&probe), perm(&m.root.join(".git")));
+             perm(&probe), perm(&m.root.join(".git")), perm(std::path::Path::new(WORKING_DIRECTORIES)));
     let _ = std::fs::remove_dir_all(&probe);
     Ok(r)
 }
@@ -789,9 +821,9 @@ pub fn record(m: &Manifest, line: &str) {
 #[verifier::external_body]
 pub fn agree_outputs(m: &Manifest, commit: &Commit, tests: &Tests) -> (r: Result<Vec<u64>, String>) {
     let c: String = commit.iter().collect();
-    let dir = scratch("goal");
+    let dir = scratch(&format!("goal/{}", repository_name(&m.root)));
     check_directory(&m.root, &c, &dir)?;
-    let build = build_directory(&m.config, "goal-build")?;
+    let build = build_directory(&m.config, "goal/build")?;
     let log = m.root.join(".bon").join("traces").join(format!("{}", std::process::id()));
     let _ = std::fs::create_dir_all(&log);
     let mut out = Vec::new();
@@ -814,7 +846,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
                  target: Option<&Search>, tests: &Tests, trace: &std::path::Path) -> (Option<Candidate>, u64) {
     let _ = std::fs::create_dir_all(trace);
     let config = &m.config;
-    let dir = scratch(&format!("{search}-{index}"));
+    let dir = scratch(&format!("{search}.{index}/{}", repository_name(&m.root)));
     let writable = match (kind, &config.scrub) {
         (Kind::Scrub { path, .. }, Some(_)) => {
             let p: String = path.iter().collect();
@@ -844,7 +876,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
         let _ = std::fs::write(trace.join("error"), &e);
     }).ok();
     let _ = std::fs::remove_dir_all(&dir);
-    let build = scratch(&format!("{search}-{index}-build"));
+    let build = scratch(&format!("{search}.{index}/build"));
     let _ = as_agent(config, std::path::Path::new("/tmp"), &[], &["rm".into(), "-rf".into(), build.to_string_lossy().into()]).status();
     let text = |v: &Vec<char>| v.iter().collect::<String>();
     let facts = serde_json::json!({
@@ -919,9 +951,9 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
     }
 
     // Checks run in a read-only checkout, as agent.
-    let cdir = scratch(&format!("{search}-{index}-check"));
+    let cdir = scratch(&format!("{search}.{index}/check"));
     check_directory(root, &commit, &cdir)?;
-    let build = build_directory(config, &format!("{search}-{index}-build"))?;
+    let build = build_directory(config, &format!("{search}.{index}/build"))?;
     let mut checks_pass = true;
     let mut test_passes = Vec::new();
     let mut rank = 0i64;
@@ -1009,7 +1041,7 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
 /// `path`, run as agent with `run`.
 fn test_on(m: &Manifest, commit: &str, test: &[u8], path: &str, run: &str, build: &std::path::Path, log: &std::path::Path) -> bool {
     let config = &m.config;
-    let dir = scratch(&format!("test-{}", hash(&format!("{commit}{log:?}"))));
+    let dir = scratch(&format!("test.{}/{}", hash(&format!("{commit}{log:?}")), repository_name(&m.root)));
     let passes = match materialize(&m.root, commit, &dir) {
         Ok(()) => {
             let p = dir.join(path);

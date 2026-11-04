@@ -8,7 +8,7 @@
 
 use vstd::prelude::*;
 use crate::spec;
-pub use crate::spec::{File, Permission, User};
+pub use crate::spec::{Object, Permission, User};
 
 verus! {
 
@@ -146,12 +146,13 @@ pub open spec fn first_by_key<K, V>(s: Seq<(K, V)>) -> Map<K, V> {
 }
 
 /// agent's permissions on each file, as trusted code observed them.
-pub open spec fn observed(checks: Permission, transcripts: Permission, working_directory: Permission, repository: Permission) -> Map<File, Permission> {
+pub open spec fn observed(checks: Permission, transcripts: Permission, working_directory: Permission, repository: Permission, working_directories: Permission) -> Map<Object, Permission> {
     map![
-        File::Checks => checks,
-        File::Transcripts => transcripts,
-        File::WorkingDirectory => working_directory,
-        File::Repository => repository,
+        Object::Checks => checks,
+        Object::Transcripts => transcripts,
+        Object::WorkingDirectory => working_directory,
+        Object::Repository => repository,
+        Object::WorkingDirectories => working_directories,
     ]
 }
 
@@ -355,8 +356,8 @@ pub trait Encoding {
 /// that predicate.
 pub trait Gates {
     /// agent's permissions match the policy. (intent 9)
-    fn isolated(checks: Permission, transcripts: Permission, working_directory: Permission, repository: Permission) -> (r: bool)
-        ensures r == spec::isolated(observed(checks, transcripts, working_directory, repository));
+    fn isolated(checks: Permission, transcripts: Permission, working_directory: Permission, repository: Permission, working_directories: Permission) -> (r: bool)
+        ensures r == spec::isolated(observed(checks, transcripts, working_directory, repository, working_directories));
 
     /// Every check passed, and every changed path is within the authority. (intent 3)
     fn verified(s: &Search, c: &Candidate) -> (r: bool)

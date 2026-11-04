@@ -30,8 +30,9 @@ pub type Cue = nat;
 #[allow(non_camel_case_types)]
 pub enum User { engineer, agent }
 
-/// The files the policy covers. A directory is a file (OSTEP).
-pub enum File {
+/// The objects the policy gives agent rights over: files and directories
+/// (OSTEP), each designated by its path.
+pub enum Object {
     /// Verus (the spec and proofs) and the tests. Owner: engineer.
     Checks,
     /// The transcripts. Owner: engineer.
@@ -40,6 +41,10 @@ pub enum File {
     WorkingDirectory,
     /// The git repository: history and refs. Owner: engineer.
     Repository,
+    /// The directory holding every working directory. agent may search it (pass
+    /// through to the path it was given) but not list it or add to it, so an
+    /// agent process reaches only its own working directory. Owner: engineer.
+    WorkingDirectories,
 }
 
 /// POSIX permission bits.
@@ -137,19 +142,20 @@ pub open spec fn authority(kind: Kind, checks: Set<Path>) -> ISet<Path> {
 }
 
 /// Who may do what. (intent 8)
-pub open spec fn policy(u: User, f: File) -> Permission {
+pub open spec fn policy(u: User, f: Object) -> Permission {
     match (u, f) {
-        (User::agent, File::Checks)           => Permission { read: true,  write: false, execute: true },
-        (User::agent, File::Transcripts)      => Permission { read: true,  write: false, execute: true },
-        (User::agent, File::WorkingDirectory) => Permission { read: true,  write: true,  execute: true },
-        (User::agent, File::Repository)       => Permission { read: false, write: false, execute: false },
+        (User::agent, Object::Checks)           => Permission { read: true,  write: false, execute: true },
+        (User::agent, Object::Transcripts)      => Permission { read: true,  write: false, execute: true },
+        (User::agent, Object::WorkingDirectory) => Permission { read: true,  write: true,  execute: true },
+        (User::agent, Object::Repository)       => Permission { read: false, write: false, execute: false },
+        (User::agent, Object::WorkingDirectories) => Permission { read: false, write: false, execute: true },
         (User::engineer, _)                   => Permission { read: true,  write: true,  execute: true },
     }
 }
 
 /// agent's permissions, as trusted code observed them, match the policy. (intent 9)
-pub open spec fn isolated(observed: Map<File, Permission>) -> bool {
-    forall|f: File| observed.contains_key(f) && observed[f] == policy(User::agent, f)
+pub open spec fn isolated(observed: Map<Object, Permission>) -> bool {
+    forall|f: Object| observed.contains_key(f) && observed[f] == policy(User::agent, f)
 }
 
 /// The candidate at index i. Meaningful only when one exists.
@@ -335,7 +341,7 @@ tokenized_state_machine!{ bon {
     /// Open a search and grant one capability per agent process, reserving each
     /// one's limit. One search runs at a time; its agent processes run in parallel.
     /// (intents 2, 7, 9, 10, 13, 16, 17)
-    transition!{ grant(kind: Kind, n: nat, l: nat, observed: Map<File, Permission>) {
+    transition!{ grant(kind: Kind, n: nat, l: nat, observed: Map<Object, Permission>) {
         require isolated(observed);
         require forall|k: int| 0 <= k < pre.searches.len() ==> complete(#[trigger] pre.searches[k]);
         require pre.spent + pre.reserved + l * n <= pre.limit;
@@ -469,7 +475,7 @@ tokenized_state_machine!{ bon {
     fn advance_inductive(pre: Self, post: Self, c: Commit, intents: Set<Intent>, checks: Set<Path>) {}
 
     #[inductive(grant)]
-    fn grant_inductive(pre: Self, post: Self, kind: Kind, n: nat, l: nat, observed: Map<File, Permission>) {
+    fn grant_inductive(pre: Self, post: Self, kind: Kind, n: nat, l: nat, observed: Map<Object, Permission>) {
         let k = pre.searches.len() as int;
         let ps = agent_processes(k, n);
         // Every earlier search is complete, so no capability is outstanding.

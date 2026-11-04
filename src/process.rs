@@ -48,7 +48,7 @@ pub open spec fn returned(r: Option<Candidate>) -> Option<spec::Candidate> {
 #[verifier::spinoff_prover]
 fn search(
     m: &trusted::Manifest, index: usize, a: usize, kind: Kind, start: Commit, checks: &Vec<Path>, l: u64, limit: u64,
-    spent: &mut u64, target: Option<&Search>, tests: &trusted::Tests, Ghost(observed): Ghost<Map<File, Permission>>,
+    spent: &mut u64, target: Option<&Search>, tests: &trusted::Tests, Ghost(observed): Ghost<Map<Object, Permission>>,
     Tracked(t): Tracked<&mut Tokens>,
 ) -> (r: Result<Search, String>)
     requires
@@ -210,11 +210,11 @@ pub fn land(root: &str, goal: Option<Intent>, carried: trusted::Tests) -> (r: Re
     let checks = trusted::checks(&m);
     let limit = trusted::limit(&m);
     let l = trusted::agent_process_limit(&m);
-    let (pc, pt, pw, pr) = trusted::observe(&m, &head)?;
-    if !isolated(pc, pt, pw, pr) {
+    let (pc, pt, pw, pr, pd) = trusted::observe(&m, &head)?;
+    if !isolated(pc, pt, pw, pr, pd) {
         return Err("agent is not isolated: its permissions differ from the policy; run bon setup".into());
     }
-    let ghost observed = observed(pc, pt, pw, pr);
+    let ghost observed = observed(pc, pt, pw, pr, pd);
     let tracked (Tracked(instance), Tracked(map), Tracked(checks_t), Tracked(trunk), Tracked(authors),
                  Tracked(searches), Tracked(limit_t), Tracked(spent_t), Tracked(reserved), Tracked(capability))
         = spec::bon::Instance::initialize(head@, intent_set(intents@), paths(checks@), limit as nat);
@@ -311,11 +311,11 @@ pub fn scrub(root: &str, goal: Intent) -> (r: Result<Option<trusted::Tests>, Str
     let checks = trusted::checks(&m);
     let limit = trusted::limit(&m);
     let l = trusted::agent_process_limit(&m);
-    let (pc, pt, pw, pr) = trusted::observe(&m, &head)?;
-    if !isolated(pc, pt, pw, pr) {
+    let (pc, pt, pw, pr, pd) = trusted::observe(&m, &head)?;
+    if !isolated(pc, pt, pw, pr, pd) {
         return Err("agent is not isolated: its permissions differ from the policy; run bon setup".into());
     }
-    let ghost observed = observed(pc, pt, pw, pr);
+    let ghost observed = observed(pc, pt, pw, pr, pd);
     let tracked (Tracked(instance), Tracked(map), Tracked(checks_t), Tracked(trunk), Tracked(authors),
                  Tracked(searches), Tracked(limit_t), Tracked(spent_t), Tracked(reserved), Tracked(capability))
         = spec::bon::Instance::initialize(head@, intent_set(intents@), paths(checks@), limit as nat);
@@ -393,11 +393,11 @@ pub fn map(root: &str, transcript: Transcript) -> (r: Result<(Vec<(Cue, Intent)>
     let checks = trusted::checks(&m);
     let limit = trusted::limit(&m);
     let l = trusted::agent_process_limit(&m);
-    let (pc, pt, pw, pr) = trusted::observe(&m, &head)?;
-    if !isolated(pc, pt, pw, pr) {
+    let (pc, pt, pw, pr, pd) = trusted::observe(&m, &head)?;
+    if !isolated(pc, pt, pw, pr, pd) {
         return Err("agent is not isolated: its permissions differ from the policy; run bon setup".into());
     }
-    let ghost observed = observed(pc, pt, pw, pr);
+    let ghost observed = observed(pc, pt, pw, pr, pd);
     let tracked (Tracked(instance), Tracked(map), Tracked(checks_t), Tracked(trunk), Tracked(authors),
                  Tracked(searches), Tracked(limit_t), Tracked(spent_t), Tracked(reserved), Tracked(capability))
         = spec::bon::Instance::initialize(head@, intent_set(intents@), paths(checks@), limit as nat);
