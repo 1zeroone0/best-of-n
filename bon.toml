@@ -1,5 +1,5 @@
 # bon's own bon.toml: bon builds bon.
-limit = 10.00
+limit = 40.00
 rate = 150
 
 [agent_process]
@@ -13,16 +13,11 @@ agree = ["cargo run -q -- help"]
 rank = { code = "echo 0", compaction = "echo $((0 - $(cat src/*.rs | wc -l)))" }
 
 [[harness]]
-name = "claude"
-model = "claude-haiku-5-5"
-n = [2, 4]
-
-[[harness]]
 name = "codex"
 model = "gpt-6.1-sol"
-n = [1, 2]
+n = [4, 6, 8]
 
 [counterexample]
-harness = [{ name = "codex", model = "gpt-6.1-sol", n = [1] }]
+harness = [{ name = "claude", model = "claude-opus-5-5", n = [2] }]
 path = "tests/counterexample.rs"
 test = "cargo test -q --test counterexample"

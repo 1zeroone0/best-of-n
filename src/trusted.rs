@@ -462,9 +462,15 @@ pub fn observe(m: &Manifest, commit: &Commit) -> (r: Result<(Permission, Permiss
     };
     let perm = |path: &std::path::Path| Permission { read: ask(path, "-r"), write: ask(path, "-w"), execute: ask(path, "-x") };
     let check = m.config.checks.paths.first().map(|p| probe.join(p.trim_end_matches('/'))).ok_or("no check paths")?;
+    // A check that is a file is run by an interpreter that reads it (sh, cargo),
+    // so for a file, execute is whether agent can read it.
+    let check_perm = |path: &std::path::Path| {
+        let p = perm(path);
+        if path.is_dir() { p } else { Permission { execute: p.read, ..p } }
+    };
     // The transcripts as agent meets them: in a working directory.
     let transcripts = probe.join(m.config.transcripts.clone().unwrap_or("transcripts".into()));
-    let r = (perm(&check), if transcripts.exists() { perm(&transcripts) } else { Permission { read: true, write: false, execute: true } },
+    let r = (check_perm(&check), if transcripts.exists() { perm(&transcripts) } else { Permission { read: true, write: false, execute: true } },
              perm(&probe), perm(&m.root.join(".git")));
     let _ = std::fs::remove_dir_all(&probe);
     Ok(r)
