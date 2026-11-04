@@ -416,7 +416,6 @@ fn sbom(root: &str, check: bool) -> Result<(), String> {
                 { "name": "bon:trusted-file", "value": "src/trusted.rs" },
                 { "name": "bon:trusted-file", "value": "src/main.rs" },
                 { "name": "bon:trusted-file", "value": "src/view.rs" },
-                { "name": "bon:trusted-file", "value": "src/wire.rs" },
                 { "name": "bon:trusted-file", "value": "src/wasm.rs" },
                 { "name": "bon:trusted-functions", "value": trusted.join(",") },
             ],

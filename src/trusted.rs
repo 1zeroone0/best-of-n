@@ -1,6 +1,6 @@
 //! Trusted code. Every function the verified code calls from here is
 //! `#[verifier::external_body]`: Verus does not check it. The TCB is this file,
-//! main.rs, view.rs, wire.rs and wasm.rs, plus what they run: git, sudo, tar, chmod, the harnesses (`claude`, `codex`)
+//! the entry points (main.rs, view.rs, wasm.rs), plus what they run: git, sudo, tar, chmod, the harnesses (`claude`, `codex`)
 //! and the checks the manifest declares.
 //!
 //! It observes and reports facts; it decides nothing. Every decision is a gate.
@@ -759,9 +759,11 @@ pub fn report(m: &Manifest, _index: usize, s: &Search, verified: usize, generati
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(d.join("searches.jsonl")) {
         let _ = writeln!(f, "{summary}");
     }
-    // The search as the gates saw it, for the view to re-derive its selection.
+    // The search as the gates saw it, in the kernel's words (little-endian),
+    // for programs to read and re-derive its selection.
+    let words: Vec<u8> = <crate::exec::Kernel as crate::gates::Encoding>::encode(s).iter().flat_map(|w| w.to_le_bytes()).collect();
     let _ = std::fs::create_dir_all(d.join(search.to_string()));
-    let _ = std::fs::write(d.join(search.to_string()).join("search.json"), crate::wire::search(s).to_string());
+    let _ = std::fs::write(d.join(search.to_string()).join("search.words"), words);
 }
 
 /// Record which candidate of the latest search was selected. (intent 14)

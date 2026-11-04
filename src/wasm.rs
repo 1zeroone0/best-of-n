@@ -1,13 +1,15 @@
-//! The verified gates, exported to WebAssembly for the view. The view writes a
-//! search.json (see wire.rs) into memory from `alloc` and calls a gate on it.
-//! Trusted: part of the TCB.
+//! The kernel's entry point for programs in WebAssembly: the program writes a
+//! search's words (as the trace records them) into memory from `alloc`, and
+//! calls a gate. Only the pointer-to-words step is here; decoding and deciding
+//! are the kernel's.
 
-use crate::{exec, wire};
+use crate::exec::Kernel;
+use crate::gates::{Encoding, Gates};
 
-/// Memory for the view to write len bytes of JSON into.
+/// Memory for len words.
 #[no_mangle]
-pub extern "C" fn alloc(len: usize) -> *mut u8 {
-    let mut b = Vec::<u8>::with_capacity(len);
+pub extern "C" fn alloc(len: usize) -> *mut u64 {
+    let mut b = Vec::<u64>::with_capacity(len);
     let p = b.as_mut_ptr();
     std::mem::forget(b);
     p
@@ -15,31 +17,30 @@ pub extern "C" fn alloc(len: usize) -> *mut u8 {
 
 /// Return memory from `alloc`.
 #[no_mangle]
-pub unsafe extern "C" fn dealloc(p: *mut u8, len: usize) {
+pub unsafe extern "C" fn dealloc(p: *mut u64, len: usize) {
     drop(Vec::from_raw_parts(p, 0, len));
 }
 
-unsafe fn json(p: *const u8, len: usize) -> Option<serde_json::Value> {
-    serde_json::from_slice(std::slice::from_raw_parts(p, len)).ok()
+unsafe fn words(p: *const u64, len: usize) -> Vec<u64> {
+    std::slice::from_raw_parts(p, len).to_vec()
 }
 
-/// The selected gate on one search: its index, -1 for none, -2 if the JSON
-/// is not a search.
+/// The selected gate on one search: its index, -1 for none, -2 if the words
+/// are not a search.
 #[no_mangle]
-pub unsafe extern "C" fn selected(p: *const u8, len: usize) -> i32 {
-    match json(p, len).as_ref().and_then(wire::parse_search) {
-        Some(s) => exec::selected(&s).map_or(-1, |i| i as i32),
+pub unsafe extern "C" fn selected(p: *const u64, len: usize) -> i32 {
+    match Kernel::decode(&words(p, len)) {
+        Some(s) => Kernel::selected(&s).map_or(-1, |i| i as i32),
         None => -2,
     }
 }
 
-/// The cleared gate on {"x": counterexample search, "t": the search it tested}:
-/// 1 cleared, 0 not, -2 if the JSON is not two searches.
+/// The cleared gate on x, a counterexample search, and t, the search it
+/// tested: 1 cleared, 0 not, -2 if either is not a search.
 #[no_mangle]
-pub unsafe extern "C" fn cleared(p: *const u8, len: usize) -> i32 {
-    let v = match json(p, len) { Some(v) => v, None => return -2 };
-    match (wire::parse_search(&v["x"]), wire::parse_search(&v["t"])) {
-        (Some(x), Some(t)) => exec::cleared(&x, &t) as i32,
+pub unsafe extern "C" fn cleared(x: *const u64, xlen: usize, t: *const u64, tlen: usize) -> i32 {
+    match (Kernel::decode(&words(x, xlen)), Kernel::decode(&words(t, tlen))) {
+        (Some(x), Some(t)) => Kernel::cleared(&x, &t) as i32,
         _ => -2,
     }
 }

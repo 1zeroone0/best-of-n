@@ -8,6 +8,8 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::exec::Kernel;
+use crate::gates::Encoding;
 use serde_json::{json, Value};
 
 const INDEX: &str = include_str!("../view/dist/index.html");
@@ -36,6 +38,10 @@ fn respond(root: &Path, mut stream: TcpStream) -> std::io::Result<()> {
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
     let (status, kind, body) = match path {
         "/gates.wasm" => ("200 OK", "application/wasm", GATES.to_vec()),
+        "/api/words" => match words(root, query) {
+            Some(b) => ("200 OK", "application/octet-stream", b),
+            None => ("404 Not Found", "text/plain", b"no such search".to_vec()),
+        },
         _ => { let (status, kind, body) = match path {
         "/" => ("200 OK", "text/html; charset=utf-8", INDEX.to_string()),
         "/app.js" => ("200 OK", "text/javascript; charset=utf-8", APP.to_string()),
@@ -60,6 +66,21 @@ fn git(root: &Path, args: &[&str]) -> String {
 
 fn jsonl(path: &Path) -> Vec<Value> {
     std::fs::read_to_string(path).unwrap_or_default().lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
+}
+
+/// A search's words, as the trace records them (little-endian u64).
+fn read_words(p: &Path) -> Option<Vec<u64>> {
+    let b = std::fs::read(p).ok()?;
+    if b.len() % 8 != 0 { return None; }
+    Some(b.chunks(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect())
+}
+
+/// A search's words for the gates in WebAssembly, only from under .bon/traces:
+/// path=<pid>/<search>.
+fn words(root: &Path, query: &str) -> Option<Vec<u8>> {
+    let rel = query.strip_prefix("path=")?.replace("%2F", "/");
+    if rel.contains("..") { return None; }
+    std::fs::read(root.join(".bon/traces").join(rel).join("search.words")).ok()
 }
 
 /// A trace log, only from under .bon/traces.
@@ -153,9 +174,10 @@ pub fn state(root: &Path) -> Value {
             });
             list.push(json!({
                 "search": n, "summary": summary, "selected": selected,
-                // The search as the gates saw it (wire.rs); null in older traces.
-                "gates": std::fs::read_to_string(rdir.join("search.json")).ok()
-                    .and_then(|t| serde_json::from_str::<Value>(&t).ok()),
+                // The search as the gates saw it, emitted by the kernel in the
+                // spec's names; null in traces recorded before the kernel wrote words.
+                "kernel": read_words(&rdir.join("search.words")).as_ref().and_then(|w| Kernel::decode(w))
+                    .and_then(|k| serde_json::from_str::<Value>(&Kernel::emit(&k).into_iter().collect::<String>()).ok()),
                 "candidates": candidates.into_iter().map(|(_, c)| c).collect::<Vec<_>>(),
             }));
         }

@@ -817,4 +817,19 @@ pub fn contains(xs: &Vec<Intent>, x: &Intent) -> (r: bool)
     false
 }
 
+/// The kernel: the spec, the gates and their implementation. The bon process
+/// and every program call it; it is compiled into each. (intent 27)
+pub struct Kernel;
+
+impl Gates for Kernel {
+    fn isolated(checks: Permission, transcripts: Permission, working_directory: Permission, repository: Permission) -> (r: bool) {
+        isolated(checks, transcripts, working_directory, repository)
+    }
+    fn verified(s: &Search, c: &Candidate) -> (r: bool) { verified(s, c) }
+    fn selected(s: &Search) -> (r: Option<usize>) { selected(s) }
+    fn cleared(x: &Search, t: &Search) -> (r: bool) { cleared(x, t) }
+    fn proposed(s: &Search) -> (r: Vec<(Cue, Intent)>) { proposed(s) }
+    fn contested(s: &Search) -> (r: Vec<Cue>) { contested(s) }
+}
+
 } // verus!

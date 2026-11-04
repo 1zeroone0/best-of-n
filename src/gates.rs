@@ -210,7 +210,123 @@ pub open spec fn encoded(s: Search) -> Seq<u64> {
         + seq![s.results.len() as u64] + s.results@.map_values(|r: Option<Candidate>| result_words(r)).flatten()
 }
 
-/// Encoding and reading back preserve what the gates decide on. (intent 28)
+// ── emission ────────────────────────────────────────────
+//
+// What programs read: a search as JSON text, in the spec's names. Hashes are
+// strings, since a JSON number loses u64 precision in a browser. (intent 27)
+
+/// n in decimal.
+pub open spec fn decimal(n: nat) -> Seq<char>
+    decreases n,
+{
+    let d = seq![(('0' as u32) + (n % 10) as u32) as char];
+    if n < 10 { d } else { decimal(n / 10) + d }
+}
+
+/// i in decimal, with a leading - when negative.
+pub open spec fn signed(i: int) -> Seq<char> {
+    if i < 0 { seq!['-'] + decimal((-i) as nat) } else { decimal(i as nat) }
+}
+
+/// A hex digit.
+pub open spec fn hex(d: nat) -> char {
+    if d < 10 { (('0' as u32) + d as u32) as char } else { (('a' as u32) + (d - 10) as u32) as char }
+}
+
+/// One char inside a JSON string: " and \ escaped, control chars as \u00XX.
+pub open spec fn escaped(c: char) -> Seq<char> {
+    if c == '"' || c == '\\' { seq!['\\', c] }
+    else if (c as u32) < 0x20 { seq!['\\', 'u', '0', '0', hex((c as u32 / 16) as nat), hex((c as u32 % 16) as nat)] }
+    else { seq![c] }
+}
+
+/// Text as a JSON string.
+pub open spec fn string(t: Seq<char>) -> Seq<char> {
+    seq!['"'] + t.map_values(|c: char| escaped(c)).flatten() + seq!['"']
+}
+
+/// Items joined with commas, in brackets.
+pub open spec fn array(items: Seq<Seq<char>>) -> Seq<char>
+    decreases items.len(),
+{
+    seq!['['] + joined(items) + seq![']']
+}
+
+/// Items joined with commas.
+pub open spec fn joined(items: Seq<Seq<char>>) -> Seq<char>
+    decreases items.len(),
+{
+    if items.len() == 0 { seq![] }
+    else if items.len() == 1 { items[0] }
+    else { joined(items.drop_last()) + seq![','] + items.last() }
+}
+
+/// "name":value
+pub open spec fn field(name: Seq<char>, value: Seq<char>) -> Seq<char> {
+    string(name) + seq![':'] + value
+}
+
+/// Fields in braces.
+pub open spec fn object(fields: Seq<Seq<char>>) -> Seq<char> {
+    seq!['{'] + joined(fields) + seq!['}']
+}
+
+pub open spec fn boolean(b: bool) -> Seq<char> {
+    if b { seq!['t', 'r', 'u', 'e'] } else { seq!['f', 'a', 'l', 's', 'e'] }
+}
+
+pub open spec fn strings(ts: Seq<Vec<char>>) -> Seq<char> {
+    array(ts.map_values(|t: Vec<char>| string(t@)))
+}
+
+pub open spec fn hash_strings(hs: Seq<u64>) -> Seq<char> {
+    array(hs.map_values(|h: u64| string(decimal(h as nat))))
+}
+
+/// A kind as {"<kind>":{fields}}.
+pub open spec fn kind_json(k: Kind) -> Seq<char> {
+    match k {
+        Kind::Code { goal } => object(seq![field("code"@, object(seq![field("goal"@, string(goal@))]))]),
+        Kind::Map { goal } => object(seq![field("map"@, object(seq![field("goal"@, string(goal@))]))]),
+        Kind::Counterexample { goal } => object(seq![field("counterexample"@, object(seq![field("goal"@, object(seq![
+            field("search"@, decimal(goal.search as nat)), field("index"@, decimal(goal.index as nat))]))]))]),
+        Kind::Compaction { goal, out } => object(seq![field("compaction"@, object(seq![
+            field("goal"@, string(goal@)), field("out"@, hash_strings(out@))]))]),
+        Kind::Scrub { goal, path } => object(seq![field("scrub"@, object(seq![
+            field("goal"@, string(goal@)), field("path"@, string(path@))]))]),
+    }
+}
+
+/// A candidate in the spec's names.
+pub open spec fn candidate_json(c: Candidate) -> Seq<char> {
+    object(seq![
+        field("commit"@, string(c.commit@)),
+        field("base"@, string(c.base@)),
+        field("checks_pass"@, boolean(c.checks_pass)),
+        field("changed"@, strings(c.changed@)),
+        field("out"@, hash_strings(c.out@)),
+        field("intents"@, array(c.intents@.map_values(|e: (Cue, Intent)| array(seq![decimal(e.0 as nat), string(e.1@)])))),
+        field("test_passes"@, array(c.test_passes@.map_values(|e: (i64, bool)| array(seq![signed(e.0 as int), boolean(e.1)])))),
+        field("rank"@, signed(c.rank as int)),
+        field("diff"@, decimal(c.diff as nat)),
+    ])
+}
+
+/// A search in the spec's names; a result with no candidate is null.
+pub open spec fn json(s: Search) -> Seq<char> {
+    object(seq![
+        field("kind"@, kind_json(s.kind)),
+        field("base"@, string(s.base@)),
+        field("n"@, decimal(s.n as nat)),
+        field("checks"@, strings(s.checks@)),
+        field("limit"@, decimal(s.limit as nat)),
+        field("results"@, array(s.results@.map_values(|r: Option<Candidate>| match r {
+            Some(c) => candidate_json(c), None => seq!['n', 'u', 'l', 'l'] }))),
+    ])
+}
+
+/// Encoding and reading back preserve what the gates decide on; emission is
+/// what programs read. (intents 27, 28)
 pub trait Encoding {
     /// A search as words.
     fn encode(s: &Search) -> (r: Vec<u64>)
@@ -222,6 +338,10 @@ pub trait Encoding {
         ensures
             r matches Some(s) ==> encoded(s) == w@ && s.results.len() == s.n,
             (exists|s: Search| #[trigger] encoded(s) == w@ && s.results.len() == s.n) ==> r is Some;
+
+    /// A search as JSON, in the spec's names.
+    fn emit(s: &Search) -> (r: Vec<char>)
+        ensures r@ == json(*s);
 
     /// Two searches with the same words are the same search to the spec.
     proof fn injective(a: Search, b: Search)
@@ -271,3 +391,9 @@ pub trait Gates {
 }
 
 } // verus!
+
+/// The kernel implements every gate and the encoding; a build without either fails.
+#[allow(dead_code)]
+fn kernel<K: Gates + Encoding>() {}
+#[allow(dead_code)]
+fn kernel_is_complete() { kernel::<crate::exec::Kernel>(); }
