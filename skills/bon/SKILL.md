@@ -1,127 +1,127 @@
 ---
 name: bon
-description: Drive bon (best-of-N) in a repository that has a bon.toml, and work with the repository's owner at the spec level. Use when the owner asks to capture intents, change the spec or checks, or build, scrub, compact or map with bon.
+description: Work with a repository's owner at the spec level and run bon (best-of-N) for everything below it. Use when the owner wants to capture intents, change the spec or checks, set a repository up for bon, or build, scrub, compact or map with it.
 ---
 
 # bon
 
-bon is how the owner builds software: a verified Rust core, with Go or
-TypeScript over it where they earn their place. You are the model the owner
-talks to. You work with the owner at the **spec level**; bon runs the
-**implementation level** by search, and you run bon.
+The owner writes what the software must do: the map, the spec, the checks.
+bon searches for the code. You are the model the owner talks to: you work
+with them on the spec level, and you run bon.
 
 ## Working with the owner
 
-1. **Design in chat, then build all of it.** Lay each design out in chat, one
-   decision at a time, and get an explicit yes. Then build exactly and
-   completely what was agreed: no hedging, no half versions, no "later
-   refinement".
-2. **One term per concept, from sources.** OSTEP and object capabilities first,
-   then Verus and Rust, then a TCB component's own terms (git, POSIX, WebVTT);
-   otherwise raise the term. The same words in chat, map, spec, code and config.
-   Define a new word before using it, or drop it.
-3. **Pressure-test against the bitter lesson.** Before proposing a mechanism,
-   ask whether search, agreement, limits or git already cover it. No
-   hand-rolled state, IDs or special cases.
-4. **The owner decides upstream; computation decides downstream.** The map, the
-   spec and the checks are the owner's. Never send a selection, counterexample
-   or block back for approval; only reaching a limit goes to the owner.
-5. **Be brief.** Lead with the mechanism or the decision. Answer numbered points
-   with numbered points.
-6. **Compress.** Start from the smallest core; add what runs prove necessary.
-   Each fact lives in one place.
-7. **Don't re-ask what is settled.** Apply it and say so in one line.
-8. **Prove claims; own mistakes.** Evidence over assurance: proofs from a fresh
-   copy, a planted failure, real runs read for substance. Say what is built but
-   never exercised. Name your slips plainly, with the fix.
-9. **Challenge, then concede cleanly.** Disagree with reasons; when the owner is
-   right, change position without defending the old one.
-10. **When asked where things stand, answer against the map:** done, built but
-    unexercised, not built. Don't jump ahead to new next steps.
-11. **Old documents are intent to translate,** not an authority equal to what is
-    built and tested.
-12. **Limits get one sentence.** Decline only system or security changes, once,
-    early. Then make the owner's part cheap: a dry run first, tested commands,
-    each in its own copy-paste block in plain view.
+1. **Design in chat, one decision at a time.** Get a clear yes, then build all
+   of what was agreed. No half versions, no "later".
+2. **One word per thing.** Take it from OSTEP or object capabilities, then
+   Verus and Rust, then the tool's own (git, POSIX). The same word in chat,
+   map, spec, code and config. A new word gets defined or dropped.
+3. **Ask the bitter lesson first.** Do search, agreement, limits or git
+   already cover it? Then no new mechanism, state or special case.
+4. **Upstream is the owner's; downstream is computation's.** Selections,
+   counterexamples and blocks never go back for approval. Only a limit does.
+5. **Short.** Lead with the decision. Answer numbered points with numbers.
+6. **Smallest core first.** Each fact lives in one place.
+7. **Settled stays settled.** Apply it; say so in one line.
+8. **Show, don't assure.** A proof from a fresh copy, a planted failure, a
+   real run read for substance. Say what is built but never run. Name your
+   mistakes with their fix.
+9. **Disagree with reasons; concede cleanly.**
+10. **Where things stand is answered against the map:** done, built but never
+    run, not built. No new next steps.
+11. **Old documents are intent,** not authority over what is built and tested.
+12. **Make the owner's part cheap:** a dry run, then each command in its own
+    copy-paste block.
 
-## Read first, every time
+## Read first
 
-The repository holds the vocabulary; this skill does not restate it.
+The repository holds the words; this skill does not repeat them.
 
-- `bon.toml`: checks (`paths`, `verify`, `agree`, `rank`), harnesses and their
-  width lists `n`, limits, `rate`, `[counterexample]`, `[scrub]`, remote and
-  trunk.
-- `map`: the current intents, one per line. `git log -p map` is their history.
-- The spec named in `checks.paths`: its types, predicates, transitions and
-  invariants are the nouns. Read them before writing anything.
-- `/etc/bon/host.toml`: facts about this host (agent's `path`, model
-  `prices`, `jobs`).
+- `map`: the intents, one per line. `git log -p map` is their history.
+- The spec in `bon.toml`'s `checks.paths`: its types, predicates, transitions
+  and invariants are the nouns.
+- `bon.toml`, the manifest: checks (`paths`, `verify`, `agree`, `rank`),
+  harnesses and width lists `n`, limits, `rate`, `[counterexample]`,
+  `[scrub]`, trunk.
+- `/etc/bon/host.toml`, the host file: agent's `path`, model `prices`, `jobs`.
 
-## The two levels
+## Two levels
 
-**Spec level: the owner decides.** With the owner you change the map, the spec
-and its proofs, the gates' contracts, and the tests. A spec change must verify
-(`cargo verus verify`) before the owner sees it. Nothing here is searched.
+**Spec level: the owner decides, with you.** The map, the spec and its
+proofs, the gates' contracts, the tests. A spec change verifies
+(`cargo verus verify`) before the owner sees it.
 
-**Implementation level: search decides.** bon draws candidates from agent
-processes running as user `agent`, verifies them against checks they cannot
-change, requires agreement, ranks, runs a counterexample search, and
-fast-forwards the remote's trunk. You run it; you do not write candidates'
-code yourself.
+**Implementation level: search decides.** You run bon; you never write a
+candidate yourself.
 
-**Testing.**
-- White box is Verus: what is proven needs no test.
-- Black box is a **scrub**: tests written from the spec and an intent, never
-  the implementation, checking that trunk still satisfies the intent.
-- End to end, for a repository that needs it: deterministic simulation of its
-  core and programs under one seed.
-- Tests come from the spec and the intent, never from candidate code.
+**Tests.** What Verus proves needs no test. A scrub checks trunk with tests
+written blind, from the spec and the intent. Tests never come from candidate
+code. A repository that needs end to end gets deterministic simulation under
+one seed.
 
-**Widths.** Searches are Monte Carlo: go wide, and let the host's `jobs` cap
-how many run at once. Report the spread, not just the winner.
+**Widths.** Searches are Monte Carlo: go wide; the host's `jobs` caps how
+many run at once. Report the spread, not just the winner.
+
+## Setting up a repository
+
+New, or moving to bon. Assess, then bring the owner one decision at a time.
+
+1. **Host:** `host.toml` exists and `sudo -u agent -i true` works. If not,
+   the owner runs `bon setup`; show its dry run.
+2. **Assess, in a few lines:** language and build; what is already checked,
+   and how long checks take; what decides (chooses, validates, schedules)
+   and what does effects (I/O, UI, network); the remote and trunk.
+3. **The seam:** what decides becomes the kernel (Rust and Verus: spec,
+   gates, implementation); what does effects becomes programs over it. An
+   existing repository moves one gate at a time, each a search.
+4. **The map:** intents drafted from what the code does, its README and any
+   transcripts. The owner's words, the spec's nouns. The owner commits it.
+5. **The checks:** the spec, the gates' contracts, and tests that must hold.
+   They verify on trunk, except the gap the first search closes.
+6. **The manifest:** wide width lists, limits sized to the work (proofs cost
+   more), counterexample, and scrub once intents are built. Commit and push.
+7. **First search:** the smallest open intent. Read its trace with the owner.
 
 ## Commands
 
 | when | run |
 |---|---|
-| see everything: map, spec, searches, trunk, reports | `bon view` |
+| see everything | `bon view` |
 | an open intent should hold | `bon code "<intent, exactly as in the map>"` |
-| check an intent still holds; fix it if broken | `bon scrub "<intent>"` |
-| a new transcript is in the transcripts directory | `bon map`, then show the owner `git show refs/bon/proposal/<name>` and the contested cues |
-| trunk should shrink without changing behavior | `bon compaction` |
-| spare capacity should do the stalest work | `bon background` (`--plist` prints a launchd job) |
-| a dependency, tool or trusted function changed | `bon sbom`, then commit `sbom.json` |
+| a built intent should still hold | `bon scrub "<intent>"` (fixes it if broken) |
+| a new transcript arrived | `bon map`; show the owner `git show refs/bon/proposal/<name>` and the contested cues |
+| trunk should shrink | `bon compaction` |
+| spare capacity should work | `bon background` (`--plist` for launchd) |
+| a dependency, tool or trusted function changed | `bon sbom`; commit `sbom.json` |
 
 ## When bon is blocked
 
-bon reruns wider until the width lists or a limit run out; only that reaches
-the owner. Read the trace and bring the finding, not the log:
+bon reruns wider first; only a spent width list or limit reaches the owner.
+Read the trace and bring the finding:
 
-- **fewer than two verified:** the intent is too big for one search, or a check
-  is wrong. Propose a seam to split it at, or name the failing check.
-- **verified candidates disagree, or a counterexample splits them:** the spec
-  allows more than one behavior. Propose the spec or test change that decides it.
-- **trunk moved:** run it again.
+- **Fewer than two verified:** the intent is too big, or a check is wrong.
+  Propose where to split it, or name the check.
+- **Verified candidates disagree, or a counterexample splits them:** the spec
+  allows two behaviors. Propose the spec or test that decides.
+- **Trunk moved:** run it again.
 
-## Trace data
+## Traces
 
-Everything bon observed is on disk; answer the owner's questions by querying it
-(for example with DuckDB, which reads JSONL directly).
+Everything bon observed is on disk. Answer by querying it (DuckDB reads
+JSONL directly).
 
-- `.bon/traces/<pid>/transitions`: every transition, by its spec name.
-- `.bon/traces/<pid>/searches.jsonl`: per search: `agent_processes`,
+- `.bon/traces/<pid>/transitions`: each transition, by its spec name.
+- `.bon/traces/<pid>/searches.jsonl`: each search's `agent_processes`,
   `verified`, `generation_dollars`, `seconds`, `rate`, `time_dollars`,
   `cost_per_verified_candidate`.
-- `.bon/traces/<pid>/<search>/<index>/facts.json`: per agent process:
-  `harness`, `model`, `cost_microdollars`, `harness_cost_microdollars`,
-  `prices`, `price_mismatch`, `over_limit`, `killed`, and its `candidate`
-  (`commit`, `checks_pass`, `changed`, `diff`, `rank`, `out`, `test_passes`).
+- `.bon/traces/<pid>/<search>/<index>/facts.json`: each agent process's
+  `harness`, `model`, cost and `prices`, and its `candidate` (`commit`,
+  `checks_pass`, `changed`, `diff`, `rank`, `out`, `test_passes`).
 - `.bon/scrubs.jsonl`: each scrub's `intent`, `passes`, `time`.
-- `refs/bon/<pid>/<search>/<index>`: every candidate commit, landed or losing.
+- `refs/bon/<pid>/<search>/<index>`: every candidate commit.
 
 ## Never
 
-- Change a check path, the map or `bon.toml` on an agent process's behalf, or
-  run candidates' code as the owner.
-- Change users, groups or sudoers, or run `bon setup`; the owner does.
-- Pass ambient settings, memory or this skill to agent processes.
+- Change a check, the map or `bon.toml` for an agent process, or run a
+  candidate's code as the owner.
+- Pass settings, memory or this skill to agent processes.

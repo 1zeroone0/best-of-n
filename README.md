@@ -1,97 +1,70 @@
 # bon
 
-best-of-N: bon generates candidate changes with agent processes, verifies them
-against checks they cannot change, requires agreement, ranks them, runs a
-counterexample search, and fast-forwards trunk to the selected candidate.
+You write what the software must do. bon searches for the code.
 
-What bon must do is the [map](map). What it is, formally, is the
-[spec](src/spec.rs), which Verus proves. This file only says how to use it.
+Several agent processes each write a candidate. Checks they cannot change
+verify each one. Two must agree. The highest rank is selected, and trunk
+fast-forwards to it.
 
-## Install
+<img src="readme/search.svg" width="880" alt="One search: agent processes fan out from trunk, checks verify their candidates, two agree, the highest rank is selected, trunk fast-forwards. Code, counterexample, compaction, scrub and map searches run the same path toward different goals.">
+
+## Who decides
+
+You decide the [map](map) (one intent per line), the [spec](src/spec.rs) and
+the checks. Search decides the rest. Only a search that runs out of width or
+limit comes back to you.
+
+The kernel is the spec, the [gates](src/gates.rs) and their
+[implementation](src/exec.rs), proven by Verus. The terminal, `bon view` and
+the gates in WebAssembly are built from it.
+
+<img src="readme/levels.svg" width="880" alt="The owner's level above: map, spec, checks. Search below: searches, trunk, scrub and compaction in the background. The kernel at the center, its programs around it.">
+
+## Start
+
+macOS, Rust, [Verus](https://github.com/verus-lang/verus).
 
 ```sh
-cargo verus build          # verify, then build target/debug/bon
+cargo verus build
+su admin -c "target/debug/bon setup --for $USER"   # --dry-run shows each step
+sudo -u agent -i codex login                         # or claude
+bon code "<an intent, exactly as in the map>"
+bon view
 ```
 
-`bon setup`, run once as an administrator, creates user `agent` and group
-`bon`, lets you run commands as agent (never as root), and makes `/tmp/bon`,
-the directory holding the working directories: yours, mode 0711, so an agent
-process can reach only the working directory it was given.
-
-```sh
-su admin -c "/path/to/bon setup --for $USER"   # --dry-run prints each step
-sudo -u agent -i bash -c 'curl -fsSL https://claude.ai/install.sh | bash'
-sudo -u agent -i /Users/agent/.local/bin/claude   # log in
-sudo -u agent -i codex login
-```
-
-## Commands
-
-| command | does |
+| | |
 |---|---|
-| `bon` | every intent in the map: built or open |
-| `bon code "<intent>"` | search for code that makes the intent hold; fast-forward trunk |
-| `bon compaction` | search for code that removes or simplifies without changing behavior |
-| `bon map` | turn each new transcript into a proposal at `refs/bon/proposal/<name>` |
-| `bon sbom [--check]` | write `sbom.json`, or fail if it differs from this machine |
-| `bon setup [--dry-run] [--for <user>]` | create agent and group bon |
+| `bon` | the map: open, built, broken |
+| `bon code "<intent>"` | search for code that makes it hold |
+| `bon scrub "<intent>"` | check it still holds, with tests written blind |
+| `bon compaction` | remove code, behavior unchanged |
+| `bon map` | turn a transcript into a proposal |
+| `bon background` | the stalest scrub or compaction, on spare capacity |
+| `bon view` | everything, live, on localhost |
+| `bon sbom --check` | fail when what bon trusts changed |
 
-## Configuration
+## Host, repository, agent
 
-Two files, by what they are about.
+- **Host: `/etc/bon/host.toml`.** Where agent's tools are, model prices,
+  and `jobs`, how many agent processes run at once. `bon setup` writes it.
+- **Repository: `bon.toml`, the manifest.** The checks, the harnesses and
+  their widths (`n = [8, 12]`: 8 agent processes, 12 if blocked), limits,
+  and trunk. Trunk is the remote's; every fast-forward is pushed.
+- **agent: the POSIX user every agent process runs as.** Each works in
+  `/tmp/bon/<pid>.<search>.<index>/<repository>`. It can read the checks,
+  write its own working directory, and nothing else; it cannot list
+  `/tmp/bon` to find another's. bon confirms this before every search.
 
-**`/etc/bon/host.toml`, about this host.** `bon setup` writes it once and
-you edit it with sudo afterwards. It holds `path`, where agent's tools live,
-and `[prices]`: dollars per million tokens, keyed by canonical model id
-(`claude-haiku-5-5`, `gpt-6.1-sol`), with `input`, `cached_input`, `output`,
-`cache_write` and `cache_write_long`. Keep only the models in use. bon
-computes every cost from token counts and these prices, as an API-equivalent
-figure (on a subscription nothing is billed per token). Each trace records the
-prices it was costed at, so changing them never rewrites history. A run where
-Claude Code's own figure differs by more than 5% is flagged.
+## Where things are
 
-**`bon.toml`, about one repository,** committed at its root and read from
-trunk's head, never the working tree: the checks, harnesses and widths, limits,
-rate, and `remote` (default `origin`) and `trunk` (default `main`). The
-remote's trunk is the golden trunk: bon refuses to start unless local trunk
-matches it, and pushes every fast-forward to it (fast-forward only; refused if
-it moved). It may not contain `path` or `prices`.
-
-Each harness's `n` is a list of widths, one per attempt: `n = [2, 4, 8]` runs
-2 agent processes, and if that attempt is blocked (fewer than two verified, a
-disagreement, or a counterexample that splits them), 4, then 8. The longest
-list sets the number of attempts; the bon process's cost limit bounds them all.
-A counterexample's tests join the agree checks of the later attempts.
-
-## SBOM
-
-`sbom.json` is a [CycloneDX 1.5](https://cyclonedx.org) document listing
-everything bon depends on or trusts:
-
-| layer | from |
+| | |
 |---|---|
-| crates | `Cargo.lock`: name, version, SHA-256 checksum, purl |
-| toolchain | `rustc`, `verus` |
-| TCB tools | `git`, `sudo`, `tar`, macOS; `claude` and `codex` as agent runs them |
-| services | the Anthropic and OpenAI APIs the harnesses call |
-| trusted code | `src/trusted.rs` and `src/main.rs`, and every `external_body` function |
-
-It has no timestamp, so the same machine always produces the same file.
-`bon sbom` writes it; `bon sbom --check` exits non-zero when anything differs,
-so it belongs in a repository's `verify` checks. Regenerate and commit it when
-a dependency, tool or trusted function changes.
-
-## Trust
-
-The kernel is the spec, the gates and their implementation (`src/spec.rs`,
-`src/gates.rs`, `src/exec.rs`), proven by Verus. Programs (the terminal, the
-view, the gates in WebAssembly) are built from it. Everything else is trusted
-and listed in the SBOM: `src/trusted.rs` and the entry points (`main.rs`,
-`view.rs`, `wasm.rs`), plus git, sudo, tar, POSIX ACLs, the harnesses and the
-checks.
-
-Each agent process works in `/tmp/bon/<pid>.<search>.<index>/<repository>`.
-`/tmp/bon` is searchable but not listable by agent, so no agent process can
-find another's working directory by looking. Every agent process is the same
-POSIX user, so one that set out to (guessing a path, or `ps` and `lsof`)
-could still reach a sibling's.
+| [`map`](map) | what bon must do |
+| [`src/spec.rs`](src/spec.rs) | what bon is |
+| [`src/gates.rs`](src/gates.rs) | each decision's contract |
+| [`src/exec.rs`](src/exec.rs) | the decisions, proven |
+| [`src/trusted.rs`](src/trusted.rs) | what Verus doesn't check |
+| [`view/`](view/) | `bon view` |
+| [`skills/bon/`](skills/bon/SKILL.md) | how your model runs bon |
+| [`sbom.json`](sbom.json) | everything bon trusts |
+| `.bon/traces/` | every search, every candidate, every cost |
