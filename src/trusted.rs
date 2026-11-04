@@ -326,16 +326,25 @@ fn cost(h: &Harness, config: &Config, stdout: &str) -> Result<(u64, Option<u64>,
     }
 }
 
-fn prompt(kind: &Kind, config: &Config, map: &str) -> String {
+fn prompt(kind: &Kind, config: &Config, map: &str, target: Option<&Search>) -> String {
     let goal = match kind {
         Kind::Code { goal } => format!("Change the code so this intent holds:\n\n{}\n", goal.iter().collect::<String>()),
         Kind::Compaction { .. } => "Remove or simplify as much code as you can without changing behavior: \
              dead code, duplication, needless indirection. Fewer lines is better, as long as every check \
              still passes and the program prints the same.\n".to_string(),
-        Kind::Counterexample { .. } => format!(
-            "This code was written for an intent. Write one test, at {}, that passes on this code \
-             but would fail on a different reasonable reading of the intent. It runs with: {}\n",
-            config.counterexample.path, config.counterexample.test),
+        Kind::Counterexample { .. } => {
+            // The test comes from the spec and the intent; no candidate's code is shown.
+            let intent = match target.map(|t| &t.kind) {
+                Some(Kind::Code { goal }) => format!("this intent holds:\n\n{}\n", goal.iter().collect::<String>()),
+                _ => "behavior is unchanged from this code.\n".to_string(),
+            };
+            format!(
+                "Several implementations were written, separately, so that {intent}\n\
+                 You will not see them. From the spec, the checks and the intent alone, write one test, \
+                 at {}, that every correct implementation must pass, and that a plausible wrong reading \
+                 of the intent would fail. It runs with: {}\n",
+                config.counterexample.path, config.counterexample.test)
+        }
         Kind::Map { goal } => format!("Read the transcript at {} and append to `map` one line per need it voices: \
              the intent, a tab, then the transcript path, '#', and the cue's start time.\n", goal.iter().collect::<String>()),
     };
@@ -607,7 +616,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
     }
     let argv = harness_argv(h, config, &dir);
     let _ = std::fs::write(trace.join("argv"), argv.join(" "));
-    let text = prompt(kind, config, map);
+    let text = prompt(kind, config, map, target);
     let _ = std::fs::write(trace.join("prompt"), &text);
     let c = as_agent(config, &dir, &[], &argv);
     let (_, stdout, killed) = supervise(c, Some(text), Duration::from_secs(config.agent_process.time), &trace.join("harness"));

@@ -1154,7 +1154,7 @@ pub fn land(root: &str, goal: Option<Intent>) -> (r: Result<(), String>) {
                 index = index + 1;
             }
             Some(i) => {
-                let start = candidate(&s0, i).commit.clone();
+                let start = head.clone();
                 let ghost before1 = t.searches.value();
                 let s1 = search(&m, index + 1, a, Kind::Counterexample { goal: AgentProcess { search: index, index: i } }, start,
                                 &checks, l, limit, &mut spent, Some(&s0), &tests, Ghost(observed), Tracked(&mut t))?;

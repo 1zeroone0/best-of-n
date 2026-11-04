@@ -241,13 +241,11 @@ pub open spec fn proposed(s: Search, q: Cue, w: Intent) -> bool {
             w.len() < at(s, j).intents[q].len() || (w.len() == at(s, j).intents[q].len() && i <= j)
 }
 
-/// Where a search's candidates start: trunk's head, or for a counterexample
-/// search, the candidate it attacks, so its test is written against that code.
+/// Where a search's candidates start: always trunk's head. A counterexample's
+/// test is written from the spec and the intent, never from candidate code.
+/// (intent 22)
 pub open spec fn start(kind: Kind, searches: Seq<Search>, head: Commit) -> Commit {
-    match kind {
-        Kind::Counterexample { goal } => at(searches[goal.search], goal.index).commit,
-        _ => head,
-    }
+    head
 }
 
 /// The agent processes of search k: one per index.
