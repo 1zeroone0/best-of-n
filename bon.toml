@@ -1,0 +1,28 @@
+# bon's own bon.toml: bon builds bon.
+limit = 10.00
+rate = 150
+
+[agent_process]
+limit = 1.00
+time = 1800
+
+[checks]
+paths = ["src/spec.rs", "src/gates.rs"]
+verify = ["cargo verus verify", "cargo test --lib -q", "cargo run -q -- sbom --check"]
+agree = ["cargo run -q -- help"]
+rank = { code = "echo 0", compaction = "echo $((0 - $(cat src/*.rs | wc -l)))" }
+
+[[harness]]
+name = "claude"
+model = "claude-haiku-5-5"
+n = [2, 4]
+
+[[harness]]
+name = "codex"
+model = "gpt-6.1-sol"
+n = [1, 2]
+
+[counterexample]
+harness = [{ name = "codex", model = "gpt-6.1-sol", n = [1] }]
+path = "tests/counterexample.rs"
+test = "cargo test -q --test counterexample"
