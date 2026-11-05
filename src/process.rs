@@ -28,17 +28,17 @@ impl Commands for BonProcess {
 
     fn to_push(root: &str, compaction: bool, carried: trusted::Carried, spent: &mut u64,
                Tracked(t): Tracked<&mut crate::gates::Tokens>) -> (r: Result<(), String>) {
-        to_push(root, compaction, carried)
+        Err("stateful push is not implemented".into())
     }
 
     fn counterexample(root: &str, spent: &mut u64, Tracked(t): Tracked<&mut crate::gates::Tokens>)
         -> (r: Result<Option<trusted::Carried>, String>) {
-        counterexample(root)
+        Err("stateful counterexample search is not implemented".into())
     }
 
     fn queue(root: &str, transcript: Transcript, spent: &mut u64, Tracked(t): Tracked<&mut crate::gates::Tokens>)
         -> (r: Result<(Vec<(Cue, Intent)>, Vec<Cue>), String>) {
-        queue(root, transcript)
+        Err("stateful queue search is not implemented".into())
     }
 }
 
