@@ -477,21 +477,27 @@
     },
     {
       "group": "tcb",
-      "name": "rustc",
+      "name": "claude",
       "type": "application",
-      "version": "rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+      "version": "2.1.318 (Claude Code)"
     },
     {
       "group": "tcb",
-      "name": "verus",
+      "name": "codex",
       "type": "application",
-      "version": "0.2026.10.18.7d82994"
+      "version": "codex-cli 0.166.0"
     },
     {
       "group": "tcb",
       "name": "git",
       "type": "application",
       "version": "git version 2.50.1 (Apple Git-155)"
+    },
+    {
+      "group": "tcb",
+      "name": "rustc",
+      "type": "application",
+      "version": "rustc 1.99.1 (58cf8f9c3 2026-10-13)"
     },
     {
       "group": "tcb",
@@ -507,15 +513,9 @@
     },
     {
       "group": "tcb",
-      "name": "claude",
+      "name": "verus",
       "type": "application",
-      "version": "2.1.318 (Claude Code)"
-    },
-    {
-      "group": "tcb",
-      "name": "codex",
-      "type": "application",
-      "version": "codex-cli 0.166.0"
+      "version": "0.2026.10.18.7d82994"
     },
     {
       "group": "tcb",
@@ -527,10 +527,13 @@
   "metadata": {
     "component": {
       "name": "best-of-n",
-      "type": "application",
-      "version": "0.0.1"
+      "type": "application"
     },
     "properties": [
+      {
+        "name": "bon:version",
+        "value": "0.0.1"
+      },
       {
         "name": "bon:trusted-file",
         "value": "src/trusted.rs"
@@ -553,7 +556,7 @@
       },
       {
         "name": "bon:trusted-functions",
-        "value": "Manifest,manifest,limit,agent_process_limit,checks,width,attempts,Tests,no_tests,scrub_test_path,scrub_attempts,require,record_scrub,carry,head,on_trunk,intents,observe,run,fast_forward,record_fast_forward,Clock,clock,report,record_selected,record,agree_outputs"
+        "value": "Manifest,manifest,limit,agent_process_limit,checks,tests,harnesses,at,width,attempts,Carried,no_tests,bundle,written,carry,carry_one,head,on_trunk,trunk_accepted,observe,run,push,append,record_push,Clock,clock,report,record_selected,record_grant,record,agree_outputs"
       }
     ]
   },

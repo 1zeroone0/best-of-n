@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="880" height="500" viewBox="0 0 880 500" role="img" aria-labelledby="title desc">
   <title id="title">bon: transcript to transcript</title>
-  <desc id="desc">Eight beats within one business day. The owner commits intents after map search and decides immutable spec and checks. Computation uses code and counterexample search to land verified, agreed code on trunk. Between iterations, scrub tests written blind keep each intent true, and compaction yields less code with the same behavior. People try it and talk again.</desc>
+  <desc id="desc">Eight beats within one business day. A queue search turns talk into intents; the owner writes them into the spec and checks no search can change. Code and counterexample searches push verified, agreed code to trunk. Between iterations, counterexample searches on trunk look for what it gets wrong, with tests written blind, and compaction removes what is stale with the same behavior. People try it and talk again.</desc>
   <defs>
     <marker id="arrow-line" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
       <path d="M1 1 L9 5 L1 9" fill="none" stroke="var(--line)" stroke-width="1.5"/>
@@ -58,7 +58,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:var
   </g>
   <g class="scene s1">
     <text x="36" y="91" class="caption" style="fill:var(--yellow)">02</text>
-    <text x="91" y="91" class="caption">map search makes intents.</text>
+    <text x="91" y="91" class="caption">queue search makes intents.</text>
     <rect x="70" y="161" width="183" height="112" rx="12" fill="var(--surface)" stroke="var(--line)"/>
     <text x="91" y="188" class="mono body">transcript</text>
     <path d="M91 211 h134" stroke="var(--line)" stroke-width="3" stroke-linecap="round"/>
@@ -66,7 +66,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:var
     <path d="M91 229 h87.10000000000001" stroke="var(--line)" stroke-width="3" stroke-linecap="round"/>
     <path d="M272 216 L350 216" fill="none" stroke="var(--yellow)" stroke-width="1.5" marker-end="url(#arrow-yellow)"/>
     <circle cx="272" cy="216" r="3.5" fill="var(--yellow)" class="packet" style="--dx:78px;--dy:0px;animation:flow 3s ease infinite"/>
-    <text x="310" y="155" class="mono small" style="fill:var(--yellow)" text-anchor="middle">map search</text>
+    <text x="310" y="155" class="mono small" style="fill:var(--yellow)" text-anchor="middle">queue search</text>
     <g class="motion" style="animation:write 3s ease infinite">
       <rect x="374" y="157" width="262" height="49" rx="12" fill="var(--yellow-bg)" stroke="var(--yellow)"/>
       <text x="392" y="178" class="mono small" style="fill:var(--yellow)">intent</text>
@@ -102,7 +102,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:var
     <text x="36" y="91" class="caption" style="fill:var(--yellow)">04</text>
     <text x="91" y="91" class="caption">code search writes candidates.</text>
     <rect x="64" y="183" width="151" height="64" rx="12" fill="var(--yellow-bg)" stroke="var(--yellow)"/>
-    <text x="139" y="222" class="mono body" style="fill:var(--yellow)" text-anchor="middle">intent</text>
+    <text x="139" y="222" class="mono body" style="fill:var(--yellow)" text-anchor="middle">spec</text>
     <path d="M230 215 L293 215" fill="none" stroke="var(--yellow)" stroke-width="1.5" marker-end="url(#arrow-yellow)"/>
     <circle cx="230" cy="215" r="3.5" fill="var(--yellow)" class="packet" style="--dx:63px;--dy:0px;animation:flow 3s ease infinite"/>
     <text x="387" y="164" class="mono small muted" text-anchor="middle">agent process</text>
@@ -120,7 +120,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:var
       <rect x="661" y="185" width="140" height="64" rx="12" fill="var(--yellow-bg)" stroke="var(--yellow)"/>
       <text x="731" y="222" class="mono label" style="fill:var(--yellow)" text-anchor="middle">candidate</text>
     </g>
-    <text x="562" y="284" class="label muted" text-anchor="middle">One intent. Candidates in parallel.</text>
+    <text x="562" y="284" class="label muted" text-anchor="middle">Trunk's checks. Candidates in parallel.</text>
   </g>
   <g class="scene s4">
     <text x="36" y="91" class="caption" style="fill:var(--yellow)">05</text>
@@ -133,7 +133,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:var
     <rect x="482" y="173" width="246" height="88" rx="12" fill="var(--blue-bg)" stroke="var(--blue)"/>
     <text x="605" y="204" class="mono small" style="fill:var(--blue)" text-anchor="middle">selected</text>
     <text x="605" y="232" class="mono body heavy" style="fill:var(--blue)" text-anchor="middle">candidate</text>
-    <text x="440" y="286" class="label muted" text-anchor="middle">Try to break it before it lands.</text>
+    <text x="440" y="286" class="label muted" text-anchor="middle">Try to break it before it is pushed.</text>
   </g>
   <g class="scene s5">
     <text x="36" y="91" class="caption" style="fill:var(--indigo)">06</text>
@@ -155,12 +155,12 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:var
     <circle cx="218" cy="219" r="3.5" fill="var(--violet)" class="packet" style="--dx:50px;--dy:0px;animation:flow 3s ease infinite"/>
     <text x="292" y="166" class="eyebrow muted">BETWEEN ITERATIONS</text>
     <rect x="286" y="180" width="248" height="103" rx="12" fill="var(--violet-bg)" stroke="var(--violet)"/>
-    <text x="306" y="206" class="mono body heavy" style="fill:var(--violet)">scrub search</text>
+    <text x="306" y="206" class="mono body heavy" style="fill:var(--violet)">counterexample search</text>
     <text x="306" y="230" class="label">Tests written blind.</text>
-    <text x="306" y="250" class="small muted">Keep each intent true.</text>
+    <text x="306" y="250" class="small muted">Find what trunk gets wrong.</text>
     <rect x="550" y="180" width="268" height="103" rx="12" fill="var(--violet-bg)" stroke="var(--violet)"/>
     <text x="570" y="206" class="mono body heavy" style="fill:var(--violet)">compaction search</text>
-    <text x="570" y="232" class="label">Less code. Same behavior.</text>
+    <text x="570" y="232" class="label">Less that is stale. Same behavior.</text>
     <path d="M502 251 l4 4 8 -9" fill="none" stroke="var(--violet)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
     <g class="compact" style="transform-origin:570px 0;animation:compact 3s ease infinite">
       <path d="M570 248 h170 M570 258 h130 M570 268 h154" stroke="var(--violet)" stroke-width="3" stroke-linecap="round"/>
@@ -197,7 +197,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:var
   </g>
   <circle cx="173" cy="379" r="16" fill="var(--surface)" stroke="var(--line)"/>
   <text x="173" y="384" class="small heavy" style="fill:var(--muted)" text-anchor="middle">2</text>
-  <text x="173" y="414" class="mono small muted" text-anchor="middle">map</text>
+  <text x="173" y="414" class="mono small muted" text-anchor="middle">queue</text>
   <text x="173" y="431" class="mono small muted" text-anchor="middle">search</text>
   <g class="scene s1">
     <circle cx="173" cy="379" r="17" fill="var(--yellow)"/>
@@ -236,7 +236,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:var
   </g>
   <circle cx="693" cy="379" r="16" fill="var(--surface)" stroke="var(--line)"/>
   <text x="693" y="384" class="small heavy" style="fill:var(--muted)" text-anchor="middle">7</text>
-  <text x="693" y="414" class="mono small muted" text-anchor="middle">scrub</text>
+  <text x="693" y="414" class="mono small muted" text-anchor="middle">on trunk</text>
   <text x="693" y="431" class="mono small muted" text-anchor="middle">compaction</text>
   <g class="scene s6">
     <circle cx="693" cy="379" r="17" fill="var(--violet)"/>

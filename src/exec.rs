@@ -58,16 +58,14 @@ pub fn isolated(checks: Permission, transcripts: Permission, working_directory: 
 
 // ── verified ────────────────────────────────────────────
 
-/// No candidate may change p. (spec::protected)
-fn protected(checks: &Vec<Path>, p: &Path) -> (r: bool)
-    ensures r == spec::protected(paths(checks@), p@),
+/// p is under one of the paths. (spec::under)
+fn under(checks: &Vec<Path>, p: &Path) -> (r: bool)
+    ensures r == spec::under(paths(checks@), p@),
 {
-    if eq(p, &vec!['m', 'a', 'p']) || eq(p, &vec!['b', 'o', 'n', '.', 't', 'o', 'm', 'l']) { return true; }
     let mut i = 0;
     while i < checks.len()
         invariant
             0 <= i <= checks.len(),
-            p@ != spec::map_path() && p@ != spec::manifest_path(),
             forall|j: int| 0 <= j < i ==> !checks@[j]@.is_prefix_of(p@),
         decreases checks.len() - i,
     {
@@ -92,21 +90,48 @@ fn protected(checks: &Vec<Path>, p: &Path) -> (r: bool)
     false
 }
 
+/// bon's directory, as text.
+fn bon_path() -> (r: Vec<char>)
+    ensures r@ == spec::bon_path(),
+{
+    let r = vec!['.', 'b', 'o', 'n', '/'];
+    assert(r@ =~= spec::bon_path());
+    r
+}
+
+/// No search may change p, except a queue search the queue. (spec::protected)
+fn protected(checks: &Vec<Path>, p: &Path) -> (r: bool)
+    ensures r == spec::protected(paths(checks@), p@),
+{
+    is_prefix_of(&bon_path(), p) || under(checks, p)
+}
+
 /// p is within the authority of a search of this kind.
-fn authority_contains(kind: &Kind, checks: &Vec<Path>, p: &Path) -> (r: bool)
-    ensures r == spec::authority(kind@, paths(checks@)).contains(p@),
+fn authority_contains(kind: &Kind, checks: &Vec<Path>, tests: &Vec<Path>, p: &Path) -> (r: bool)
+    ensures r == spec::authority(kind@, paths(checks@), paths(tests@)).contains(p@),
 {
     match kind {
-        Kind::Map { .. } => eq(p, &vec!['m', 'a', 'p']),
-        Kind::Scrub { path, .. } => eq(p, path),
-        _ => !protected(checks, p),
+        Kind::Queue { .. } => {
+            let mut q = bon_path();
+            q.push('q'); q.push('u'); q.push('e'); q.push('u'); q.push('e');
+            q.push('.'); q.push('t'); q.push('s'); q.push('v');
+            assert(q@ =~= spec::queue_path());
+            eq(p, &q)
+        }
+        Kind::Code { .. } => !protected(checks, p) && !under(tests, p),
+        Kind::Compaction { .. } => !protected(checks, p),
+        Kind::Counterexample { .. } => !protected(checks, p) && under(tests, p),
     }
 }
 
 pub fn verified(s: &Search, c: &Candidate) -> (r: bool)
     ensures r == spec::verified(s@, c@),
 {
-    if !c.checks_pass { return false; }
+    if !c.accepted || !c.proved { return false; }
+    match &s.kind {
+        Kind::Compaction { .. } => { if !c.rejects_counterexamples { return false; } },
+        _ => {},
+    }
     let mut i = 0;
     while i < c.changed.len()
         invariant
@@ -114,13 +139,13 @@ pub fn verified(s: &Search, c: &Candidate) -> (r: bool)
             forall|j: int| 0 <= j < i ==> s@.authority.contains(#[trigger] c.changed@[j]@),
         decreases c.changed.len() - i,
     {
-        proof { assert(s@.authority == spec::authority(s.kind@, paths(s.checks@))); }
-        if !authority_contains(&s.kind, &s.checks, &c.changed[i]) {
+        proof { assert(s@.authority == spec::authority(s.kind@, paths(s.checks@), paths(s.tests@))); }
+        if !authority_contains(&s.kind, &s.checks, &s.tests, &c.changed[i]) {
             proof {
                 let p = c.changed@[i as int]@;
                 assert(c.changed@.map_values(|q: Path| q@)[i as int] == p);
                 assert(c@.changed.contains(p));
-                assert(s@.authority == spec::authority(s.kind@, paths(s.checks@)));
+                assert(s@.authority == spec::authority(s.kind@, paths(s.checks@), paths(s.tests@)));
                 assert(!s@.authority.contains(p));
             }
             return false;
@@ -197,7 +222,6 @@ pub fn selected(s: &Search) -> (r: Option<usize>)
     match &s.kind {
         Kind::Code { .. } => {},
         Kind::Compaction { .. } => {},
-        Kind::Scrub { .. } => {},
         _ => {
             assert(forall|i: int| !spec::agree(sv) ==> !spec::selected(sv, i));
             return None;
@@ -250,8 +274,8 @@ pub fn selected(s: &Search) -> (r: Option<usize>)
             forall|j: int| 0 <= j < s.n ==> v[j] == spec::verified_at(sv, j),
             forall|j: int| 0 <= j < i && v[j] ==> spec::at(sv, j).out == hashes(reference@),
             f < s.n, spec::verified_at(sv, f as int),
-            sv.kind is Code || sv.kind is Compaction || sv.kind is Scrub,
-            (sv.kind is Code || sv.kind is Scrub) ==> hashes(reference@) == spec::at(sv, f as int).out,
+            sv.kind is Code || sv.kind is Compaction,
+            sv.kind is Code ==> hashes(reference@) == spec::at(sv, f as int).out,
             sv.kind matches spec::Kind::Compaction { out, .. } ==> out == hashes(reference@),
         decreases v.len() - i,
     {
@@ -310,7 +334,7 @@ pub fn selected(s: &Search) -> (r: Option<usize>)
     Some(best)
 }
 
-// ── cleared ─────────────────────────────────────────────
+// ── not_found ─────────────────────────────────────────────
 
 /// The first pair with a key is unique.
 proof fn first_by_key_at<K, V>(s: Seq<(K, V)>, k: K, i: int)
@@ -337,27 +361,27 @@ proof fn first_by_key_absent<K, V>(s: Seq<(K, V)>, k: K)
     }
 }
 
-/// The spec key of a member: index j, or -1 for a compaction search's goal.
+/// The spec key of a member: index j, or -1 for trunk's head or a compaction's goal.
 pub open spec fn key(j: Option<usize>) -> int {
     match j { Some(j) => j as int, None => -1 }
 }
 
-/// Whether the test passes on member j, if the candidate reported it.
-pub fn test_passes_on(c: &Candidate, j: Option<usize>) -> (r: Option<bool>)
+/// Whether the test accepts member j, if the candidate reported it.
+pub fn accepts_on(c: &Candidate, j: Option<usize>) -> (r: Option<bool>)
     ensures
-        r matches Some(b) ==> c@.test_passes.contains_key(key(j)) && c@.test_passes[key(j)] == b,
-        r is None ==> !c@.test_passes.contains_key(key(j)),
+        r matches Some(b) ==> c@.accepts.contains_key(key(j)) && c@.accepts[key(j)] == b,
+        r is None ==> !c@.accepts.contains_key(key(j)),
 {
-    let ghost s = c.test_passes@.map_values(|e: (i64, bool)| (e.0 as int, e.1));
+    let ghost s = c.accepts@.map_values(|e: (i64, bool)| (e.0 as int, e.1));
     let mut i = 0;
-    while i < c.test_passes.len()
+    while i < c.accepts.len()
         invariant
-            0 <= i <= c.test_passes.len(),
-            s == c.test_passes@.map_values(|e: (i64, bool)| (e.0 as int, e.1)),
+            0 <= i <= c.accepts.len(),
+            s == c.accepts@.map_values(|e: (i64, bool)| (e.0 as int, e.1)),
             forall|m: int| 0 <= m < i ==> s[m].0 != key(j),
-        decreases c.test_passes.len() - i,
+        decreases c.accepts.len() - i,
     {
-        let (k, b) = c.test_passes[i];
+        let (k, b) = c.accepts[i];
         let hit = match j { Some(j) => (k as i128) == (j as i128), None => k == -1 };
         if hit {
             proof { first_by_key_at(s, key(j), i as int); }
@@ -376,12 +400,12 @@ fn splits(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
     ensures r == spec::splits(t@, c@),
 {
     let ghost tv = t@;
-    let ghost tp = c@.test_passes;
+    let ghost tp = c@.accepts;
     let mut value: Option<bool> = None;
     let ghost mut w: int = -1;
     match &t.kind {
         Kind::Compaction { .. } => {
-            match test_passes_on(c, None) {
+            match accepts_on(c, None) {
                 None => {
                     assert(spec::member(tv, -1));
                     return true;
@@ -394,7 +418,7 @@ fn splits(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
     let mut j = 0;
     while j < vt.len()
         invariant
-            tv == t@, tp == c@.test_passes, vt.len() == t.n, 0 <= j <= vt.len(),
+            tv == t@, tp == c@.accepts, vt.len() == t.n, 0 <= j <= vt.len(),
             forall|m: int| 0 <= m < t.n ==> vt[m] == spec::verified_at(tv, m),
             value is None ==> !(tv.kind is Compaction) && forall|m: int| 0 <= m < j ==> !vt[m],
             value matches Some(v) ==> forall|m: int| spec::member(tv, m) && m < j ==>
@@ -403,7 +427,7 @@ fn splits(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
         decreases vt.len() - j,
     {
         if vt[j] {
-            match test_passes_on(c, Some(j)) {
+            match accepts_on(c, Some(j)) {
                 None => {
                     assert(spec::member(tv, j as int));
                     return true;
@@ -435,9 +459,9 @@ fn splits(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
     false
 }
 
-pub fn cleared(x: &Search, t: &Search) -> (r: bool)
+pub fn not_found(x: &Search, t: &Search) -> (r: bool)
     requires x.results.len() == x.n, t.results.len() == t.n,
-    ensures r == spec::cleared(x@, t@),
+    ensures r == spec::not_found(x@, t@),
 {
     let ghost xv = x@;
     assert(spec::complete(xv)) by {
@@ -471,6 +495,97 @@ pub fn cleared(x: &Search, t: &Search) -> (r: bool)
         }
     }
     true
+}
+
+// ── found on trunk ──────────────────────────────────────
+
+/// Whether verified test i rejects trunk's head.
+fn rejects_trunk(x: &Search, vx: &Vec<bool>, i: usize) -> (r: bool)
+    requires x.results.len() == x.n, vx.len() == x.n, i < x.n,
+        forall|m: int| 0 <= m < x.n ==> vx[m] == spec::verified_at(x@, m),
+    ensures r == spec::rejects_trunk(x@, i as int),
+{
+    if !vx[i] { return false; }
+    let c = candidate(x, i);
+    match accepts_on(c, None) { Some(b) => !b, None => false }
+}
+
+#[verifier::rlimit(400)]
+pub fn found_on_trunk(x: &Search) -> (r: Option<usize>)
+    requires x.results.len() == x.n,
+    ensures
+        r matches Some(i) ==> spec::found_on_trunk(x@, i as int),
+        r is None ==> forall|i: int| !spec::found_on_trunk(x@, i),
+{
+    let ghost xv = x@;
+    assert(spec::complete(xv)) by {
+        assert forall|i: int| 0 <= i < x.n implies xv.results.contains_key(i) by {}
+    }
+    let vx = verified_each(x);
+    // The best test that rejects trunk, and how many do.
+    let mut best: Option<usize> = None;
+    let mut count: usize = 0;
+    let ghost mut other: int = -1;
+    let mut i = 0;
+    while i < x.n
+        invariant
+            xv == x@, vx.len() == x.n, x.results.len() == x.n, 0 <= i <= x.n, count <= i,
+            forall|m: int| 0 <= m < x.n ==> vx[m] == spec::verified_at(xv, m),
+            spec::complete(xv),
+            best is None ==> count == 0 && forall|m: int| 0 <= m < i ==> !spec::rejects_trunk(xv, m),
+            best matches Some(b) ==> b < i && count >= 1 && spec::rejects_trunk(xv, b as int)
+                && forall|m: int| 0 <= m < i && m != b && spec::rejects_trunk(xv, m) ==>
+                    spec::beats(spec::at(xv, b as int), b as int, spec::at(xv, m), m),
+            count >= 2 ==> (best matches Some(b) && 0 <= other < i && other != b && spec::rejects_trunk(xv, other)),
+            count == 1 ==> (best matches Some(b) && forall|m: int| 0 <= m < i && m != b ==> !spec::rejects_trunk(xv, m)),
+        decreases x.n - i,
+    {
+        if rejects_trunk(x, &vx, i) {
+            match best {
+                None => { best = Some(i); count = 1; }
+                Some(b) => {
+                    let c = candidate(x, i);
+                    let d = candidate(x, b);
+                    if c.rank > d.rank || (c.rank == d.rank && c.diff < d.diff) {
+                        proof { other = b as int; }
+                        best = Some(i);
+                    } else {
+                        proof { other = i as int; }
+                    }
+                    if count < 2 { count = count + 1; }
+                }
+            }
+        }
+        i += 1;
+    }
+    match best {
+        Some(b) => {
+            if count >= 2 {
+                assert(spec::found_on_trunk(xv, b as int)) by {
+                    assert(other != b as int && spec::rejects_trunk(xv, other));
+                    assert forall|m: int| m != b as int && spec::rejects_trunk(xv, m) implies
+                        spec::beats(spec::at(xv, b as int), b as int, spec::at(xv, m), m) by {
+                        assert(0 <= m < x.n);
+                    }
+                }
+                Some(b)
+            } else {
+                assert forall|k: int| !spec::found_on_trunk(xv, k) by {
+                    if spec::found_on_trunk(xv, k) {
+                        let j = choose|j: int| j != k && spec::rejects_trunk(xv, j);
+                        assert(0 <= k < x.n && 0 <= j < x.n);
+                    }
+                }
+                None
+            }
+        }
+        None => {
+            assert forall|k: int| !spec::found_on_trunk(xv, k) by {
+                if spec::found_on_trunk(xv, k) { assert(0 <= k < x.n); }
+            }
+            None
+        }
+    }
 }
 
 // ── proposed, contested ─────────────────────────────────
@@ -666,14 +781,14 @@ pub fn proposed(s: &Search) -> (r: Vec<(Cue, Intent)>)
     hide(spec::agreed);
     let ghost sv = s@;
     let mut r: Vec<(Cue, Intent)> = Vec::new();
-    match &s.kind { Kind::Map { .. } => {}, _ => { proof { reveal(spec::proposed); } return r; } }
+    match &s.kind { Kind::Queue { .. } => {}, _ => { proof { reveal(spec::proposed); } return r; } }
     proof { complete(s); }
     let v = verified_each(s);
     let qs = cues(s, &v);
     let mut k = 0;
     while k < qs.len()
         invariant
-            sv == s@, sv.kind is Map, spec::complete(sv), s.results.len() == s.n, v.len() == s.n, 0 <= k <= qs.len(),
+            sv == s@, sv.kind is Queue, spec::complete(sv), s.results.len() == s.n, v.len() == s.n, 0 <= k <= qs.len(),
             forall|j: int| 0 <= j < s.n ==> v[j] == spec::verified_at(sv, j),
             forall|x: int| 0 <= x < r.len() ==> #[trigger] spec::proposed(sv, r[x].0 as nat, r[x].1@),
             forall|x: int| 0 <= x < k && #[trigger] spec::agreed(sv, qs@[x] as nat) ==>
@@ -789,38 +904,8 @@ pub fn eq(a: &Vec<char>, b: &Vec<char>) -> (r: bool)
     a.len() == b.len() && is_prefix_of(a, b)
 }
 
-/// The spec's map: the set of its intents.
-pub open spec fn intent_set(s: Seq<Intent>) -> Set<spec::Intent> {
-    s.map_values(|i: Intent| i@).to_set()
-}
-
-pub fn contains(xs: &Vec<Intent>, x: &Intent) -> (r: bool)
-    ensures r == intent_set(xs@).contains(x@),
-{
-    let mut i = 0;
-    while i < xs.len()
-        invariant 0 <= i <= xs.len(), forall|j: int| 0 <= j < i ==> xs@[j]@ != x@,
-        decreases xs.len() - i,
-    {
-        if eq(&xs[i], x) {
-            proof { assert(xs@.map_values(|i: Intent| i@)[i as int] == x@); }
-            return true;
-        }
-        i += 1;
-    }
-    proof {
-        if intent_set(xs@).contains(x@) {
-            let m = xs@.map_values(|i: Intent| i@);
-            assert(m.contains(x@));
-            let j = choose|j: int| 0 <= j < m.len() && m[j] == x@;
-            assert(xs@[j]@ == x@);
-        }
-    }
-    false
-}
-
 /// The kernel: the spec, the gates and their implementation. The bon process
-/// and every program call it; it is compiled into each. (intent 27)
+/// and every program call it; it is compiled into each.
 pub struct Kernel;
 
 impl Gates for Kernel {
@@ -829,7 +914,8 @@ impl Gates for Kernel {
     }
     fn verified(s: &Search, c: &Candidate) -> (r: bool) { verified(s, c) }
     fn selected(s: &Search) -> (r: Option<usize>) { selected(s) }
-    fn cleared(x: &Search, t: &Search) -> (r: bool) { cleared(x, t) }
+    fn not_found(x: &Search, t: &Search) -> (r: bool) { not_found(x, t) }
+    fn found_on_trunk(x: &Search) -> (r: Option<usize>) { found_on_trunk(x) }
     fn proposed(s: &Search) -> (r: Vec<(Cue, Intent)>) { proposed(s) }
     fn contested(s: &Search) -> (r: Vec<Cue>) { contested(s) }
 }

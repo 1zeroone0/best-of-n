@@ -1,648 +1,538 @@
-import type { Candidate as KernelCandidate, Search as KernelSearch } from './kernel';
-type Tone = 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'indigo' | 'violet' | 'neutral';
-interface MapIntent {
-    intent: string;
-    source?: string;
-    status?: string;
-    landed?: {
-        commit?: string;
-        time?: number;
-        pushed?: boolean;
-    } | null;
-    scrub?: {
-        time?: number;
-        passes?: boolean;
-    } | null;
-}
-interface Candidate {
-    verified?: boolean;
-    index: number;
-    facts?: {
-        harness?: string;
-        model?: string;
-        cost_microdollars?: number;
-        killed?: boolean;
-        over_limit?: boolean;
-        price_mismatch?: boolean;
-        prices?: unknown;
-        candidate?: Partial<KernelCandidate>;
-    };
-    logs?: string[];
-}
-interface Summary {
-    kind?: string;
-    goal?: string;
-    time?: number;
-    agent_processes?: number;
-    verified?: number;
-    generation_dollars?: number;
-    seconds?: number;
-    rate?: number;
-    time_dollars?: number;
-    cost_per_verified_candidate?: number | null;
-}
-interface Search {
-    search: number;
-    kernel?: KernelSearch | null;
-    summary?: Summary | null;
-    selected?: number | null;
-    candidates?: Candidate[];
-}
-interface Process {
-    pid: number;
-    running?: boolean;
-    modified?: number;
-    transitions?: string[];
-    searches?: Search[];
-    fast_forwards?: { commit?: string; searches?: number; generation_dollars?: number; time_dollars?: number; cost?: number; derived?: boolean }[];
-}
-interface SpecItem {
-    kind: string;
-    name: string;
-    doc?: string;
-    reads?: string[];
-    updates?: string[];
-}
-interface SpecField {
-    name: string;
-    type?: string;
-    sharding?: string;
-    doc?: string;
-}
-interface Trunk {
-    commit: string;
-    author?: string;
-    time?: number;
-    subject?: string;
-    trace?: string;
-    pushed?: boolean;
-    by_agent?: boolean;
-}
-interface Harness {
-    model?: string;
-    name?: string;
-    n?: number[];
-}
-interface State {
-    repo?: {
-        name?: string;
-        head?: string;
-        remote_head?: string;
-        remote?: string;
-        trunk?: string;
-        pushed?: boolean;
-        now?: number;
-    };
-    map?: MapIntent[];
-    spec?: {
-        path?: string;
-        fields?: SpecField[];
-        items?: SpecItem[];
-    } | null;
-    processes?: Process[];
-    trunk?: Trunk[];
-    host?: {
-        jobs?: number;
-        path?: string[];
-        prices?: unknown;
-    } | null;
-    manifest?: {
-        harness?: Harness[];
-        counterexample?: {
-            harness?: Harness[];
-        };
-        scrub?: {
-            harness?: Harness[];
-        };
-        rate?: number;
-        [key: string]: unknown;
-    } | null;
-}
-const app = document.querySelector<HTMLDivElement>('#app')!;
-let data: State = {};
-let ready = false;
-let connection = true;
-let pending = false;
-let lastPayload = '';
-let filter: number | null = null;
-let visibleCount = 12;
-const opened = new Set<string>();
-const openCandidates = new Set<string>();
-const e = (v: unknown): string => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
-const nf = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1 });
-const n = (v?: number): string => v == null ? '—' : nf.format(v);
-const money = (v?: number | null): string => v == null || !Number.isFinite(v) ? '—' : '$' + v.toFixed(v !== 0 && v < .01 ? 4 : 2);
-const short = (v?: string): string => v ? v.slice(0, 8) : '—';
-const intentArg = (value: string): string => '"' + value.replace(/["\\$`]/g, '\\$&') + '"';
-const decisions = new WeakMap<Search, { selected: number | null; cleared?: boolean; error?: string }>();
-// bon view reports the kernel's verdict, or the trace's where it has no kernel words.
-const verified = (c: Candidate): boolean => c.verified === true;
-// This program supplies bytes and renders answers; the compiled kernel decides.
-const gates = WebAssembly.instantiateStreaming(fetch('/gates.wasm'));
-async function derive(state: State): Promise<void> {
-    const { instance } = await gates;
-    const exports = instance.exports;
-    const memory = exports.memory as WebAssembly.Memory;
-    const call = (name: string, ...args: number[]): number => (exports[name] as (...args: number[]) => number)(...args);
-    for (const p of state.processes ?? []) {
-        const snapshots = new Map<number, ArrayBuffer>();
-        for (const s of p.searches ?? []) {
-            if (!s.kernel) continue;
-            const response = await fetch(`/api/words?path=${p.pid}%2F${s.search}`, { cache: 'no-store' });
-            if (!response.ok) throw new Error('Kernel snapshot unavailable');
-            const bytes = await response.arrayBuffer();
-            if (bytes.byteLength % 8) throw new Error('Invalid kernel snapshot');
-            snapshots.set(s.search, bytes);
-            const len = bytes.byteLength / 8;
-            const ptr = call('alloc', len);
-            try {
-                new Uint8Array(memory.buffer, ptr, bytes.byteLength).set(new Uint8Array(bytes));
-                const selected = call('selected', ptr, len);
-                if (selected < -1) {
-                    decisions.set(s, { selected: null, error: 'Kernel rejected the recorded search.' });
-                    continue;
-                }
-                const decision: { selected: number | null; cleared?: boolean } = { selected: selected < 0 ? null : selected };
-                if ('counterexample' in s.kernel.kind) {
-                    const target = snapshots.get(s.kernel.kind.counterexample.goal.search);
-                    if (target) {
-                        const tlen = target.byteLength / 8;
-                        const tptr = call('alloc', tlen);
-                        try {
-                            new Uint8Array(memory.buffer, tptr, target.byteLength).set(new Uint8Array(target));
-                            const cleared = call('cleared', ptr, len, tptr, tlen);
-                            if (cleared < 0) throw new Error('Invalid counterexample search');
-                            decision.cleared = cleared === 1;
-                        } finally { call('dealloc', tptr, tlen); }
-                    }
-                }
-                decisions.set(s, decision);
-            } finally { call('dealloc', ptr, len); }
-        }
-    }
-}
-const keyOf = (p: Process, s: Search): string => `${p.pid}/${s.search}`;
-function relative(time?: number): string {
-    if (!time) return 'not recorded';
-    const diff = Math.max(0, (data.repo?.now ?? Date.now() / 1000) - time);
-    return diff < 60 ? 'just now' : diff < 3600 ? `${Math.floor(diff / 60)}m ago` : diff < 86400 ? `${Math.floor(diff / 3600)}h ago` : `${Math.floor(diff / 86400)}d ago`;
-}
-function timestamp(time?: number): string {
-    return `<time ${time ? `datetime="${new Date(time * 1000).toISOString()}" title="${e(new Date(time * 1000).toLocaleString())}"` : ''}>${relative(time)}</time>`;
-}
-function icon(name: string, size = 16): string {
-    const paths: Record<string, string> = {
-        branch: '<circle cx="6" cy="4" r="2"/><circle cx="6" cy="20" r="2"/><circle cx="18" cy="5" r="2"/><path d="M6 6v12m0-3c0-7 12-2 12-8"/>',
-        search: '<circle cx="6" cy="5" r="2"/><circle cx="18" cy="12" r="2"/><circle cx="6" cy="19" r="2"/><path d="M6 7v10m2-12h3a7 7 0 0 1 7 5M8 19h3a7 7 0 0 0 7-5"/>',
-        arrow: '<path d="M5 12h14m-5-5 5 5-5 5"/>',
-        chevron: '<path d="m9 5 7 7-7 7"/>',
-        copy: '<rect x="8" y="8" width="12" height="13" rx="2"/><path d="M15 8V3H3v13h5"/>'
-    };
-    return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] ?? paths.search}</svg>`;
-}
-const aliases: Record<string, string> = { granted: 'grant', returned: 'wait', 'agent processes returned': 'wait', retained: 'retain', landed: 'fast_forward', built: 'map', open: 'map', broken: 'broken', candidate: 'Candidate', candidates: 'Candidate', intent: 'Intent', selected: 'selected', verified: 'verified', agreed: 'agreed', checks_pass: 'verified' };
-function word(name: string, label = name): string {
-    return `<span class="word" tabindex="0" data-word="${e(name)}" aria-describedby="spec-tip">${e(label)}</span>`;
-}
-function pill(label: string, tone: Tone): string { return `<span class="pill ${tone}"><i></i>${word(label)}</span>`; }
-function command(value: string): string {
-    return `<button class="command" data-copy="${e(value)}" title="Copy command"><code>${e(value)}</code>${icon('copy', 14)}<span class="sr-only">Copy command</span></button>`;
-}
-interface Entry {
-    key: string; p: Process; s: Search; trace: string[]; children: Entry[]; parent?: Entry;
-    landed?: Trunk; selected?: number; count: number; v: number; cost?: number;
-    outcome: string; tone: Tone; reason: string; time: number;
-}
-interface Line { key: string; entry?: Entry; commit?: Trunk; time: number }
-let entries = new Map<string, Entry>();
-let lines: Line[] = [];
-let totals = { count: 0, verified: 0, cost: 0 };
-let revision = 0;
-let projected = -1;
-function project(): void {
-    entries = new Map();
-    totals = { count: 0, verified: 0, cost: 0 };
-    const commitByHash = new Map((data.trunk ?? []).map(t => [t.commit, t]));
-    const matched = new Set<string>();
-    for (const p of data.processes ?? []) {
-        const segments: string[][] = [];
-        for (const t of p.transitions ?? []) {
-            if (/^grant(?: |$)/.test(t)) segments.push([]);
-            segments.at(-1)?.push(t);
-        }
-        for (const [i, s] of (p.searches ?? []).entries()) {
-            const cs = s.candidates ?? [];
-            const trace = segments.length === p.searches?.length ? segments[i] ?? [] : [];
-            const v = cs.filter(verified).length;
-            const generation = s.summary?.generation_dollars ?? (cs.some(c => c.facts?.cost_microdollars != null) ? cs.reduce((a, c) => a + (c.facts?.cost_microdollars ?? 0) / 1e6, 0) : undefined);
-            const cost = generation == null && s.summary?.time_dollars == null ? undefined : (generation ?? 0) + (s.summary?.time_dollars ?? 0);
-            const exact = (data.trunk ?? []).find(t => t.trace?.replace(/^\.bon\/traces\//, '').startsWith(`${p.pid}/${s.search}/`));
-            // The commit is also useful when older traces have no selected index.
-            const landed = exact ?? cs.map(c => commitByHash.get(c.facts?.candidate?.commit ?? '')).find(Boolean);
-            if (landed) matched.add(landed.commit);
-            const entry: Entry = { key: keyOf(p, s), p, s, trace, children: [], landed, selected: decisions.has(s) ? decisions.get(s)?.selected ?? undefined : s.selected ?? undefined, count: cs.length, v, cost, outcome: 'returned', tone: 'neutral', reason: 'Agent processes returned. No further transition recorded.', time: s.summary?.time ?? p.modified ?? 0 };
-            entries.set(entry.key, entry);
-            totals.count += cs.length; totals.verified += v; totals.cost += cost ?? 0;
-        }
-    }
-    for (const entry of entries.values()) {
-        if (entry.s.summary?.kind === 'counterexample') {
-            const target = /^search (\d+) candidate/.exec(entry.s.summary.goal ?? '')?.[1];
-            const parent = entries.get(`${entry.p.pid}/${target}`);
-            if (parent && parent !== entry) { parent.children.push(entry); entry.parent = parent; }
-        }
-    }
-    for (const entry of entries.values()) resolve(entry);
-    lines = [...entries.values()].filter(en => !en.parent).map(en => ({ key: en.key, entry: en, time: Math.max(en.time, ...en.children.map(c => c.time)) }));
-    for (const commit of data.trunk ?? []) {
-        if (!commit.by_agent || !matched.has(commit.commit)) lines.push({ key: `commit-${commit.commit}`, commit, time: commit.time ?? 0 });
-    }
-    lines.sort((a, b) => b.time - a.time || (b.entry?.s.search ?? -1) - (a.entry?.s.search ?? -1));
-    projected = revision;
-}
-function resolve(en: Entry): void {
-    const { s, p, trace } = en;
-    const terminal = trace.find(t => /^(blocked|broken)/.test(t));
-    if (terminal) {
-        en.outcome = terminal.startsWith('broken') ? 'broken' : 'blocked';
-        en.tone = en.outcome === 'broken' ? 'red' : 'yellow';
-        en.reason = terminal.replace(/^(blocked|broken):?\s*/, '') + '. ' + (en.outcome === 'broken' ? 'bon starts a code search carrying the test.' : 'bon reruns wider, as the width list allows.');
-    } else if (s.summary?.kind === 'counterexample') {
-        // The kernel re-derives it when the trace has its words; otherwise a fast_forward after it means it cleared.
-        const cleared = decisions.get(s)?.cleared ?? (trace.some(t => /^fast_forward/.test(t)) ? true : undefined);
-        const split = cleared === false;
-        const complete = cleared != null;
-        en.outcome = complete ? split ? 'split' : 'cleared' : p.running ? 'running' : 'returned';
-        en.tone = split ? 'red' : complete ? 'green' : 'orange';
-        en.reason = complete ? split ? 'A verified counterexample test splits the agreed candidates.' : 'No verified counterexample test splits the agreed candidates.' : `${en.count} agent processes returned; ${en.v} candidates verified.`;
-    } else if (trace.some(t => /^retain/.test(t)) || en.landed?.subject?.startsWith('scrub:')) {
-        en.outcome = 'retained'; en.tone = 'violet'; en.reason = 'The agreed scrub test passes on trunk and is retained.';
-    } else if (en.landed || trace.some(t => /^fast_forward/.test(t)) || en.children.some(c => c.trace.some(t => /^fast_forward/.test(t)))) {
-        en.outcome = 'fast_forward'; en.tone = 'indigo';
-        const ff = p.fast_forwards?.at(-1);
-        en.reason = 'Trunk fast-forwarded to the selected candidate.' + (ff?.cost != null ? ` It cost ${money(ff.cost)} to reach: ${ff.searches ?? '?'} searches, generation ${money(ff.generation_dollars ?? 0)} + time ${money(ff.time_dollars ?? 0)}.` : '');
-    } else if (p.running && s === p.searches?.at(-1)) {
-        en.outcome = 'running'; en.tone = 'orange'; en.reason = `${en.count} agent processes returned; ${en.v} candidates verified.`;
-    }
-    const decision = decisions.get(s);
-    if (decision?.error) {
-        en.tone = 'red'; en.reason = decision.error;
-    } else if (decision && decision.selected !== (s.selected ?? null)) {
-        en.tone = 'red'; en.reason = `Kernel selected ${decision.selected ?? 'none'}; trace selected ${s.selected ?? 'none'}.`;
-    }
+// bon view draws the projection bon prints (src/view.rs): what is running,
+// what was pushed, the queue, and what it cost. It decides nothing; the one
+// thing it computes is each selection again, with the kernel's gates in
+// WebAssembly, to mark any disagreement with the trace.
+//
+// Color is one scale, red to violet: red is early, unstable, or needs you;
+// violet is settled. A search's steps run the same scale in order.
 
+interface Candidate {
+    index: number; harness?: string; model?: string; generation?: number; commit?: string;
+    accepted: boolean; verified: boolean; rank?: number; diff?: number; added?: number; removed?: number; flags?: string[]; logs?: string[];
 }
-interface Stage { label: string; value: string; tone: Tone; done: boolean }
-function stages(en: Entry): Stage[] {
-    const { s } = en;
-    const cs = s.candidates ?? [];
-    const v = cs.filter(verified);
-    const decision = decisions.get(s);
-    const agreed = decision ? decision.selected != null : s.selected != null;
-    const differs = decision != null && !agreed && v.length >= 2;
-    const ce = en.children.at(-1);
-    const counter = s.summary?.kind === 'counterexample';
-    const ceOutcome = counter ? en.outcome : ce?.outcome ?? (en.outcome === 'fast_forward' ? 'cleared' : undefined);
-    const end = ['fast_forward', 'retained', 'blocked', 'broken'].includes(en.outcome);
-    const width = Math.max(s.summary?.agent_processes ?? 0, en.count);
-    return [
-        { label: 'granted', value: width ? n(width) : '—', tone: 'orange', done: width > 0 || en.trace.some(t => t.startsWith('grant')) },
-        { label: 'agent processes returned', value: width ? `${en.count} / ${width}` : n(en.count), tone: en.count >= width && width > 0 ? 'yellow' : 'orange', done: en.count > 0 },
-        { label: 'verified', value: n(en.v), tone: en.v ? 'green' : 'red', done: en.count > 0 },
-        { label: differs ? 'not agreed' : 'agreed', value: agreed ? n(en.v) : differs ? 'different output' : en.v < 2 && en.count ? 'fewer than 2' : 'not recorded', tone: agreed ? 'green' : differs ? 'red' : 'yellow', done: agreed || differs },
-        { label: 'selected', value: en.selected == null ? '—' : `#${en.selected}`, tone: 'blue', done: en.selected != null },
-        { label: 'counterexample', value: ceOutcome ?? '—', tone: ceOutcome === 'split' ? 'red' : ceOutcome === 'cleared' ? 'green' : 'yellow', done: ceOutcome != null },
-        { label: en.outcome === 'retained' ? 'retain' : end ? en.outcome : 'fast_forward / retain / blocked', value: end ? '✓' : '—', tone: end ? en.tone : 'neutral', done: end }
+interface Params { goal: { trunk?: string; candidate?: string; transcript?: string }; base: string; n?: number; limit?: number | null; authority: string }
+interface Search {
+    params: Params; generation?: number | null; time_cost?: number | null; rate?: number | null; background?: boolean;
+    search: number; kind: string; goal?: string; width?: number; started?: number;
+    returned: number; accepted: number; verified: number; selected?: number | null; recorded_selected?: number | null;
+    kernel: 'derived' | 'unreadable' | 'none'; blocked?: string | null; cost?: number; seconds?: number; time?: number;
+    candidates: Candidate[];
+}
+interface About { goal: string; from: string; subject: string }
+interface Process {
+    pid: number; running: boolean; kind: string; goal: string; title: string; about: About; outcome: string; sentence: string;
+    cost: number; generation: number; time_cost: number; push?: { cost?: number; searches?: number; commit?: string } | null; limit?: number | null;
+    time: number; transitions: string[]; searches: Search[];
+}
+interface Group {
+    kind: string; title: string; about: About; outcome: string; sentence: string; cost: number; generation: number; time_cost: number;
+    push?: { cost?: number; to_selection?: number; counterexample?: number; commit?: string | null; processes?: number } | null; time: number; running: boolean; processes: Process[];
+}
+interface SpecItem { kind: string; name: string; doc?: string }
+interface State {
+    configured: boolean;
+    repo: { name?: string; head?: string; trunk?: string; remote?: string; remote_head?: string; remote_time?: number | null; subject?: string; last_push?: { commit?: string; time?: number } | null; since_push?: { commits: number; authors: string[] } | null; pushed?: boolean; now: number };
+    totals: { cost: number; generation: number; time_cost: number; pushed: number; not_pushed: number; in_flight: number; rate?: number | null; per_verified_candidate?: number | null; per_push?: number | null; pushes: number; verified: number; candidates: number };
+    processes: Process[];
+    groups: Group[];
+    queue: { id: number; intent: string }[] | null;
+    filter: { since?: number | null; until?: number | null; find?: string | null };
+    bounds: { earliest?: number | null; latest?: number | null };
+    spec?: { items?: SpecItem[] } | null;
+    sbom?: { source: string; document: Sbom } | null;
+}
+interface SbomComponent { type: string; name: string; version: string; group?: string; purl?: string }
+interface Sbom {
+    metadata?: { component?: { name: string; version: string }; properties?: { name: string; value: string }[] };
+    components?: SbomComponent[];
+    services?: { name: string; endpoints?: string[]; group?: string }[];
+}
+
+const app = document.querySelector<HTMLDivElement>('#app')!;
+let data: State | null = null;
+let connection = true;
+let lastPayload = '';
+/** What the owner opened: rows (g), bon processes (p), candidates' logs (l), and each log pane by path. */
+const opened = new Set<string>();
+const logs = new Map<string, string | null>();
+let recentCount = 12;
+let tracesOpen = true;
+let sbomOpen = false;
+let queueOpen = true;
+let sbomFind = '';
+/** The open drill-down under the results card: verified candidates, or pushes. */
+let drill: 'verified' | 'pushes' | null = null;
+const mismatches = new Map<string, string>();
+const range: { since?: number; until?: number; find?: string; preset: string } = { preset: 'all' };
+/** Light or dark: the system's until the owner picks; the pick is kept in this browser. */
+type Theme = 'light' | 'dark';
+const systemTheme = (): Theme => matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+let theme: Theme = (() => { try { const t = localStorage.getItem('bon-theme'); return t === 'light' || t === 'dark' ? t : systemTheme(); } catch { return systemTheme(); } })();
+document.documentElement.dataset.theme = theme;
+
+// ── formatting ──
+const e = (v: unknown): string => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
+const money = (v?: number | null): string => v == null || !Number.isFinite(v) ? '—' : '$' + v.toFixed(2);
+const short = (v?: string): string => v ? v.slice(0, 7) : '';
+const day = (t: number): string => new Date(t * 1000).toISOString().slice(0, 10);
+const cap = (t: string): string => t.charAt(0).toUpperCase() + t.slice(1);
+function ago(t?: number): string {
+    if (!t || !data) return '';
+    const d = Math.max(0, data.repo.now - t);
+    return d < 60 ? 'just now' : d < 3600 ? `${Math.floor(d / 60)}m ago` : d < 86400 ? `${Math.floor(d / 3600)}h ago` : `${Math.floor(d / 86400)}d ago`;
+}
+const minutes = (s?: number): string => s == null ? '' : s < 90 ? `${Math.round(s)}s` : `${Math.round(s / 60)} min`;
+
+// ── the color scale ──
+type Tone = 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'indigo' | 'violet' | 'neutral';
+const outcomeTone: Record<string, Tone> = { exited: 'red', found: 'red', running: 'orange', blocked: 'yellow', proposal: 'yellow', 'not found': 'indigo', pushed: 'violet' };
+const toneOf = (o: string): Tone => outcomeTone[o] ?? 'neutral';
+/** An outcome as the page says it; the spec word stays on hover. */
+const outcomeLabel = (o: string): string => ({ 'not found': 'Counterexample not found', found: 'Counterexample found' } as Record<string, string>)[o] ?? cap(o);
+
+// ── components ──
+/** A spec word: its /// line on hover. */
+const word = (name: string, label = name): string => `<span class="word" tabindex="0" data-word="${e(name)}">${e(label)}</span>`;
+const chip = (label: string, tone: Tone = 'neutral', specWord?: string): string =>
+    `<span class="chip ${tone}">${specWord ? word(specWord, label) : e(label)}</span>`;
+const mono = (t: string, title = ''): string => `<code class="hash" ${title ? `title="${e(title)}"` : ''}>${e(t)}</code>`;
+/** A labelled value: the label above, small; the value below. */
+const field = (label: string, value: string, tone: Tone = 'neutral'): string =>
+    `<div class="field ${tone}"><span class="label">${label}</span><span class="value">${value}</span></div>`;
+const sectionHead = (title: string, count?: string, tone: Tone = 'neutral'): string =>
+    `<header class="section-head ${tone}"><h2>${title}</h2>${count != null ? `<span class="count">${count}</span>` : ''}</header>`;
+/** A cost as one sum: each row is a way the same total breaks down (terms joined by +),
+ *  and the total stands once, on the right, after =. Read left to right. */
+function sum(rows: [string, string, Tone][][], total: [string, string, Tone]): string {
+    const line = (terms: [string, string, Tone][], r: number): string => terms.map(([l, v, t], i) =>
+        `${i ? `<span class="op" style="grid-row:${r}">+</span>` : ''}<div class="field ${t}" style="grid-row:${r}"><span class="label">${l}</span><span class="value">${v}</span></div>`).join('');
+    return `<div class="sum" style="--rows:${rows.length}">${rows.map((t, i) => line(t, i + 1)).join('')}<span class="op eq" style="grid-row:1 / span ${rows.length}">=</span><div class="field total ${total[2]}" style="grid-row:1 / span ${rows.length}"><span class="label">${total[0]}</span><span class="value">${total[1]}</span></div></div>`;
+}
+/** Time, with the rate it was charged at. */
+const timeValue = (time?: number | null, rate?: number | null): string => `${money(time)}${rate != null ? ` <small>at $${Math.round(rate)}/h</small>` : ''}`;
+
+/** A cost as labelled fields: generation + time = cost, the time with its rate when known. */
+function costFields(total: number | null | undefined, generation?: number | null, time?: number | null, label = 'Cost', rate?: number | null, seconds?: number | null): string {
+    const t = rate != null && seconds != null ? `${money(time)} <small>${money(rate)}/h × ${minutes(seconds)}</small>` : money(time);
+    return `${field(word('generation', 'Generation'), money(generation), 'yellow')}${field('Time', t, 'orange')}${field(label, `<b>${money(total)}</b>`)}`;
+}
+const chevron = '<svg class="chev" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>';
+
+// ── the kernel, compiled to WebAssembly ──
+let gatesWarning = false;
+function warnGates(error: unknown): void {
+    if (!gatesWarning) { console.warn('Could not check selections with WebAssembly', error); gatesWarning = true; }
+}
+const gates = Promise.resolve().then(() => WebAssembly.instantiateStreaming(fetch('/gates.wasm'))).catch(error => { warnGates(error); return null; });
+async function rederive(s: State): Promise<void> {
+    const loaded = await gates;
+    if (!loaded) return;
+    const x = loaded.instance.exports;
+    const memory = x.memory as WebAssembly.Memory;
+    const call = (n: string, ...a: number[]): number => (x[n] as (...a: number[]) => number)(...a);
+    mismatches.clear();
+    for (const p of s.processes) for (const r of p.searches) {
+        if (r.kernel !== 'derived') continue;
+        const res = await fetch(`/api/words?path=${p.pid}%2F${r.search}`, { cache: 'no-store' });
+        if (!res.ok) continue;
+        const bytes = await res.arrayBuffer();
+        const len = bytes.byteLength / 8, ptr = call('alloc', len);
+        try {
+            new Uint8Array(memory.buffer, ptr, bytes.byteLength).set(new Uint8Array(bytes));
+            const got = call('selected', ptr, len);
+            const kernel = got < 0 ? null : got;
+            if (got < -1) mismatches.set(`${p.pid}/${r.search}`, 'The kernel cannot read this search');
+            else if (r.recorded_selected != null && kernel !== r.recorded_selected)
+                mismatches.set(`${p.pid}/${r.search}`, `Kernel selected ${kernel ?? 'none'}, trace recorded ${r.recorded_selected}`);
+        } finally { call('dealloc', ptr, len); }
+    }
+}
+
+// ── header ──
+/** The rates searches ran at, as recorded: one value, or several, or none. */
+function rates(searches: Search[]): string {
+    const seen = [...new Set(searches.map(r => r.rate).filter((r): r is number => r != null))];
+    return seen.length ? seen.map(r => `$${Math.round(r)}/h`).join(', ') : '—';
+}
+
+function header(s: State): string {
+    const t = s.totals;
+    const button = (key: 'verified' | 'pushes', label: string, value: string, sub: string, tone: Tone, parts: [string, number, Tone][]): string => {
+        const total = parts.reduce((a, [, n]) => a + n, 0) || 1;
+        const bar = `<span class="split">${parts.map(([, n, t]) => `<i class="${t}" style="width:${(n / total) * 100}%"></i>`).join('')}</span>`;
+        const legend = `<span class="legend">${parts.map(([l, n, t]) => `<span class="${t}"><i></i>${n} ${e(l)}</span>`).join('')}</span>`;
+        return `<button class="result ${tone} ${drill === key ? 'on' : ''}" data-drill="${key}"><span class="label">${label}</span><b>${value}</b><span class="sub">${sub}</span>${bar}${legend}${chevron}</button>`;
+    };
+    // Candidates by how far they got; pushes by kind, and the efforts that did not push.
+    const cands = s.processes.flatMap(p => p.searches.flatMap(r => r.candidates));
+    const accepted = cands.filter(c => c.accepted && !c.verified).length, rejected = cands.filter(c => !c.accepted).length;
+    const byKind = new Map<string, number>();
+    for (const g of s.groups) if (g.outcome === 'pushed') byKind.set(g.kind, (byKind.get(g.kind) ?? 0) + 1);
+    const unpushed = s.groups.filter(g => g.outcome !== 'pushed' && !g.running).length;
+    const kindTone: Record<string, Tone> = { code: 'violet', compaction: 'indigo', queue: 'yellow', counterexample: 'blue' };
+    const share = (x: number): string => `${(x / (t.cost || 1)) * 100}%`;
+    const pct = (x: number): string => `${Math.round((x / (t.cost || 1)) * 100)}%`;
+    return `<div class="bar-top"><div class="widget"><span class="label">${word('Repository', 'Repository')}</span><span class="value name">${e(s.repo.name)}</span></div><div class="widget violet" title="${e(`${s.repo.remote ?? 'origin'}/${s.repo.trunk ?? 'main'} ${s.repo.remote_head ?? ''} ${s.repo.subject ?? ''}`)}"><span class="label">${word('trunk', 'Trunk')}</span><span class="value toned">${e(ago(s.repo.remote_time ?? undefined))} · <code>${e(short(s.repo.remote_head))}</code></span>${s.repo.since_push?.commits ? `<span class="sub" title="${e(`Committed to trunk without bon, by ${s.repo.since_push.authors.join(', ')}`)}">+${s.repo.since_push.commits} since last push</span>` : s.repo.since_push ? '<span class="sub">At the last push</span>' : ''}</div>${topWidgets(s)}<div class="widget theme-widget"><span class="label">Theme</span><span class="theme" role="group" aria-label="Theme"><button class="${theme === 'light' ? 'on' : ''}" data-theme-pick="light">Light</button><button class="${theme === 'dark' ? 'on' : ''}" data-theme-pick="dark">Dark</button></span></div></div>
+<div class="cards"><div class="card money">
+<div class="equation">
+<span class="label">Cost</span><span></span><span class="label">${word('generation', 'Generation')}</span><span></span><span class="label">Time</span>
+<b class="total">${money(t.cost)}</b><span class="op">=</span><b class="term yellow">${money(t.generation)}</b><span class="op">+</span><b class="term orange">${money(t.time_cost)}</b>
+<span></span><span></span><span class="sub">Model tokens × prices</span><span></span><span class="sub">Your time at the set rate</span></div>
+<div class="rates"><div class="green"><span class="label">Per ${word('verified', 'verified candidate')}</span><b>${money(t.per_verified_candidate)}</b></div><div class="violet"><span class="label">Per ${word('push')}</span><b>${money(t.per_push)}</b></div></div>
+<div class="went"><span class="label">Where it went</span><div class="split wide"><i class="violet" style="width:${share(t.pushed)}"></i><i class="red" style="width:${share(t.not_pushed)}"></i><i class="orange" style="width:${share(t.in_flight)}"></i></div>
+<div class="legend row"><span class="violet"><i></i>Reached a ${word('push')} <b>${money(t.pushed)}</b> ${pct(t.pushed)}</span><span class="red"><i></i>Did not <b>${money(t.not_pushed)}</b> ${pct(t.not_pushed)}</span>${t.in_flight ? `<span class="orange"><i></i>In flight <b>${money(t.in_flight)}</b> ${pct(t.in_flight)}</span>` : ''}</div></div></div>
+<div class="card results">${button('verified', 'Verified', `${t.verified}`, `of ${t.candidates} candidates`, 'green', [['verified', t.verified, 'green'], ['accepted, not verified', accepted, 'yellow'], ['rejected', rejected, 'red']])}${button('pushes', 'Pushed', String(t.pushes), t.pushes === 1 ? 'push' : 'pushes', 'violet', [...[...byKind].map(([k, n]): [string, number, Tone] => [k, n, kindTone[k] ?? 'neutral']), ...(unpushed ? [['not pushed', unpushed, 'red'] as [string, number, Tone]] : [])])}</div></div>
+${drill ? `<div class="card drill">${drill === 'verified' ? verifiedList(s) : pushList(s)}</div>` : ''}`;
+}
+
+/** The top bar's glance widgets: the queue (a link to it), the last push, and what runs now. */
+function topWidgets(s: State): string {
+    const last = s.repo.last_push;
+    const running = s.processes.filter(p => p.running).length;
+    const q = s.queue ? `${s.queue.length} not in the spec` : 'None';
+    return `<div class="widget violet"><span class="label">Last ${word('push')}</span><span class="value toned">${last ? `${e(ago(last.time))} · <code>${e(short(last.commit ?? ''))}</code>` : '—'}</span></div>`
+        + `<a class="widget yellow" href="#queue"><span class="label">${word('queue', 'Queue')}</span><span class="value toned">${q}</span></a>`
+        + `<div class="widget ${running ? 'orange' : 'neutral'}"><span class="label">Now</span><span class="value toned">${running ? `Running ${running}` : 'Idle'}</span></div>`;
+}
+
+/** Every verified candidate in range, with the effort and search it came from. */
+function verifiedList(s: State): string {
+    const rows: string[] = [];
+    for (const g of s.groups) for (const p of g.processes) for (const r of p.searches) for (const c of r.candidates) {
+        if (!c.verified) continue;
+        const key = `l${p.pid}/${r.search}/${c.index}`;
+        rows.push(`<tr><td>${chip(cap(g.kind))} <span class="cell-title">${e(g.title)}</span></td><td>${mono(`${p.pid}/${r.search}`)}</td><td><span class="index">#${c.index}</span>${r.selected === c.index ? chip('Selected', 'blue', 'selected') : ''}</td><td class="num">${money(c.generation)}</td><td class="num lines">${c.added != null ? `<span class="add">+${c.added}</span><span class="del">−${c.removed ?? 0}</span>` : ''}</td><td>${c.logs?.length ? `<button class="toggle ${opened.has(key) ? 'on' : ''}" data-toggle="${key}">${chevron}${c.logs.length} logs</button>` : ''}</td></tr>${opened.has(key) ? logRow(p, r, c, 6) : ''}`);
+    }
+    return `<table class="candidates"><thead><tr><th>Bon processes</th><th>Search</th><th>Candidate</th><th class="num">Generation</th><th class="num">Lines</th><th>Logs</th></tr></thead><tbody>${rows.join('') || '<tr><td colspan="6" class="muted">None in this range</td></tr>'}</tbody></table>`;
+}
+
+/** Every push in range: the commit, and everything it took to reach it. */
+function pushList(s: State): string {
+    const rows = s.groups.filter(g => g.outcome === 'pushed').map(g => `<tr><td>${mono(short(g.push?.commit ?? ''), g.push?.commit ?? '')}</td><td>${chip(cap(g.kind))} <span class="cell-title">${e(g.title)}</span></td><td class="num">${g.processes.length}</td><td class="num">${money(g.generation)}</td><td class="num">${money(g.time_cost)}</td><td class="num"><b>${money(g.push?.cost)}</b></td><td class="muted">${ago(g.time)}</td></tr>`);
+    return `<table class="candidates"><thead><tr><th>Commit</th><th>Bon processes</th><th class="num">${word('bon process', 'Bon processes')}</th><th class="num">${word('generation', 'Generation')}</th><th class="num">Time</th><th class="num">${word('push', 'Push cost')}</th><th>When</th></tr></thead><tbody>${rows.join('') || '<tr><td colspan="7" class="muted">None in this range</td></tr>'}</tbody></table>`;
+}
+
+// ── filter toolbar ──
+function controls(s: State): string {
+    const preset = (key: string, label: string): string => `<button class="${range.preset === key ? 'on' : ''}" data-preset="${key}">${label}</button>`;
+    const lo = s.bounds.earliest ? day(s.bounds.earliest) : '', hi = s.bounds.latest ? day(s.bounds.latest) : '';
+    return `<div class="segmented" role="group" aria-label="Time range">${preset('day', '24 hours')}${preset('week', '7 days')}${preset('month', '30 days')}${preset('all', 'All time')}</div>
+<div class="dates"><label class="input"><span>Ran from</span><input type="date" data-range="since" min="${lo}" max="${hi}" value="${range.since != null ? day(range.since) : ''}"></label><span class="arrow">→</span><label class="input"><span>To</span><input type="date" data-range="until" min="${lo}" max="${hi}" value="${range.until != null ? day(range.until) : ''}"></label></div>
+<label class="input find"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input type="search" data-range="find" placeholder="Find a bon process, commit, goal or outcome" value="${e(range.find ?? '')}"></label>`;
+}
+
+// ── now ──
+function now(s: State): string {
+    const running = s.processes.filter(p => p.running);
+    if (!running.length) return '';
+    return `${sectionHead('Now', `${running.length} running`, 'orange')}${running.map(p => {
+        const r = p.searches.at(-1);
+        const width = r?.width ?? 0;
+        return `<div class="running"><div class="running-title">${chip(cap(p.kind), 'orange')}<span>${e(p.title)}</span></div>
+${width ? `<div class="progress"><i style="width:${Math.min(100, ((r?.returned ?? 0) / width) * 100)}%"></i></div>` : ''}
+<div class="fields">${field('Returned', `${r?.returned ?? 0}${width ? ` / ${width}` : ''}`, 'orange')}${field(word('accepted', 'Accepted'), String(r?.accepted ?? 0), 'yellow')}${field(word('verified', 'Verified'), String(r?.verified ?? 0), 'green')}${field('Cost so far', `${money(p.cost)}${p.limit ? ` of ${money(p.limit)}` : ''}`)}${r?.started ? field('Elapsed', minutes(s.repo.now - r.started)) : ''}</div></div>`;
+    }).join('')}`;
+}
+
+// ── a search ──
+/** The steps, in order: red to violet. */
+function steps(p: Process, r: Search): string {
+    const items: [Tone, string, string, string][] = [
+        ['red', 'grant', r.width != null ? String(r.width) : '—', 'Started'],
+        ['orange', 'wait', String(r.returned), 'Returned'],
+        ['yellow', 'accepted', String(r.accepted), 'Accepted'],
+        ['green', 'verified', String(r.verified), 'Verified'],
     ];
+    const later = p.searches.indexOf(r) < p.searches.length - 1;
+    const last = p.transitions.at(-1) ?? '';
+    if (r.kind === 'counterexample') {
+        if (last.startsWith('found')) items.push(['red', 'found', 'Found', 'Counterexample']);
+        else if (last.startsWith('not found') || (p.outcome === 'pushed' && !later)) items.push(['indigo', 'not_found', 'Not found', 'Counterexample']);
+    } else if (r.selected != null) items.push(['blue', 'selected', `#${r.selected}`, 'Selected']);
+    else if (r.blocked) items.push(['yellow', 'blocked', 'Blocked', 'Outcome']);
+    return `<ol class="steps">${items.map(([t, w, v, label]) => `<li class="${t}"><span class="label">${word(w, label)}</span><b>${e(v)}</b></li>`).join('')}</ol>`;
 }
-function diagram(en: Entry): string {
-    return `<div class="state-path" aria-label="Search path">${stages(en).map((a, i) => `${i ? `<span class="state-arrow">${icon('arrow', 16)}</span>` : ''}<div class="state-node ${a.tone} ${a.done ? 'filled' : 'waiting'}"><span class="state-value">${e(a.value)}</span><span class="state-label">${word(a.label)}</span></div>`).join('')}</div>`;
+
+function logRow(p: Process, r: Search, c: Candidate, cols: number): string {
+    const base = `${p.pid}/${r.search}/${c.index}`;
+    const names = c.logs ?? [];
+    const open = names.filter(n => logs.has(`${base}/${n}`));
+    return `<tr class="logs-row"><td colspan="${cols}"><div class="log-tabs">${names.map(n => `<button class="tab ${logs.has(`${base}/${n}`) ? 'on' : ''}" data-log="${e(`${base}/${n}`)}">${e(n)}</button>`).join('')}</div>
+${open.length ? `<div class="log-panes">${open.map(n => { const path = `${base}/${n}`; const text = logs.get(path);
+        return `<div class="pane"><div class="pane-head">${mono(n)}<span class="muted">${e(path)}</span><button class="close" data-log="${e(path)}" aria-label="Close ${e(n)}">×</button></div><pre>${text == null ? 'Reading…' : e(text)}</pre></div>`; }).join('')}</div>` : ''}</td></tr>`;
 }
-function dots(en: Entry): string {
-    const ss = stages(en);
-    return `<span class="path-dots" aria-label="${e(ss.map(a => a.label + ': ' + a.value).join(' → '))}">${ss.map(a => `<i class="${a.tone} ${a.done ? 'filled' : ''}" title="${e(a.label + ': ' + a.value)}"></i>`).join('')}</span>`;
+
+function candidates(p: Process, r: Search): string {
+    if (!r.candidates.length) return '';
+    const models = new Set(r.candidates.map(c => `${c.harness ?? '?'} · ${c.model ?? '?'}`));
+    const one = models.size === 1;
+    const cols = one ? 8 : 9;
+    const sorted = [...r.candidates].sort((a, b) => Number(b.verified) - Number(a.verified) || (b.rank ?? 0) - (a.rank ?? 0) || (a.diff ?? 0) - (b.diff ?? 0));
+    const yes = (ok: boolean, no: string, tone: Tone): string => ok ? `<span class="chip soft ${tone}">Yes</span>` : chip(no, 'red');
+    return `<table class="candidates"><thead><tr><th>Candidate</th>${one ? '' : '<th>Harness · model</th>'}<th>Commit</th><th>${word('accepted', 'Accepted')}</th><th>${word('verified', 'Verified')}</th><th class="num">Generation</th><th class="num">${word('rank', 'Rank')}</th><th class="num" title="Lines added and removed; the kernel breaks a rank tie by their sum, the smaller first">Lines</th><th>Logs</th></tr></thead><tbody>${sorted.map(c => {
+        const sel = r.selected === c.index;
+        const key = `l${p.pid}/${r.search}/${c.index}`;
+        const n = c.logs?.length ?? 0;
+        return `<tr class="${sel ? 'sel' : ''}"><td><span class="index">#${c.index}</span>${sel ? chip('Selected', 'blue', 'selected') : ''}</td>${one ? '' : `<td>${e(c.harness)} · ${e(c.model)}</td>`}<td>${mono(short(c.commit), c.commit)}</td><td>${yes(c.accepted, 'Rejected', 'yellow')}</td><td>${yes(c.verified, 'No', 'green')}${(c.flags ?? []).map(f => chip(f.replace('_', ' '), 'red', f)).join('')}</td><td class="num">${money(c.generation)}</td><td class="num">${c.rank ?? '—'}</td><td class="num lines">${c.added != null ? `<span class="add">+${c.added}</span><span class="del">−${c.removed ?? 0}</span>` : (c.diff ?? '—')}</td><td>${n ? `<button class="toggle ${opened.has(key) ? 'on' : ''}" data-toggle="${key}">${chevron}${n} logs</button>` : ''}</td></tr>${opened.has(key) ? logRow(p, r, c, cols) : ''}`;
+    }).join('')}</tbody></table>`;
 }
-function headerHTML(): string {
-    return `<div class="repository">${icon('branch')}<strong>${e(data.repo?.name ?? 'repository')}</strong><span class="head">${word('trunk', data.repo?.trunk ?? 'main')} <code>${e(short(data.repo?.head))}</code></span>${pill(data.repo?.pushed ? 'pushed' : 'not pushed', data.repo?.pushed ? 'indigo' : 'blue')}</div><div class="header-cost">${totals.verified ? money(totals.cost / totals.verified) : '—'} per ${word('verified', 'verified candidate')} <span>·</span> ${(() => { const ff = (data.processes ?? []).flatMap(p => p.fast_forwards ?? []); return ff.length ? money(ff.reduce((a, f) => a + (f.cost ?? 0), 0) / ff.length) : '—'; })()} per ${word('fast_forward', 'fast-forward')} <span>·</span> ${totals.count ? Math.round(totals.verified / totals.count * 100) : 0}% of candidates verified</div><span class="live ${connection ? '' : 'offline'}"><i class="dot ${connection ? 'violet' : 'red'}"></i>${connection ? 'live' : 'waiting'}</span>`;
+
+/** A search's parameters in the spec's shape: Search { kind(goal), base, n, authority, limit }.
+ *  Kind is shown separately; goal is the kind's goal. */
+function params(r: Search, kind: string): string {
+    const g = r.params.goal;
+    const slot = (label: string, value: string, cls = ''): string => `<div class="slot ${cls}"><span class="label">${label}</span><span class="value">${value}</span></div>`;
+    const goal = g.transcript != null ? `Transcript ${mono(g.transcript)}`
+        : g.candidate != null ? `Selected candidate · ${e(g.candidate.replace(' candidate ', ', #'))}`
+        : `Trunk ${mono(short(g.trunk ?? ''), g.trunk ?? '')}`;
+    const models = [...new Set(r.candidates.map(c => `${c.harness ?? '?'} · ${c.model ?? '?'}`))].join(', ');
+    return `<div class="signature"><div class="slots">${slot(word('Kind', 'Kind'), e(cap(kind)))}${slot(word('Kind', 'Goal'), goal, 'wide')}${slot(word('base', 'Base'), mono(short(r.params.base), r.params.base))}${slot('Width', String(r.params.n ?? '—'))}${r.params.limit != null ? slot(word('limit', 'Limit'), money(r.params.limit)) : ''}${r.params.limit != null ? slot(word('authority', 'Authority'), e(cap(r.params.authority))) : ''}${models ? slot('Harness', e(models), 'wide') : ''}</div></div>`;
 }
-function nowHTML(): string {
-    const running = (data.processes ?? []).filter(p => p.running);
-    const activeP = running[0];
-    const active = activeP ? entries.get(`${activeP.pid}/${activeP.searches?.at(-1)?.search}`) : undefined;
-    if (active) {
-        const parent = active.parent ?? active;
-        const completed = active.outcome !== 'running' && active.s.summary?.seconds != null;
-        return `<div class="now-heading"><h1>Now</h1><span class="running orange"><i class="dot orange"></i>${running.length === 1 ? 'bon process running' : `${running.length} bon processes running`}</span></div><div class="now-card"><div class="now-title"><span class="search-symbol orange">${icon('search', 21)}</span><div><div class="eyebrow">${word(parent.s.summary?.kind ?? 'search')} <span> / ${e(parent.key)}</span></div><h2>${e(parent.s.summary?.goal ?? 'Goal not recorded')}</h2></div><a class="text-link" href="#${e(parent.key)}">Open search ${icon('arrow', 15)}</a></div>${diagram(parent)}<p class="now-note">${completed ? 'Last recorded path: ' : ''}${e(active.reason)}${completed ? ' The bon process is still running.' : ''}</p></div>`;
-    }
-    const latest = lines[0];
-    const next = data.map?.find(i => i.status === 'open');
-    let sentence = 'No search has run yet.';
-    if (latest?.commit) sentence = `The owner committed “${latest.commit.subject ?? short(latest.commit.commit)}” to trunk.`;
-    else if (latest?.entry) {
-        const en = latest.entry;
-        sentence = en.outcome === 'fast_forward' ? `Trunk fast-forwarded${en.s.summary?.goal ? `: ${en.s.summary.goal}` : '. Goal not recorded.'}` : en.outcome === 'retained' ? `The last scrub was retained${en.s.summary?.goal ? `: ${en.s.summary.goal}` : '. Goal not recorded.'}` : `The last search ${en.outcome}. ${en.reason}`;
-    }
-    return `<div class="now-heading"><h1>Now</h1><span class="muted">No searches running</span></div><div class="now-calm"><p>${e(sentence)} <span class="muted">${latest ? relative(latest.time) : ''}</span></p>${next ? `<div class="next-command"><span class="eyebrow">NEXT OPEN INTENT</span>${command(`bon code ${intentArg(next.intent)}`)}</div>` : '<p class="settled">No open intents on the map.</p>'}</div>`;
+
+function search(p: Process, r: Search): string {
+    const i = p.searches.indexOf(r);
+    const kind = r.kind === 'counterexample' ? 'counterexample' : p.kind;
+    const rerun = r.kind !== 'counterexample' && p.searches.slice(0, i).some(x => x.kind !== 'counterexample');
+    const mismatch = mismatches.get(`${p.pid}/${r.search}`);
+    const key = `s${p.pid}/${r.search}`;
+    const last = p.transitions.at(-1) ?? '';
+    const later = i < p.searches.length - 1;
+    // What the search came to: a selection, a counterexample's verdict, or blocked.
+    const result = r.kind === 'counterexample'
+        ? (last.startsWith('found') ? field(word('found', 'Counterexample'), 'Found', 'red')
+            : last.startsWith('not found') || (p.outcome === 'pushed' && !later) ? field(word('not_found', 'Counterexample'), 'Not found', 'indigo') : field('Counterexample', '—'))
+        : r.selected != null ? field(word('selected', 'Selected'), `#${r.selected}`, 'blue')
+        : r.blocked ? field(word('blocked', 'Outcome'), 'Blocked', 'yellow') : field('Outcome', '—');
+    const stage: Tone = r.kind === 'counterexample' ? 'indigo' : r.selected != null ? 'blue' : r.blocked ? 'yellow' : 'neutral';
+    const summary = `<summary><div class="line1">${chevron}<h4>${word('Search', `Search ${r.search}`)}</h4>${chip(cap(kind), stage)}${rerun ? chip('Rerun wider', 'yellow') : ''}${r.background ? chip('Background', 'violet') : ''}${r.kernel === 'derived' ? chip('Kernel checked', 'green') : ''}</div>
+<div class="glance-row"><div class="facts">${field(word('verified', 'Verified'), `${r.verified} / ${r.returned}`, r.verified >= 2 ? 'green' : 'red')}${result}${field('Took', r.seconds != null ? minutes(r.seconds) : '—')}</div>${sum([[[word('generation', 'Generation'), money(r.generation), 'yellow'], ['Time', timeValue(r.time_cost, r.rate), 'orange']]], ['Cost', `<b>${money(r.cost)}</b>`, 'neutral'])}</div></summary>`;
+    const inner = `<div class="search-body">${params(r, kind)}${steps(p, r)}${r.blocked ? `<div class="notice yellow">${e(cap(r.blocked.replace(/^blocked:\s*/, '')))}</div>` : ''}${mismatch ? `<div class="notice red">${e(mismatch)}</div>` : ''}${candidates(p, r)}</div>`;
+    return `<details class="search ${stage}" data-open="${key}" ${opened.has(key) ? 'open' : ''}>${summary}${opened.has(key) ? inner : ''}</details>`;
 }
-function mapHTML(): string {
-    const intents = data.map ?? [];
-    return `<div class="section-heading"><h2>${word('map', 'Map')}</h2><span>${intents.length} intents</span></div><div class="map-list">${intents.map((item, index) => {
-        const scrubbed = item.scrub?.passes && (item.scrub.time ?? 0) >= (item.landed?.time ?? 0);
-        const tone: Tone = item.status === 'broken' ? 'red' : item.status === 'open' ? 'orange' : scrubbed ? 'violet' : 'blue';
-        return `<a id="intent-${index}" class="map-intent ${filter === index ? 'active' : ''}" href="#intent/${index}" aria-label="Filter timeline to ${e(item.intent)}" ${filter === index ? 'aria-current="true"' : ''}><div class="map-intent-title"><span class="dot ${tone}"></span><span>${e(item.intent)}</span></div><div class="map-meta"><span class="status-text ${tone}">${word(item.status ?? 'open')}</span><span>${word('scrub')} ${item.scrub ? timestamp(item.scrub.time) : '—'}</span><span>${word('landed')} ${item.landed ? timestamp(item.landed.time) : '—'}</span></div></a>`;
-    }).join('') || '<p class="empty">The map holds intents, one per line. None are recorded yet.</p>'}</div><p class="map-note">An intent shows its searches here.<br><span class="key-hint">Hover or focus a word for its <code>///</code> line.</span></p>`;
+
+// ── rows ──
+function processBlock(p: Process, several: boolean): string {
+    const inner = p.searches.map(r => search(p, r)).join('');
+    if (!several) return `<div class="process">${inner}</div>`;
+    const key = `p${p.pid}`;
+    return `<details class="process ${toneOf(p.outcome)}" data-open="${key}" ${opened.has(key) ? 'open' : ''}><summary><div class="line1">${chevron}<span class="pid">${word('bon process', 'Bon process')} ${mono(String(p.pid))}</span>${chip(outcomeLabel(p.outcome), toneOf(p.outcome), p.outcome)}${p.searches.some(r => r.background) ? chip('Background', 'violet') : ''}</div><div class="glance-row"><div class="facts">${field(word('Search', 'Searches'), String(p.searches.length))}${field('Ran', e(ago(p.time)))}</div>${sum([[[word('generation', 'Generation'), money(p.generation), 'yellow'], ['Time', timeValue(p.time_cost, p.searches.find(r => r.rate != null)?.rate), 'orange']]], ['Cost', `<b>${money(p.cost)}</b>`, 'neutral'])}</div></summary>${opened.has(key) ? inner : ''}</details>`;
 }
-function searchSummary(en: Entry, child = false): string {
-    const { s } = en;
-    return `<summary class="timeline-summary"><span class="line-chevron">${icon('chevron', 12)}</span><span class="line-goal">${child ? '<span class="counter-label">counterexample</span> ' : ''}${e(s.summary?.goal ?? 'not recorded')}<span class="line-record"><span class="line-kind">${e(s.summary?.kind ?? 'kind not recorded')}</span>${en.landed ? `<span class="landed-commit" title="${e(en.landed.commit)}">${word('trunk')} <code>${short(en.landed.commit)}</code></span>` : ''}</span></span>${dots(en)}<span class="outcome ${en.tone}">${word(en.outcome)}</span><span class="line-cost">${money(en.cost)}</span><span class="line-time">${timestamp(s.summary?.time ?? en.p.modified)}</span></summary>`;
+
+function body(g: Group): string { return `<div class="body">${g.processes.map(p => processBlock(p, g.processes.length > 1)).join('')}</div>`; }
+
+/** At a glance, read left to right: what the effort came to, then what it cost
+ *  as one sum: by stage (to selection + counterexample) and by source (generation + time),
+ *  both equal to the push. */
+function glance(g: Group): string {
+    const p = g.processes[0]!;
+    const main = p.searches.find(s => s.kind !== 'counterexample') ?? p.searches[0];
+    const ce = p.searches.find(s => s.kind === 'counterexample');
+    const found = p.transitions.at(-1)?.startsWith('found');
+    const none = g.outcome === 'pushed' || g.outcome === 'not found';
+    const dash = '—';
+    const pushed = g.push?.cost != null;
+    const searches = g.processes.flatMap(x => x.searches);
+    const agents = searches.reduce((a, r) => a + r.returned, 0);
+    const seconds = searches.reduce((a, r) => a + (r.seconds ?? 0), 0);
+    const took = seconds >= 3600 ? `${Math.floor(seconds / 3600)}h ${Math.round((seconds % 3600) / 60)}m` : minutes(seconds) || dash;
+    const rate = [...new Set(searches.map(r => r.rate).filter((r): r is number => r != null))];
+    const facts = [
+        field(word('verified', 'Verified'), main ? `${main.verified} / ${main.returned}` : dash, main && main.verified >= 2 ? 'green' : 'red'),
+        field(word('selected', 'Selected'), main?.selected != null ? `#${main.selected}` : dash, main?.selected != null ? 'blue' : 'neutral'),
+        field(word(none ? 'not_found' : 'found', 'Counterexample'), ce ? (none ? `Not found · ${ce.verified}` : found ? 'Found' : dash) : dash, ce ? (none ? 'indigo' : 'red') : 'neutral'),
+        field(word('bon process', 'Bon processes'), String(g.processes.length)),
+        field(word('agent_processes', 'Agent processes'), String(agents)),
+        field('Took', took),
+    ];
+    const total: [string, string, Tone] = [pushed ? word('push', 'To push') : 'Cost', `<b>${money(pushed ? g.push!.cost : g.cost)}</b>`, pushed ? 'violet' : 'neutral'];
+    const rows: [string, string, Tone][][] = [
+        ...(pushed ? [[[word('selected', 'To selection'), money(g.push!.to_selection), 'blue'], [word('not_found', 'Counterexample'), money(g.push!.counterexample), 'indigo']] as [string, string, Tone][]] : []),
+        [[word('generation', 'Generation'), money(g.generation), 'yellow'], ['Time', timeValue(g.time_cost, rate.length === 1 ? rate[0] : null), 'orange']],
+    ];
+    return `<div class="glance-row"><div class="facts">${facts.join('')}</div>${sum(rows, total)}</div>`;
 }
-function candidateSummary(c: Candidate, en: Entry): string {
-    const f = c.facts ?? {}; const v = f.candidate;
-    return `<summary><span class="candidate-index">#${c.index}${en.selected === c.index ? '<span class="selected-mark" title="selected">◆</span>' : ''}</span><span class="candidate-model"><strong>${e(f.model ?? 'not recorded')}</strong><small>${e(f.harness ?? 'not recorded')} · <code>${short(v?.commit)}</code></small></span><span class="checks ${verified(c) ? 'green' : 'orange'}">${word(verified(c) ? 'verified' : v?.checks_pass === false ? 'not verified' : 'checks', verified(c) ? 'verified' : v?.checks_pass === false ? 'not verified' : 'not recorded')}</span><span class="numeric">${money(f.cost_microdollars == null ? undefined : f.cost_microdollars / 1e6)}</span><span class="numeric">${n(v?.rank)}</span><span class="numeric">${n(v?.diff)}</span><span class="candidate-log-count">${c.logs?.length ?? 0} logs ${icon('chevron', 12)}</span></summary>`;
+
+function row(g: Group): string {
+    const key = `g${g.processes.at(-1)!.pid}`;
+    const full = [g.about.goal, g.about.from && `${g.about.from} · ${g.about.subject}`].filter(Boolean).join('\n');
+    return `<details class="group ${toneOf(g.outcome)}" data-open="${key}" ${opened.has(key) ? 'open' : ''}><summary>
+<div class="line1">${chevron}${chip(cap(g.kind), 'neutral', g.kind)}${chip(`${outcomeLabel(g.outcome)} · ${ago(g.time)}${g.push?.commit ? ` · ${short(g.push.commit)}` : ''}`, toneOf(g.outcome), g.outcome)}</div>
+<div class="row-title" title="${e(full)}">${e(g.title)}</div>
+<div class="line2">${glance(g)}</div></summary>${opened.has(key) ? body(g) : ''}</details>`;
 }
-function candidateContent(c: Candidate, en: Entry): string {
-    const f = c.facts ?? {}; const v = f.candidate;
-    return `<div class="candidate-facts"><div><div class="eyebrow">${word('checks')}</div><p>${verified(c) ? 'Every check passes.' : v?.checks_pass === false ? 'The candidate is not verified. The logs record the checks.' : 'No checks recorded yet.'}</p>${['killed', 'over_limit', 'price_mismatch'].filter(k => f[k as keyof typeof f]).map(k => `<span class="fact-flag">${word(k)}</span>`).join('')}</div><div><div class="eyebrow">${word('changed')} / ${word('diff')}</div><p>${(v?.changed ?? []).map(path => `<code>${e(path)}</code>`).join('<br>') || 'No changed paths recorded.'}</p><p class="muted">diff: ${n(v?.diff)} · ${v?.base ? `base ${short(v.base)}` : 'base not recorded'}</p></div><div><div class="eyebrow">${word('out')} / ${word('test_passes')}</div><pre>${e(JSON.stringify(v?.out ?? []))}</pre><p>${v?.test_passes?.length ? v.test_passes.map(([i, pass]) => `#${i}: ${pass ? 'passes' : 'does not pass'}`).join(' · ') : 'No test_passes recorded.'}</p></div></div><div class="log-list"><span class="eyebrow">logs</span>${(c.logs ?? []).map(file => `<button class="log-button" data-log="${e(`${en.key}/${c.index}/${file}`)}">${e(file)}</button>`).join('') || '<span class="muted">No logs recorded.</span>'}</div><div class="inline-log" hidden><div class="log-heading"><code></code><button data-close-log aria-label="Close log">×</button></div><pre></pre></div>`;
+
+function recent(s: State): string {
+    const done = s.groups.filter(g => !g.running);
+    const filtered = range.since != null || range.until != null || !!range.find;
+    const head = `<summary class="section-head">${chevron}<h2>${word('traces', 'Traces')}</h2><span class="count">${done.length}${filtered ? ' in range' : ''}</span></summary>`;
+    const rows = done.slice(0, recentCount).map(row).join('') || '<div class="empty">No search in this range</div>';
+    const more = done.length > recentCount ? `<button class="more" data-more>Show ${Math.min(12, done.length - recentCount)} more of ${done.length - recentCount}</button>` : '';
+    return `<details class="traces violet" ${tracesOpen ? 'open' : ''} data-section="traces">${head}${tracesOpen ? rows + more : ''}</details>`;
 }
-function searchBodyHTML(en: Entry): string {
-    return `<div class="search-context"><code>${e(en.key)}</code><span>${en.s.summary?.kind ? word(en.s.summary.kind) : 'kind not recorded'}</span><span>${en.s.summary?.time ? timestamp(en.s.summary.time) : 'time not recorded; using process modified'}</span><span class="push-right">${en.count} candidates · rank ↓, diff ↑</span></div>${diagram(en)}<p class="search-explanation ${en.tone}"><i class="dot ${en.tone}"></i>${e(en.reason)}</p><div class="candidate-table"><div class="candidate-head"><span>${word('candidate', 'index')}</span><span>model / commit</span><span>${word('checks')}</span><span class="numeric">cost</span><span class="numeric">${word('rank')}</span><span class="numeric">${word('diff')}</span><span>logs</span></div><div class="candidate-rows"></div></div><div class="search-foot"><span>${en.v} of ${en.count} candidates ${word('verified')}</span><span>${en.selected == null ? 'selected not recorded' : `selected #${en.selected}`}</span></div><details class="transitions"><summary>Recorded transitions <span>${en.trace.length ? 'search' : 'bon process'}</span>${icon('chevron', 12)}</summary><div class="trace-list">${(en.trace.length ? en.trace : en.p.transitions ?? []).map(t => { const [name, ...rest] = t.split(' '); return `<code>${word(name ?? '')} ${e(rest.join(' '))}</code>`; }).join('') || '<span class="muted">No transitions recorded.</span>'}</div></details>`;
+
+/** What bon trusts, from the SBOM: its trusted code, the tools in its TCB, the services, then the crates. */
+function sbomSection(s: State): string {
+    const d = s.sbom?.document;
+    const comps = d?.components ?? [];
+    const crates = comps.filter(c => c.type === 'library');
+    const tcb = comps.filter(c => c.group === 'tcb');
+    const props = d?.metadata?.properties ?? [];
+    const files = props.filter(p => p.name === 'bon:trusted-file').map(p => p.value);
+    const fns = (props.find(p => p.name === 'bon:trusted-functions')?.value ?? '').split(',').filter(Boolean);
+    const count = d ? `${crates.length} crates · ${tcb.length} tools · ${fns.length} trusted functions` : 'None';
+    const head = `<summary class="section-head">${chevron}<h2>${word('sbom', 'SBOM')}</h2>${s.sbom ? chip(s.sbom.source === 'trunk' ? 'On trunk' : 'Working tree, not on trunk', s.sbom.source === 'trunk' ? 'violet' : 'yellow') : ''}<span class="count">${count}</span></summary>`;
+    if (!sbomOpen || !d) return `<details class="sbom red" data-section="sbom" ${sbomOpen ? 'open' : ''}>${head}${sbomOpen ? '<div class="empty">No .bon/sbom.json</div>' : ''}</details>`;
+    const q = sbomFind.toLowerCase();
+    const shown = crates.filter(c => !q || `${c.name} ${c.version}`.toLowerCase().includes(q));
+    return `<details class="sbom red" data-section="sbom" open>${head}<div class="sbom-body">
+<div class="sbom-grid"><div class="slot"><span class="label">Trusted files</span><span class="value">${files.map(f => mono(f)).join(' ')}</span></div>
+<div class="slot"><span class="label">Services</span><span class="value">${(d.services ?? []).map(v => `${e(v.name)} <span class="muted">${e((v.endpoints ?? []).join(', '))}</span>`).join('<br>')}</span></div></div>
+<div class="slot full"><span class="label">Trusted functions</span><span class="value fns">${fns.map(f => `<code>${e(f)}</code>`).join('')}</span></div>
+<table class="candidates"><thead><tr><th>Tool in the TCB</th><th>Version</th></tr></thead><tbody>${tcb.map(c => `<tr><td>${e(c.name)}</td><td><code>${e(c.version)}</code></td></tr>`).join('')}</tbody></table>
+<label class="input find"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input type="search" data-sbom-find placeholder="Find a crate (${crates.length})" value="${e(sbomFind)}"></label>
+<table class="candidates"><thead><tr><th>Crate</th><th>Version</th><th>Checksum</th></tr></thead><tbody>${shown.map(c => `<tr><td>${e(c.name)}</td><td><code>${e(c.version)}</code></td><td>${(c as SbomComponent & { hashes?: { content: string }[] }).hashes?.[0] ? mono(((c as SbomComponent & { hashes?: { content: string }[] }).hashes![0]!.content).slice(0, 12)) : ''}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">No crate matches</td></tr>'}</tbody></table>
+</div></details>`;
 }
-// Each stable island compares its markup before touching the DOM. Search and
-// candidate bodies are separate islands, so polling cannot close or replace them.
+
+function queue(s: State): string {
+    const head = `<summary class="section-head">${chevron}<h2>${word('queue', 'Queue')}</h2><span class="count">${s.queue ? `${s.queue.length} not in the spec` : 'None'}</span></summary>`;
+    const body = !s.queue ? `<div class="empty">No <code>.bon/queue.tsv</code> at trunk's head</div>`
+        : s.queue.length ? `<ol class="queue">${s.queue.map(q => `<li><span class="qid">${q.id}</span><span>${e(q.intent)}</span></li>`).join('')}</ol>` : '<div class="empty">Queue is empty</div>';
+    return `<details class="queue-section yellow" data-section="queue" ${queueOpen ? 'open' : ''}>${head}${queueOpen ? body : ''}</details>`;
+}
+
+// ── rendering ──
 const markup = new WeakMap<Element, string>();
-function attr(el: Element, name: string, value: string): void { if (el.getAttribute(name) !== value) el.setAttribute(name, value); }
-function hidden(el: HTMLElement, value: boolean): void { if (el.hidden !== value) el.hidden = value; }
 function put(el: Element, html: string): void { if (markup.get(el) !== html) { el.innerHTML = html; markup.set(el, html); } }
-function syncCandidates(body: Element, en: Entry): void {
-    const list = body.querySelector('.candidate-rows')!;
-    if (list.querySelector('.empty') && en.count) { list.replaceChildren(); markup.delete(list); }
-    const candidates = [...(en.s.candidates ?? [])].sort((a, b) => (b.facts?.candidate?.rank ?? -Infinity) - (a.facts?.candidate?.rank ?? -Infinity) || (a.facts?.candidate?.diff ?? Infinity) - (b.facts?.candidate?.diff ?? Infinity) || a.index - b.index);
-    const existing = new Map([...list.children].map(el => [(el as HTMLElement).dataset.key, el]));
-    const keep = new Set<Element>();
-    let cursor = list.firstElementChild;
-    for (const c of candidates) {
-        const key = `${en.key}/${c.index}`;
-        let row = existing.get(key) as HTMLDetailsElement | undefined;
-        if (!row) { row = document.createElement('details'); row.dataset.key = key; row.dataset.candidate = key; row.innerHTML = '<summary></summary><div class="candidate-details"></div>'; }
-        attr(row, 'class', `candidate ${c.index === en.selected ? 'is-selected' : ''}`);
-        const summary = row.firstElementChild!;
-        const template = document.createElement('template'); template.innerHTML = candidateSummary(c, en);
-        const html = template.content.firstElementChild!.innerHTML;
-        put(summary, html);
-        if (row.open !== openCandidates.has(key)) row.open = openCandidates.has(key);
-        if (row.open) {
-            const detail = row.lastElementChild!;
-            const content = candidateContent(c, en);
-            if (markup.get(detail) !== content) {
-                const log = detail.querySelector('.inline-log'); put(detail, content);
-                if (log) detail.querySelector('.inline-log')!.replaceWith(log);
-            }
-        }
-        if (row !== cursor) list.insertBefore(row, cursor);
-        cursor = row.nextElementSibling; keep.add(row);
+app.innerHTML = '<header id="header" class="top"></header><section id="sbom"></section><div id="controls" class="toolbar"></div><main><section id="now"></section><section id="queue" tabindex="-1"></section><section id="recent"></section></main>';
+let controlsDrawn = false;
+function render(): void {
+    if (!data) { put(document.querySelector('#now')!, '<div class="empty">Reading the repository…</div>'); return; }
+    document.title = `${data.repo.name ?? 'bon'} · bon view`;
+    for (const id of ['header', 'controls', 'sbom', 'queue', 'recent']) document.querySelector<HTMLElement>(`#${id}`)!.hidden = !data.configured;
+    const nowEl = document.querySelector<HTMLElement>('#now')!;
+    if (!data.configured) {
+        put(nowEl, '<div class="card empty">No .bon/bon.toml at trunk&#39;s head — run bon init</div>'); nowEl.hidden = false; return;
     }
-    for (const el of [...list.children]) if (!keep.has(el)) el.remove();
-    if (!candidates.length) put(list, '<p class="empty">No agent processes have returned yet.</p>');
-}
-function syncSearch(container: HTMLElement, en: Entry, child = false): void {
-    attr(container, 'class', 'search-group');
-    attr(container, 'data-group-search', en.key);
-    if (!container.firstElementChild) container.innerHTML = '<details><summary></summary><div class="search-body"></div></details><div class="counter-searches"></div>';
-    const row = container.firstElementChild as HTMLDetailsElement;
-    attr(row, 'class', `timeline-search ${child ? 'counter-search' : ''}`);
-    attr(row, 'id', `search-${en.key.replace('/', '-')}`);
-    attr(row, 'data-search', en.key);
-    attr(row.firstElementChild!, 'class', 'timeline-summary');
-    const html = searchSummary(en, child);
-    const start = html.indexOf('>') + 1;
-    put(row.firstElementChild!, html.slice(start, -10));
-    if (row.open !== opened.has(en.key)) row.open = opened.has(en.key);
-    const body = row.children[1]!;
-    if (row.open) {
-        // Preserve candidate islands on updates, including a fetched inline log.
-        const shell = searchBodyHTML(en);
-        if (markup.get(body) !== shell) {
-            const oldList = body.querySelector('.candidate-rows');
-            const oldTransitions = body.querySelector<HTMLDetailsElement>('.transitions')?.open;
-            put(body, shell);
-            if (oldList) body.querySelector('.candidate-rows')!.replaceWith(oldList);
-            const trace = body.querySelector<HTMLDetailsElement>('.transitions'); if (trace) trace.open = oldTransitions ?? false;
-        }
-        syncCandidates(body, en);
+    put(document.querySelector('#header')!, header(data));
+    // Redraw on preset changes; update date bounds without replacing focused inputs.
+    if (!controlsDrawn) { document.querySelector('#controls')!.innerHTML = controls(data); controlsDrawn = true; }
+    for (const input of document.querySelectorAll<HTMLInputElement>('#controls input[type="date"]')) {
+        input.min = data.bounds.earliest != null ? day(data.bounds.earliest) : '';
+        input.max = data.bounds.latest != null ? day(data.bounds.latest) : '';
     }
-    // Counterexample lines belong to the search they tested, never a second view.
-    const nested = container.children[1]!;
-    const old = new Map([...nested.children].map(c => [(c as HTMLElement).dataset.groupSearch, c]));
-    let cursor = nested.firstElementChild;
-    for (const c of en.children) {
-        const el = old.get(c.key) as HTMLElement | undefined ?? document.createElement('div');
-        syncSearch(el, c, true);
-        if (el !== cursor) nested.insertBefore(el, cursor);
-        cursor = el.nextElementSibling; old.delete(c.key);
-    }
-    for (const el of old.values()) el.remove();
+    put(nowEl, now(data)); nowEl.hidden = !nowEl.innerHTML;
+    put(document.querySelector('#recent')!, recent(data));
+    put(document.querySelector('#queue')!, queue(data));
+    // The SBOM's filter keeps its focus: only redraw the crate rows while typing.
+    const sb = document.querySelector('#sbom')!;
+    if (!sb.contains(document.activeElement)) put(sb, sbomSection(data));
 }
-function filteredLines(): Line[] {
-    if (filter == null) return lines;
-    const intent = data.map?.[filter];
-    if (!intent) return [];
-    return lines.filter(l => l.entry ? l.entry.s.summary?.goal === intent.intent || l.entry.landed?.subject === intent.intent || l.entry.landed?.subject === `scrub: ${intent.intent}` || l.entry.landed?.commit === intent.landed?.commit : l.commit?.commit === intent.landed?.commit);
-}
-const rowNodes = new Map<string, HTMLElement>();
-function syncTimeline(): void {
-    const list = document.querySelector('#timeline-lines')!;
-    const all = filteredLines();
-    const visible = all.slice(0, visibleCount);
-    const wanted = new Set(visible.map(l => l.key));
-    let cursor = list.firstElementChild;
-    for (const line of visible) {
-        let row = rowNodes.get(line.key);
-        if (!row) { row = document.createElement('div'); rowNodes.set(line.key, row); }
-        if (line.entry) syncSearch(row, line.entry);
-        else {
-            const t = line.commit!;
-            attr(row, 'class', 'owner-line');
-            put(row, `<span class="commit-dot ${t.pushed ? 'indigo' : 'blue'}"></span><span class="owner-subject">${e(t.subject ?? 'not recorded')}<span class="owner-label">${t.by_agent ? 'agent · trace not recorded here' : 'owner'}</span></span><code>${short(t.commit)}</code><span class="outcome ${t.pushed ? 'indigo' : 'blue'}">${word(t.pushed ? 'pushed' : 'landed')}</span><span class="line-time">${timestamp(t.time)}</span>`);
-        }
-        attr(row, 'data-line-key', line.key);
-        if (row !== cursor) list.insertBefore(row, cursor);
-        cursor = row.nextElementSibling;
-    }
-    for (const row of [...list.children]) if (!wanted.has((row as HTMLElement).dataset.lineKey ?? '')) row.remove();
-    put(document.querySelector('#timeline-count')!, `${all.reduce((count, l) => count + 1 + (l.entry?.children.length ?? 0), 0)} ${filter == null ? 'searches & commits' : 'matching lines'}`);
-    const filterEl = document.querySelector('#intent-filter')!;
-    put(filterEl, filter == null ? '' : `<span><span class="dot orange"></span>${e(data.map?.[filter]?.intent ?? 'Intent not recorded')}</span><a href="#" data-clear-filter>Clear filter ×</a>`);
-    hidden(filterEl as HTMLElement, filter == null);
-    const more = document.querySelector<HTMLButtonElement>('#load-more')!;
-    hidden(more, visibleCount >= all.length);
-    const moreLabel = `Earlier · ${Math.max(0, all.length - visibleCount)} more`;
-    if (more.textContent !== moreLabel) more.textContent = moreLabel;
-    const empty = document.querySelector<HTMLElement>('#timeline-empty')!;
-    hidden(empty, all.length > 0);
-    put(empty, filter == null ? 'No search has run yet. A code search writes candidates for an intent.' : 'No searches recorded for this intent. Older searches may not record a goal.');
-}
-app.innerHTML = `<div class="page"><header class="topbar" id="header"></header><main><p id="connection-note" hidden role="status"></p><section id="now" aria-label="Now"></section><div class="reading-layout"><section id="timeline" aria-labelledby="timeline-title"><div class="section-heading"><h2 id="timeline-title">Timeline</h2><span id="timeline-count"></span></div><div id="intent-filter" hidden></div><div id="timeline-lines"></div><p id="timeline-empty" class="empty" hidden></p><button id="load-more" hidden>Earlier</button></section><aside id="map" aria-label="Map"></aside></div><footer><span class="footer-brand"><strong>bon</strong> view</span><span>The owner writes intents. bon searches.</span></footer></main></div>`;
-const renderTimes: { reason: string; ms: number }[] = [];
-Object.assign(window, { bonRenderTimes: renderTimes });
-function render(reason = 'state'): void {
-    const start = performance.now();
-    if (projected !== revision) project();
-    put(document.querySelector('#header')!, headerHTML());
-    put(document.querySelector('#now')!, ready ? nowHTML() : '<h1>Now</h1><p class="empty">Reading the repository…</p>');
-    put(document.querySelector('#map')!, mapHTML());
-    syncTimeline();
-    const note = document.querySelector<HTMLElement>('#connection-note')!;
-    hidden(note, connection);
-    if (!connection && !note.textContent) note.textContent = '/api/state is not available. The last state stays here. Reading again every 2 seconds.';
-    const title = `${data.repo?.name ?? 'bon'} — bon view`;
-    if (document.title !== title) document.title = title;
-    const ms = performance.now() - start;
-    renderTimes.push({ reason, ms });
-    if (renderTimes.length > 200) renderTimes.shift();
-    console.info(`[bon view] render ${reason}: ${ms.toFixed(2)} ms`);
-}
-function address(scroll = true): void {
-    if (!ready) return;
-    const hash = decodeURIComponent(location.hash.slice(1));
-    const matchIntent = /^intent\/(\d+)$/.exec(hash);
-    filter = matchIntent && data.map?.[Number(matchIntent[1])] ? Number(matchIntent[1]) : null;
-    const search = entries.get(hash);
-    if (search) {
-        opened.add(search.key); if (search.parent) opened.add(search.parent.key);
-        const root = search.parent ?? search;
-        visibleCount = Math.max(visibleCount, lines.findIndex(l => l.key === root.key) + 1);
-    }
-    render('address');
-    if (scroll && (search || matchIntent)) requestAnimationFrame(() => {
-        const el = search ? document.getElementById(`search-${search.key.replace('/', '-')}`) : document.querySelector('#timeline');
-        el?.scrollIntoView({ block: 'start' });
-    });
-}
-function pushHash(hash: string): void { history.pushState(null, '', hash ? `#${hash}` : location.pathname + location.search); }
-function measureAction(reason: string, action: () => void): void {
-    const start = performance.now(); action();
-    const ms = performance.now() - start; renderTimes.push({ reason, ms });
-    console.info(`[bon view] render ${reason}: ${ms.toFixed(2)} ms`);
-}
-app.addEventListener('toggle', event => {
-    const el = event.target as HTMLDetailsElement;
-    if (el.dataset.search) {
-        const key = el.dataset.search;
-        if (el.open === opened.has(key)) return;
-        if (el.open) { opened.add(key); pushHash(key); }
-        else { opened.delete(key); if (location.hash === `#${key}`) pushHash(filter == null ? '' : `intent/${filter}`); }
-        const en = entries.get(key);
-        if (en && el.open) measureAction('open search', () => syncSearch(el.parentElement!, en, !!en.parent));
-    } else if (el.dataset.candidate) {
-        const key = el.dataset.candidate;
-        if (el.open) {
-            openCandidates.add(key);
-            const parts = key.split('/'); const en = entries.get(parts.slice(0, 2).join('/'));
-            const c = en?.s.candidates?.find(c => String(c.index) === parts[2]);
-            if (en && c) measureAction('open candidate', () => put(el.lastElementChild!, candidateContent(c, en)));
-        } else openCandidates.delete(key);
-    }
+const soon = (): void => { requestAnimationFrame(render); };
+
+app.addEventListener('toggle', ev => {
+    const el = ev.target as HTMLDetailsElement;
+    if (el.dataset.section === 'traces') { if (el.open !== tracesOpen) { tracesOpen = el.open; soon(); } return; }
+    if (el.dataset.section === 'sbom') { if (el.open !== sbomOpen) { sbomOpen = el.open; soon(); } return; }
+    if (el.dataset.section === 'queue') { if (el.open !== queueOpen) { queueOpen = el.open; soon(); } return; }
+    const key = el.dataset.open; if (!key || el.open === opened.has(key)) return;
+    if (el.open) opened.add(key); else opened.delete(key);
+    soon();
 }, true);
-app.addEventListener('click', event => {
-    const target = (event.target as Element).closest<HTMLElement>('[data-copy],[data-log],[data-close-log],[data-clear-filter],a[href^="#"],#load-more');
-    if (!target) return;
-    if (target.dataset.copy) void copy(target.dataset.copy);
-    else if (target.dataset.log) void openLog(target.dataset.log, target);
-    else if (target.hasAttribute('data-close-log')) target.closest<HTMLElement>('.inline-log')!.hidden = true;
-    else if (target.id === 'load-more') { visibleCount += 12; render('scroll'); }
-    else if (target instanceof HTMLAnchorElement) {
-        event.preventDefault();
-        const hash = target.getAttribute('href')!.slice(1);
-        pushHash(hash === `intent/${filter}` ? '' : hash);
-        visibleCount = 12; address();
+app.addEventListener('change', ev => {
+    const t = ev.target as HTMLInputElement;
+    const key = t.dataset.range; if (!key || key === 'find') return;
+    const v = t.value ? Math.floor(Date.parse(`${t.value}T00:00:00Z`) / 1000) : undefined;
+    if (key === 'since') range.since = v; else range.until = v == null ? undefined : v + 86399;
+    range.preset = 'custom'; controlsDrawn = false; lastPayload = ''; void refresh();
+});
+let typing: number | undefined;
+app.addEventListener('input', ev => {
+    const t = ev.target as HTMLInputElement;
+    if (t.hasAttribute('data-sbom-find')) {
+        sbomFind = t.value;
+        const sb = document.querySelector('#sbom')!; const at = t.selectionStart;
+        sb.innerHTML = data ? sbomSection(data) : ''; const again = sb.querySelector<HTMLInputElement>('[data-sbom-find]');
+        if (again) { again.focus(); again.setSelectionRange(at, at); }
+        return;
     }
+    if (t.dataset.range !== 'find') return;
+    clearTimeout(typing);
+    typing = window.setTimeout(() => { range.find = t.value.trim() || undefined; lastPayload = ''; void refresh(); }, 250);
 });
-let scrollingDown = false;
-let previousY = 0;
-let scrollQueued = false;
-window.addEventListener('scroll', () => {
-    scrollingDown = window.scrollY > previousY; previousY = window.scrollY;
-    if (scrollQueued || !scrollingDown) return;
-    scrollQueued = true;
-    requestAnimationFrame(() => {
-        scrollQueued = false;
-        const more = document.querySelector<HTMLElement>('#load-more')!;
-        if (!more.hidden && more.getBoundingClientRect().top < innerHeight + 160) { visibleCount += 12; render('scroll'); }
-    });
-}, { passive: true });
-window.addEventListener('popstate', () => {
-    // A search address represents the open line; leave unrelated open lines intact.
-    const hash = location.hash.slice(1);
-    for (const key of opened) if (key !== hash && document.querySelector<HTMLDetailsElement>(`[data-search="${key}"]`)?.open) opened.delete(key);
-    address();
+app.addEventListener('click', ev => {
+    const el = ev.target as Element;
+    const preset = el.closest<HTMLElement>('[data-preset]');
+    if (preset) {
+        const k = preset.dataset.preset!, n = Math.floor(Date.now() / 1000);
+        range.preset = k; range.until = undefined;
+        range.since = k === 'day' ? n - 86400 : k === 'week' ? n - 7 * 86400 : k === 'month' ? n - 30 * 86400 : undefined;
+        controlsDrawn = false; lastPayload = ''; void refresh(); return;
+    }
+    const pick = el.closest<HTMLElement>('[data-theme-pick]');
+    if (pick) {
+        theme = pick.dataset.themePick as Theme; document.documentElement.dataset.theme = theme;
+        try { localStorage.setItem('bon-theme', theme); } catch { /* the pick lasts this visit */ }
+        soon(); return;
+    }
+    const d = el.closest<HTMLElement>('[data-drill]');
+    if (d) { const k = d.dataset.drill as 'verified' | 'pushes'; drill = drill === k ? null : k; soon(); return; }
+    const toggle = el.closest<HTMLElement>('[data-toggle]');
+    if (toggle) { const k = toggle.dataset.toggle!; if (opened.has(k)) opened.delete(k); else opened.add(k); soon(); return; }
+    const log = el.closest<HTMLElement>('[data-log]');
+    if (log) { void toggleLog(log.dataset.log!); return; }
+    if (el.closest('[data-more]')) { recentCount += 12; soon(); return; }
+    // The queue widget jumps to the queue.
+    if (el.closest('a[href="#queue"]')) { ev.preventDefault(); if (!queueOpen) { queueOpen = true; render(); } document.querySelector<HTMLElement>('#queue')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
 });
-// Hash edits (and native links from outside the page) use the same in-place route.
-window.addEventListener('hashchange', () => address());
-function toast(message: string): void { const el = document.querySelector<HTMLElement>('#toast')!; el.textContent = message; el.classList.add('visible'); setTimeout(() => el.classList.remove('visible'), 2000); }
-async function copy(text: string): Promise<void> {
-    try { await navigator.clipboard.writeText(text); toast('Command copied'); }
-    catch { const box = document.createElement('textarea'); box.value = text; document.body.append(box); box.select(); const ok = document.execCommand('copy'); box.remove(); toast(ok ? 'Command copied' : 'Select the command to copy'); }
+async function toggleLog(path: string): Promise<void> {
+    if (logs.has(path)) { logs.delete(path); soon(); return; }
+    logs.set(path, null); soon();
+    try { const r = await fetch(`/api/log?path=${encodeURIComponent(path)}`); if (!r.ok) throw 0; logs.set(path, await r.text()); }
+    catch { logs.set(path, 'This log is no longer on disk.'); }
+    soon();
 }
-const logCache = new Map<string, string>();
-async function openLog(path: string, button: HTMLElement): Promise<void> {
-    const panel = button.closest('.candidate-details')?.querySelector<HTMLElement>('.inline-log');
-    if (!panel) return;
-    panel.hidden = false; panel.dataset.path = path;
-    panel.querySelector('code')!.textContent = path;
-    const pre = panel.querySelector('pre')!; pre.textContent = 'Reading log…';
-    try {
-        let text = logCache.get(path);
-        if (text == null || entries.get(path.split('/').slice(0, 2).join('/'))?.p.running) {
-            const response = await fetch(`/api/log?path=${encodeURIComponent(path)}`);
-            if (!response.ok) throw new Error();
-            text = await response.text(); logCache.set(path, text);
-        }
-        if (panel.dataset.path === path) pre.textContent = text;
-    } catch { if (panel.dataset.path === path) pre.textContent = 'This log is not available. The recorded file may no longer be on disk.'; }
-}
+
+// Hover or focus a word for its /// line in the spec.
 const tip = document.querySelector<HTMLElement>('#spec-tip')!;
-let tipTarget: HTMLElement | null = null;
+const aliases: Record<string, string> = { generation: 'wait', blocked: 'selected', exited: 'wait', pushed: 'push', 'not found': 'not_found', running: 'wait', found: 'found_on_trunk', proposal: 'proposed', code: 'Kind', compaction: 'Kind', counterexample: 'Kind', queue: 'Kind', limit: 'within_limit', 'bon process': 'initialize' };
 function showTip(target: HTMLElement): void {
     const name = target.dataset.word ?? '';
-    const lookup = aliases[name] ?? name;
-    const item = data.spec?.items?.find(i => i.name.toLowerCase() === lookup.toLowerCase());
-    const field = data.spec?.fields?.find(f => f.name === lookup);
-    const doc = item?.doc || field?.doc;
-    const readers = field ? (data.spec?.items ?? []).filter(i => i.reads?.includes(field.name)).map(i => i.name) : [];
-    const writers = field ? (data.spec?.items ?? []).filter(i => i.updates?.includes(field.name)).map(i => i.name) : [];
-    put(tip, `<div class="tip-heading"><code>${e(item?.name ?? field?.name ?? name)}</code><span>${e(item?.kind ?? (field ? 'field' : ''))}</span></div><p>${doc ? `<span class="doc-slash">///</span> ${e(doc)}` : `No /// doc line recorded for “${e(name)}”.`}</p>${field ? `<div class="tip-type"><code>${e(field.type)}</code> · ${e(field.sharding)}</div><dl><dt>read by</dt><dd>${e(readers.join(', ') || 'none recorded')}</dd><dt>updated by</dt><dd>${e(writers.join(', ') || 'none recorded')}</dd></dl>` : `<dl><dt>reads</dt><dd>${e(item?.reads?.join(', ') || 'none recorded')}</dd><dt>updates</dt><dd>${e(item?.updates?.join(', ') || 'none recorded')}</dd></dl>`}`);
-    tipTarget = target; tip.hidden = false;
+    const look = (aliases[name] ?? name).toLowerCase();
+    const item = data?.spec?.items?.find(i => i.name.toLowerCase() === look);
+    if (!item?.doc) { tip.hidden = true; return; }
+    tip.innerHTML = `<code>${e(item.name)}</code> <span class="muted">${e(item.kind)}</span><p>/// ${e(item.doc)}</p>`;
+    tip.hidden = false;
     const rect = target.getBoundingClientRect();
     tip.style.left = `${Math.max(12, Math.min(innerWidth - tip.offsetWidth - 12, rect.left))}px`;
-    tip.style.top = `${Math.min(innerHeight - tip.offsetHeight - 12, rect.bottom + 9)}px`;
+    tip.style.top = `${Math.min(innerHeight - tip.offsetHeight - 12, rect.bottom + 8)}px`;
 }
-function hideTip(): void { tip.hidden = true; tipTarget = null; }
-app.addEventListener('pointerover', event => { const target = (event.target as Element).closest<HTMLElement>('[data-word]'); if (target) showTip(target); });
-app.addEventListener('pointerout', event => { if (!(event.relatedTarget instanceof Node) || !tipTarget?.contains(event.relatedTarget)) hideTip(); });
-app.addEventListener('focusin', event => { const target = (event.target as Element).closest<HTMLElement>('[data-word]'); if (target) showTip(target); });
-app.addEventListener('focusout', hideTip);
-window.addEventListener('scroll', hideTip, { passive: true });
-window.addEventListener('keydown', event => { if (event.key === 'Escape') hideTip(); });
+app.addEventListener('pointerover', ev => { const t = (ev.target as Element).closest<HTMLElement>('[data-word]'); if (t) showTip(t); else tip.hidden = true; });
+app.addEventListener('focusin', ev => { const t = (ev.target as Element).closest<HTMLElement>('[data-word]'); if (t) showTip(t); });
+window.addEventListener('scroll', () => { tip.hidden = true; }, { passive: true });
+
+function query(): string {
+    const q = new URLSearchParams();
+    if (range.since != null) q.set('since', String(range.since));
+    if (range.until != null) q.set('until', String(range.until));
+    if (range.find) q.set('find', range.find);
+    const t = q.toString(); return t ? `?${t}` : '';
+}
+let pending = false;
 async function refresh(): Promise<void> {
     if (pending) return; pending = true;
     try {
-        const response = await fetch('/api/state', { cache: 'no-store', signal: AbortSignal.timeout(8000) });
-        if (!response.ok) throw new Error();
-        const next = await response.json() as State;
-        if (!next || typeof next !== 'object' || Array.isArray(next)) throw new Error();
-        await derive(next);
-        const payload = JSON.stringify({ ...next, repo: { ...next.repo, now: Math.floor((next.repo?.now ?? Date.now() / 1000) / 60) } });
-        const first = !ready; const changed = payload !== lastPayload;
-        data = next; ready = true;
-        const recovered = !connection; connection = true;
-        if (changed) { revision++; lastPayload = payload; }
-        // Unchanged polls still get a measured render; put() leaves every DOM node alone.
-        render(changed ? 'state' : recovered ? 'reconnected' : 'unchanged');
-        if (first && location.hash !== '#page' && location.hash !== '') address();
-    } catch {
-        if (connection || !ready) { connection = false; render('connection'); }
-    } finally { pending = false; }
+        const r = await fetch(`/api/state${query()}`, { cache: 'no-store', signal: AbortSignal.timeout(8000) });
+        if (!r.ok) throw 0;
+        const next = await r.json() as State;
+        const payload = JSON.stringify({ ...next, repo: { ...next.repo, now: Math.floor(next.repo.now / 60) } });
+        if (payload !== lastPayload || !connection) {
+            data = next; lastPayload = payload; connection = true; render();
+            void rederive(next).then(() => { if (data === next) render(); }).catch(warnGates);
+        } else data = next;
+    } catch { if (connection) { connection = false; render(); } }
+    finally { pending = false; }
 }
-render('initial');
+render();
 void refresh();
 setInterval(() => void refresh(), 2000);

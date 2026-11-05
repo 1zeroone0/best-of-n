@@ -1,4 +1,4 @@
 /target
 /.claude/settings.local.json
-/.bon/
+/.bon/traces/
 .DS_Store

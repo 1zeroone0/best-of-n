@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="880" height="500" viewBox="0 0 880 500" role="img" aria-labelledby="title desc">
   <title id="title">bon: the five beats inside every search</title>
-  <desc id="desc">Generate: eight agent processes write candidates in parallel. Verify: immutable checks pass some and reject others. Agree: at least two verified candidates produce the same output. Counterexample: another model writes a test and cannot split them. Select: the best lands on trunk. Five kinds share this machine: code, counterexample, compaction, scrub, and map.</desc>
+  <desc id="desc">Generate: eight agent processes write candidates in parallel. Verify: immutable checks pass some and reject others. Agree: at least two verified candidates produce the same output. Counterexample: another model writes a test and cannot split them. Select: the selected candidate is pushed to trunk. Four kinds share this machine: queue, code, compaction, and counterexample.</desc>
   <defs>
     <marker id="arrow-line" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
       <path d="M1 1 L9 5 L1 9" fill="none" stroke="var(--line)" stroke-width="1.5"/>
@@ -236,7 +236,7 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:var
   <g class="scene s4">
     <text x="36" y="91" class="caption" style="fill:var(--blue)">05</text>
     <text x="91" y="91" class="caption">Select</text>
-    <text x="844" y="89" class="label muted" text-anchor="end">The best candidate lands on trunk.</text>
+    <text x="844" y="89" class="label muted" text-anchor="end">The selected candidate is pushed to trunk.</text>
     <rect x="36" y="115" width="152" height="31" rx="8" fill="var(--soft)" stroke="var(--line)"/>
     <text x="112" y="135" class="small heavy" style="fill:var(--muted)" text-anchor="middle">01 Generate</text>
     <rect x="200" y="115" width="152" height="31" rx="8" fill="var(--soft)" stroke="var(--line)"/>
@@ -260,19 +260,19 @@ text{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;fill:var
     <path d="M768 270 l4 4 8 -9" fill="none" stroke="var(--indigo)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
   </g>
   <path d="M36 339 H844" class="line"/>
-  <text x="36" y="363" class="eyebrow muted">FIVE KINDS / IN → OUT</text>
+  <text x="36" y="363" class="eyebrow muted">FOUR KINDS / IN → OUT</text>
   <text x="36" y="387" class="mono label heavy">code</text>
-  <text x="223" y="387" class="mono label muted">intent → code</text>
+  <text x="223" y="387" class="mono label muted">failing checks → code they accept</text>
   <path d="M36 394 H844" stroke="var(--line)" stroke-opacity=".5"/>
   <text x="36" y="410" class="mono label heavy">counterexample</text>
-  <text x="223" y="410" class="mono label muted">candidate → a test that breaks it</text>
+  <text x="223" y="410" class="mono label muted">candidate → a test that splits them</text>
   <path d="M36 417 H844" stroke="var(--line)" stroke-opacity=".5"/>
   <text x="36" y="433" class="mono label heavy">compaction</text>
-  <text x="223" y="433" class="mono label muted">code → less code</text>
+  <text x="223" y="433" class="mono label muted">code and tests → less, same behavior</text>
   <path d="M36 440 H844" stroke="var(--line)" stroke-opacity=".5"/>
-  <text x="36" y="456" class="mono label heavy">scrub</text>
-  <text x="223" y="456" class="mono label muted">intent → a blind test of trunk</text>
+  <text x="36" y="456" class="mono label heavy">counterexample</text>
+  <text x="223" y="456" class="mono label muted">trunk → a blind test it fails</text>
   <path d="M36 463 H844" stroke="var(--line)" stroke-opacity=".5"/>
-  <text x="36" y="479" class="mono label heavy">map</text>
-  <text x="223" y="479" class="mono label muted">transcript → intents</text>
+  <text x="36" y="479" class="mono label heavy">queue</text>
+  <text x="223" y="479" class="mono label muted">transcript → intents not in the spec</text>
 </svg>

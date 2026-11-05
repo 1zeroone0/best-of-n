@@ -35,12 +35,22 @@ pub unsafe extern "C" fn selected(p: *const u64, len: usize) -> i32 {
     }
 }
 
-/// The cleared gate on x, a counterexample search, and t, the search it
-/// tested: 1 cleared, 0 not, -2 if either is not a search.
+/// The not_found gate on x, a counterexample search, and t, the search it
+/// tested: 1 not found, 0 found, -2 if either is not a search.
 #[no_mangle]
-pub unsafe extern "C" fn cleared(x: *const u64, xlen: usize, t: *const u64, tlen: usize) -> i32 {
+pub unsafe extern "C" fn not_found(x: *const u64, xlen: usize, t: *const u64, tlen: usize) -> i32 {
     match (Kernel::decode(&words(x, xlen)), Kernel::decode(&words(t, tlen))) {
-        (Some(x), Some(t)) => Kernel::cleared(&x, &t) as i32,
+        (Some(x), Some(t)) => Kernel::not_found(&x, &t) as i32,
         _ => -2,
+    }
+}
+
+/// The found_on_trunk gate on a counterexample search of trunk: the index of
+/// the test a code search carries, -1 for none, -2 if the words are not a search.
+#[no_mangle]
+pub unsafe extern "C" fn found_on_trunk(p: *const u64, len: usize) -> i32 {
+    match Kernel::decode(&words(p, len)) {
+        Some(s) => Kernel::found_on_trunk(&s).map_or(-1, |i| i as i32),
+        None => -2,
     }
 }

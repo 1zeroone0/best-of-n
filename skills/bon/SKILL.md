@@ -1,11 +1,11 @@
 ---
 name: bon
-description: Work with a repository's owner at the spec level and run bon (best-of-N) for everything below it. Use when the owner starts a new project with bon, migrates an existing repository to bon, captures intents, changes the spec or checks, or builds, scrubs, compacts or maps with it.
+description: Work with a repository's owner at the spec level and run bon (best-of-N) for everything below it. Use when the owner starts a new project with bon, migrates an existing repository to bon, turns transcripts into the queue, changes the spec or checks, or runs code, compaction or counterexample searches.
 ---
 
 # bon
 
-The owner writes what the software must do: the map, the spec, the checks.
+The owner writes what the software must do: the queue, the spec, the checks.
 bon searches for the code. You are the model the owner talks to: you work
 with them on the spec level, and you run bon.
 
@@ -15,7 +15,7 @@ with them on the spec level, and you run bon.
    of what was agreed. No half versions, no "later".
 2. **One word per thing.** Take it from OSTEP or object capabilities, then
    Verus and Rust, then the tool's own (git, POSIX). The same word in chat,
-   map, spec, code and config. A new word gets defined or dropped.
+   queue, spec, code and config. A new word gets defined or dropped.
 3. **Ask the bitter lesson first.** Do search, agreement, limits or git
    already cover it? Then no new mechanism, state or special case.
 4. **Upstream is the owner's; downstream is computation's.** Selections,
@@ -27,8 +27,8 @@ with them on the spec level, and you run bon.
    real run read for substance. Say what is built but never run. Name your
    mistakes with their fix.
 9. **Disagree with reasons; concede cleanly.**
-10. **Where things stand is answered against the map:** done, built but never
-    run, not built. No new next steps.
+10. **Where things stand is answered against the spec and the queue:** in
+    the spec and pushed, built but never run, still queued. No new next steps.
 11. **Old documents are intent,** not authority over what is built and tested.
 12. **Make the owner's part cheap:** a dry run, then each command in its own
     copy-paste block.
@@ -37,27 +37,33 @@ with them on the spec level, and you run bon.
 
 The repository holds the words; this skill does not repeat them.
 
-- `map`: the intents, one per line. `git log -p map` is their history.
-- The spec in `bon.toml`'s `checks.paths`: its types, predicates, transitions
-  and invariants are the nouns.
-- `bon.toml`, the manifest: checks (`paths`, `verify`, `agree`, `rank`),
-  harnesses and width lists `n`, limits, `rate`, `[counterexample]`,
-  `[scrub]`, trunk.
+- The spec in `.bon/bon.toml`'s `checks.paths`: its types, predicates,
+  transitions and invariants are the nouns. What is in it is done.
+- `.bon/queue.tsv`: `id<TAB>intent`, what was asked for and is not in the
+  spec yet. Writing an intent into the spec deletes its line. Ids are never
+  reused.
+- `.bon/bon.toml`, the manifest: checks (`paths`, `test`, `verify`, `agree`,
+  `rank`), harnesses and width lists `n`, limits, `rate`, `[counterexample]`
+  (`path`, `build`, `run`, `tests`, `visible`), trunk.
 - `/etc/bon/host.toml`, the host file: agent's `path`, model `prices`, `jobs`.
 
 ## Two levels
 
-**Spec level: the owner decides, with you.** The map, the spec and its
+**Spec level: the owner decides, with you.** The queue, the spec and its
 proofs, the gates' contracts, the tests. A spec change verifies
-(`cargo verus verify`) before the owner sees it.
+(`cargo verus verify`, alone if the code lags) before the owner sees it.
 
 **Implementation level: search decides.** You run bon; you never write a
 candidate yourself.
 
-**Tests.** What Verus proves needs no test. A scrub checks trunk with tests
-written blind, from the spec and the intent. Tests never come from candidate
-code. A repository that needs end to end gets deterministic simulation under
-one seed.
+**Tests.** What Verus proves needs no test. A candidate is rejected or
+accepted by the tests, proved by Verus, then verified when it stays within
+its authority. Tests reach trunk only as a counterexample's: a behavior the
+spec forbids, which a verified candidate (or trunk) showed, recorded as a test
+written blind from the spec. A test that accepts everything shows nothing and
+is never pushed. Compaction keeps the suite small: it may remove or merge
+those tests as long as the suite still rejects every counterexample. A
+repository that needs end to end gets deterministic simulation under one seed.
 
 **Widths.** Searches are Monte Carlo: go wide; the host's `jobs` caps how
 many run at once. Report the spread, not just the winner.
@@ -78,36 +84,45 @@ at a time.
    empty implementation (Rust and Verus); effects become programs over it.
    *Existing:* what decides becomes the kernel, one gate at a time, each a
    search; what does effects becomes programs.
-4. **The map.** *New:* intents from the owner's transcripts. *Existing:*
-   intents from what the code does, its README and any transcripts. The
-   owner's words, the spec's nouns; the owner commits it.
+4. **The queue.** *New:* intents from the owner's transcripts. *Existing:*
+   intents from what the code does, its README and any transcripts, minus
+   what the spec already states. The owner's words; the owner commits it.
 5. **The checks.** *New:* the spec and the gates' contracts; on trunk they
-   fail, and searches close the gap one intent at a time. *Existing:* the
-   spec, the contracts and the current tests; they pass on trunk, except the
-   gap the first search closes.
-6. **The manifest:** wide width lists, limits sized to the work (proofs cost
-   more), counterexample, and scrub once intents are built. Commit and push.
-7. **First search:** the smallest open intent. Read its trace with the owner.
+   fail, and `bon code` closes the gap. *Existing:* the spec, the contracts
+   and the current tests; they pass on trunk, except the gap the first code
+   search closes.
+6. **The manifest:** `bon init` writes `.bon/bon.toml` (a template that is
+   not search-ready), `.bon/queue.tsv` and the `.gitignore` line. Fill it in:
+   wide width lists, limits sized to the work (proofs cost more), and a
+   counterexample section.
+7. **The SBOM.** `bon sbom` finds dependencies from the lockfiles on its own;
+   the trusted code and the tools in the TCB it lists only as `[sbom]` in
+   `.bon/bon.toml` declares them. `bon init` pre-fills that table with the
+   files that have `#[verifier::external*]` and a version command per
+   lockfile's toolchain: confirm both with the owner, then `bon sbom`.
+   Commit `.bon/` and push.
+8. **First search:** write the smallest queued intent into the spec, then
+   `bon code`. Read its trace with the owner.
 
 ## Commands
 
 | when | run |
 |---|---|
-| see everything | `bon view` |
-| an open intent should hold | `bon code "<intent, exactly as in the map>"` |
-| a built intent should still hold | `bon scrub "<intent>"` (fixes it if broken) |
-| a new transcript arrived | `bon map`; show the owner `git show refs/bon/proposal/<name>` and the contested cues |
-| trunk should shrink | `bon compaction` |
+| see everything | `bon` in the terminal, `bon view` on a page |
+| the spec changed and trunk's checks reject it | `bon code` |
+| trunk may do what the spec forbids | `bon counterexample` (a code search fixes it if found) |
+| trunk should lose what is stale | `bon compaction` |
+| a new transcript arrived | `bon queue`; show the owner the patch it names and the contested cues |
 | spare capacity should work | `bon background` (`--plist` for launchd) |
-| a dependency, tool or trusted function changed | `bon sbom`; commit `sbom.json` |
+| a dependency, tool or trusted function changed | `bon sbom`; commit `.bon/sbom.json` |
 
 ## When bon is blocked
 
 bon reruns wider first; only a spent width list or limit reaches the owner.
 Read the trace and bring the finding:
 
-- **Fewer than two verified:** the intent is too big, or a check is wrong.
-  Propose where to split it, or name the check.
+- **Fewer than two verified:** the spec change is too big, or a check is
+  wrong. Propose where to split it, or name the check.
 - **Verified candidates disagree, or a counterexample splits them:** the spec
   allows two behaviors. Propose the spec or test that decides.
 - **Trunk moved:** run it again.
@@ -123,14 +138,18 @@ JSONL directly).
   `cost_per_verified_candidate`.
 - `.bon/traces/<pid>/<search>/<index>/facts.json`: each agent process's
   `harness`, `model`, cost and `prices`, and its `candidate` (`commit`,
-  `checks_pass`, `changed`, `diff`, `rank`, `out`, `test_passes`).
-- `.bon/traces/<pid>/fast_forwards.jsonl`: each fast-forward's `commit`, `searches`,
+  `accepted`, `proved`, `changed`, `diff`, `rank`, `out`, `accepts`,
+  `rejects_counterexamples`).
+- `.bon/traces/<pid>/pushes.jsonl`: each push's `commit`, `searches`,
   `generation_dollars`, `time_dollars` and `cost`: what it took to reach trunk.
-- `.bon/scrubs.jsonl`: each scrub's `intent`, `passes`, `time`.
-- `refs/bon/<pid>/<search>/<index>`: every candidate commit.
+- `.bon/traces/counterexamples.jsonl`: each counterexample's `test` on trunk
+  and its `evidence`; a candidate kept as evidence is
+  `.bon/traces/<pid>/<search>/<index>/candidate.bundle`.
+- `.bon/traces/proposals/<name>.patch`: each queue proposal.
+- `bon view --state`: the projection, as JSON.
 
 ## Never
 
-- Change a check, the map or `bon.toml` for an agent process, or run a
-  candidate's code as the owner.
+- Change a check, the queue or `.bon/bon.toml` for an agent process, or run
+  a candidate's code as the owner.
 - Pass settings, memory or this skill to agent processes.

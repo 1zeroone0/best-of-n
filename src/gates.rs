@@ -20,7 +20,7 @@ pub type Commit = Vec<char>;
 /// A path in a commit's tree.
 pub type Path = Vec<char>;
 
-/// One line of the map.
+/// One line of the queue.
 pub type Intent = Vec<char>;
 
 /// A WebVTT file.
@@ -42,22 +42,21 @@ impl View for AgentProcess {
 /// What a search is for: its kind, carrying its goal.
 #[allow(inconsistent_fields)]
 pub enum Kind {
-    Code { goal: Intent },
-    Map { goal: Transcript },
-    Counterexample { goal: AgentProcess },
+    Queue { goal: Transcript },
+    Code { goal: Commit },
     Compaction { goal: Commit, out: Vec<u64> },
-    Scrub { goal: Intent, path: Path },
+    Counterexample { goal: Option<AgentProcess> },
 }
 
 impl View for Kind {
     type V = spec::Kind;
     open spec fn view(&self) -> spec::Kind {
         match self {
+            Kind::Queue { goal } => spec::Kind::Queue { goal: goal@ },
             Kind::Code { goal } => spec::Kind::Code { goal: goal@ },
-            Kind::Map { goal } => spec::Kind::Map { goal: goal@ },
-            Kind::Counterexample { goal } => spec::Kind::Counterexample { goal: goal@ },
             Kind::Compaction { goal, out } => spec::Kind::Compaction { goal: goal@, out: hashes(out@) },
-            Kind::Scrub { goal, path } => spec::Kind::Scrub { goal: goal@, path: path@ },
+            Kind::Counterexample { goal } => spec::Kind::Counterexample {
+                goal: match goal { Some(p) => Some(p@), None => None } },
         }
     }
 }
@@ -66,15 +65,17 @@ impl View for Kind {
 pub struct Candidate {
     pub commit: Commit,
     pub base: Commit,
-    pub checks_pass: bool,
+    pub accepted: bool,
+    pub proved: bool,
     pub changed: Vec<Path>,
     pub out: Vec<u64>,
     /// Each new intent, by the cue it cites. A repeated cue: the first counts.
     pub intents: Vec<(Cue, Intent)>,
-    /// Whether this candidate's test passes on each candidate of the goal's
-    /// search, by index (-1 is a compaction search's goal). A repeated index:
-    /// the first counts.
-    pub test_passes: Vec<(i64, bool)>,
+    /// Whether this candidate's test accepts each tested commit: the goal
+    /// search's candidates by index, and trunk's head (or a compaction's goal)
+    /// as -1. A repeated index: the first counts.
+    pub accepts: Vec<(i64, bool)>,
+    pub rejects_counterexamples: bool,
     pub rank: i64,
     pub diff: u64,
 }
@@ -85,11 +86,13 @@ impl View for Candidate {
         spec::Candidate {
             commit: self.commit@,
             base: self.base@,
-            checks_pass: self.checks_pass,
+            accepted: self.accepted,
+            proved: self.proved,
             changed: paths(self.changed@),
             out: hashes(self.out@),
             intents: first_by_key(self.intents@.map_values(|e: (Cue, Intent)| (e.0 as nat, e.1@))),
-            test_passes: first_by_key(self.test_passes@.map_values(|e: (i64, bool)| (e.0 as int, e.1))),
+            accepts: first_by_key(self.accepts@.map_values(|e: (i64, bool)| (e.0 as int, e.1))),
+            rejects_counterexamples: self.rejects_counterexamples,
             rank: self.rank as int,
             diff: self.diff as nat,
         }
@@ -104,6 +107,8 @@ pub struct Search {
     pub n: usize,
     /// The check paths the manifest declares; the authority derives from them.
     pub checks: Vec<Path>,
+    /// The paths holding the counterexamples' tests.
+    pub tests: Vec<Path>,
     pub limit: u64,
     pub results: Vec<Option<Candidate>>,
 }
@@ -115,7 +120,7 @@ impl View for Search {
             kind: self.kind@,
             base: self.base@,
             n: self.n as nat,
-            authority: spec::authority(self.kind@, paths(self.checks@)),
+            authority: spec::authority(self.kind@, paths(self.checks@), paths(self.tests@)),
             limit: self.limit as nat,
             results: Map::new(
                 Set::range(0int, self.results.len() as int),
@@ -160,7 +165,7 @@ pub open spec fn observed(checks: Permission, transcripts: Permission, working_d
 //
 // How the kernel writes a search to a trace and reads it back, compiled into
 // the bon process and into the gates in WebAssembly alike: words (u64), each
-// list led by its length. (intents 27, 28)
+// list led by its length.
 
 /// A char as a word. Reading one back uses char::from_u32. (TCB: Rust std)
 pub assume_specification[ core::char::from_u32 ](i: u32) -> (r: Option<char>)
@@ -178,26 +183,31 @@ pub open spec fn texts(ts: Seq<Vec<char>>) -> Seq<u64> {
     seq![ts.len() as u64] + ts.map_values(|t: Vec<char>| text(t@)).flatten()
 }
 
-/// A kind: a tag (0 code, 1 map, 2 counterexample, 3 compaction, 4 scrub), then its fields.
+/// A kind: a tag (0 queue, 1 code, 2 compaction, 3 counterexample), then its
+/// fields; a counterexample's goal is 0 for trunk, or 1 and the agent process.
 pub open spec fn kind_words(k: Kind) -> Seq<u64> {
     match k {
-        Kind::Code { goal } => seq![0u64] + text(goal@),
-        Kind::Map { goal } => seq![1u64] + text(goal@),
-        Kind::Counterexample { goal } => seq![2u64, goal.search as u64, goal.index as u64],
-        Kind::Compaction { goal, out } => seq![3u64] + text(goal@) + seq![out.len() as u64] + out@,
-        Kind::Scrub { goal, path } => seq![4u64] + text(goal@) + text(path@),
+        Kind::Queue { goal } => seq![0u64] + text(goal@),
+        Kind::Code { goal } => seq![1u64] + text(goal@),
+        Kind::Compaction { goal, out } => seq![2u64] + text(goal@) + seq![out.len() as u64] + out@,
+        Kind::Counterexample { goal } => match goal {
+            Some(p) => seq![3u64, 1u64, p.search as u64, p.index as u64],
+            None => seq![3u64, 0u64],
+        },
     }
 }
+
+pub open spec fn bit(b: bool) -> u64 { if b { 1u64 } else { 0u64 } }
 
 /// A candidate, field by field in declaration order; a bool is 0 or 1, and
 /// rank is its two's complement.
 pub open spec fn candidate_words(c: Candidate) -> Seq<u64> {
-    text(c.commit@) + text(c.base@) + seq![if c.checks_pass { 1u64 } else { 0u64 }] + texts(c.changed@)
+    text(c.commit@) + text(c.base@) + seq![bit(c.accepted), bit(c.proved)] + texts(c.changed@)
         + seq![c.out.len() as u64] + c.out@
         + seq![c.intents.len() as u64] + c.intents@.map_values(|e: (Cue, Intent)| seq![e.0] + text(e.1@)).flatten()
-        + seq![c.test_passes.len() as u64]
-        + c.test_passes@.map_values(|e: (i64, bool)| seq![e.0 as u64, if e.1 { 1u64 } else { 0u64 }]).flatten()
-        + seq![c.rank as u64, c.diff]
+        + seq![c.accepts.len() as u64]
+        + c.accepts@.map_values(|e: (i64, bool)| seq![e.0 as u64, bit(e.1)]).flatten()
+        + seq![bit(c.rejects_counterexamples), c.rank as u64, c.diff]
 }
 
 /// A result: 0 for none, or 1 and the candidate.
@@ -207,14 +217,14 @@ pub open spec fn result_words(r: Option<Candidate>) -> Seq<u64> {
 
 /// A search, field by field in declaration order.
 pub open spec fn encoded(s: Search) -> Seq<u64> {
-    kind_words(s.kind) + text(s.base@) + seq![s.n as u64] + texts(s.checks@) + seq![s.limit]
+    kind_words(s.kind) + text(s.base@) + seq![s.n as u64] + texts(s.checks@) + texts(s.tests@) + seq![s.limit]
         + seq![s.results.len() as u64] + s.results@.map_values(|r: Option<Candidate>| result_words(r)).flatten()
 }
 
 // ── emission ────────────────────────────────────────────
 //
 // What programs read: a search as JSON text, in the spec's names. Hashes are
-// strings, since a JSON number loses u64 precision in a browser. (intent 27)
+// strings, since a JSON number loses u64 precision in a browser.
 
 /// n in decimal.
 pub open spec fn decimal(n: nat) -> Seq<char>
@@ -287,14 +297,14 @@ pub open spec fn hash_strings(hs: Seq<u64>) -> Seq<char> {
 /// A kind as {"<kind>":{fields}}.
 pub open spec fn kind_json(k: Kind) -> Seq<char> {
     match k {
+        Kind::Queue { goal } => object(seq![field("queue"@, object(seq![field("goal"@, string(goal@))]))]),
         Kind::Code { goal } => object(seq![field("code"@, object(seq![field("goal"@, string(goal@))]))]),
-        Kind::Map { goal } => object(seq![field("map"@, object(seq![field("goal"@, string(goal@))]))]),
-        Kind::Counterexample { goal } => object(seq![field("counterexample"@, object(seq![field("goal"@, object(seq![
-            field("search"@, decimal(goal.search as nat)), field("index"@, decimal(goal.index as nat))]))]))]),
         Kind::Compaction { goal, out } => object(seq![field("compaction"@, object(seq![
             field("goal"@, string(goal@)), field("out"@, hash_strings(out@))]))]),
-        Kind::Scrub { goal, path } => object(seq![field("scrub"@, object(seq![
-            field("goal"@, string(goal@)), field("path"@, string(path@))]))]),
+        Kind::Counterexample { goal } => object(seq![field("counterexample"@, object(seq![field("goal"@, match goal {
+            Some(p) => object(seq![field("search"@, decimal(p.search as nat)), field("index"@, decimal(p.index as nat))]),
+            None => seq!['n', 'u', 'l', 'l'],
+        })]))]),
     }
 }
 
@@ -303,11 +313,13 @@ pub open spec fn candidate_json(c: Candidate) -> Seq<char> {
     object(seq![
         field("commit"@, string(c.commit@)),
         field("base"@, string(c.base@)),
-        field("checks_pass"@, boolean(c.checks_pass)),
+        field("accepted"@, boolean(c.accepted)),
+        field("proved"@, boolean(c.proved)),
         field("changed"@, strings(c.changed@)),
         field("out"@, hash_strings(c.out@)),
         field("intents"@, array(c.intents@.map_values(|e: (Cue, Intent)| array(seq![decimal(e.0 as nat), string(e.1@)])))),
-        field("test_passes"@, array(c.test_passes@.map_values(|e: (i64, bool)| array(seq![signed(e.0 as int), boolean(e.1)])))),
+        field("accepts"@, array(c.accepts@.map_values(|e: (i64, bool)| array(seq![signed(e.0 as int), boolean(e.1)])))),
+        field("rejects_counterexamples"@, boolean(c.rejects_counterexamples)),
         field("rank"@, signed(c.rank as int)),
         field("diff"@, decimal(c.diff as nat)),
     ])
@@ -320,6 +332,7 @@ pub open spec fn json(s: Search) -> Seq<char> {
         field("base"@, string(s.base@)),
         field("n"@, decimal(s.n as nat)),
         field("checks"@, strings(s.checks@)),
+        field("tests"@, strings(s.tests@)),
         field("limit"@, decimal(s.limit as nat)),
         field("results"@, array(s.results@.map_values(|r: Option<Candidate>| match r {
             Some(c) => candidate_json(c), None => seq!['n', 'u', 'l', 'l'] }))),
@@ -327,7 +340,7 @@ pub open spec fn json(s: Search) -> Seq<char> {
 }
 
 /// Encoding and reading back preserve what the gates decide on; emission is
-/// what programs read. (intents 27, 28)
+/// what programs read.
 pub trait Encoding {
     /// A search as words.
     fn encode(s: &Search) -> (r: Vec<u64>)
@@ -355,27 +368,35 @@ pub trait Encoding {
 /// Each gate is named for the spec predicate it decides, and its contract is
 /// that predicate.
 pub trait Gates {
-    /// agent's permissions match the policy. (intent 9)
+    /// agent's permissions match the policy.
     fn isolated(checks: Permission, transcripts: Permission, working_directory: Permission, repository: Permission, working_directories: Permission) -> (r: bool)
         ensures r == spec::isolated(observed(checks, transcripts, working_directory, repository, working_directories));
 
-    /// Every check passed, and every changed path is within the authority. (intent 3)
+    /// Accepted, proved, every changed path within the authority, and for a
+    /// compaction, every counterexample still rejected.
     fn verified(s: &Search, c: &Candidate) -> (r: bool)
         ensures r == spec::verified(s@, c@);
 
-    /// The selected candidate, if the search has one. (intents 4, 5, 17)
+    /// The selected candidate, if the search has one.
     fn selected(s: &Search) -> (r: Option<usize>)
         requires s.results.len() == s.n,
         ensures
             r matches Some(i) ==> spec::selected(s@, i as int),
             r is None ==> forall|i: int| !spec::selected(s@, i);
 
-    /// No verified test of x splits t. (intent 13)
-    fn cleared(x: &Search, t: &Search) -> (r: bool)
+    /// No verified test of x splits t.
+    fn not_found(x: &Search, t: &Search) -> (r: bool)
         requires x.results.len() == x.n, t.results.len() == t.n,
-        ensures r == spec::cleared(x@, t@);
+        ensures r == spec::not_found(x@, t@);
 
-    /// The proposal: each agreed cue with its proposed wording, once. (intent 10)
+    /// The test a code search carries, if x found a counterexample on trunk.
+    fn found_on_trunk(x: &Search) -> (r: Option<usize>)
+        requires x.results.len() == x.n,
+        ensures
+            r matches Some(i) ==> spec::found_on_trunk(x@, i as int),
+            r is None ==> forall|i: int| !spec::found_on_trunk(x@, i);
+
+    /// The proposal: each agreed cue with its proposed wording, once.
     fn proposed(s: &Search) -> (r: Vec<(Cue, Intent)>)
         requires s.results.len() == s.n,
         ensures
@@ -383,7 +404,7 @@ pub trait Gates {
             forall|q: Cue, w: Seq<char>| spec::proposed(s@, q as nat, w) ==>
                 exists|k: int| 0 <= k < r.len() && r[k].0 == q;
 
-    /// The cues only one verified candidate cites, once each. (intent 10)
+    /// The cues only one verified candidate cites, once each.
     fn contested(s: &Search) -> (r: Vec<Cue>)
         requires s.results.len() == s.n,
         ensures

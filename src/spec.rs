@@ -1,8 +1,12 @@
 //! bon's spec: types, predicates, then the state machine (state, init,
 //! transitions, properties, invariants, proofs). Every term is from OSTEP,
 //! object capabilities, Verus or Rust, or a TCB component's own terms (git,
-//! WebVTT); bon's own nouns are intent, map, transcript, candidate, check,
-//! search, counterexample and proposal.
+//! WebVTT); bon's own nouns are intent, queue, transcript, candidate, check,
+//! test, search, counterexample, proposal and generation.
+//!
+//! A candidate is rejected or accepted by the tests; an accepted candidate is
+//! verified when Verus verifies it within its authority; a verified candidate
+//! may be selected; a selected one may be pushed to trunk.
 
 use vstd::prelude::*;
 use verus_state_machines_macros::tokenized_state_machine;
@@ -17,7 +21,7 @@ pub type Commit = Seq<char>;
 /// A path in a commit's tree, as git reports it. (TCB: git)
 pub type Path = Seq<char>;
 
-/// One line of the map: what is wanted.
+/// One line of the queue: what is wanted and not yet in the spec.
 pub type Intent = Seq<char>;
 
 /// A WebVTT file, one per recorded call. (TCB: WebVTT)
@@ -57,39 +61,45 @@ pub struct AgentProcess { pub search: int, pub index: int }
 /// What a search is for: its kind, carrying its goal. Each kind's goal has its own type.
 #[allow(inconsistent_fields)]
 pub enum Kind {
-    /// The goal is an intent in the map. Ends in fast_forward.
-    Code { goal: Intent },
-    /// The goal is a transcript. Ends in a proposal to engineer.
-    Map { goal: Transcript },
-    /// The goal is the agent process whose candidate it attacks: the selected
-    /// candidate of a code or compaction search. Clears or blocks that fast-forward.
-    Counterexample { goal: AgentProcess },
-    /// The goal is trunk's head, to remove or simplify code without changing
-    /// behavior. `out` is the goal's agree-check outputs, as trusted code
-    /// observed them. Ends in fast_forward. (intent 17)
+    /// The goal is a transcript: candidates write queue lines. Ends in a
+    /// proposal to engineer.
+    Queue { goal: Transcript },
+    /// The goal is trunk's head: candidates write code until trunk's checks
+    /// accept it. Ends in push.
+    Code { goal: Commit },
+    /// The goal is trunk's head: candidates remove stale code and tests, or
+    /// write them cleaner, without changing behavior. `out` is the goal's
+    /// agree-check outputs, as trusted code observed them. Ends in push.
     Compaction { goal: Commit, out: Seq<nat> },
-    /// The goal is an intent in the map, checked against trunk by a test written
-    /// from the spec and the intent, never the implementation, at `path`.
-    /// An agreed pass is retained on trunk. (intent 21)
-    Scrub { goal: Intent, path: Path },
+    /// Candidates write a test from the spec, never from code, looking for a
+    /// behavior the spec forbids. The goal is the selected candidate of a code
+    /// or compaction search, whose push it clears or blocks; or, when None,
+    /// trunk's head, where a counterexample starts a code search that carries
+    /// its test.
+    Counterexample { goal: Option<AgentProcess> },
 }
 
 /// One generated change, as trusted code observed it after its agent process exited.
 pub struct Candidate {
     pub commit: Commit,
     pub base: Commit,
-    /// Every check exited 0. (TCB: trusted code ran them)
-    pub checks_pass: bool,
+    /// Every test accepted it: each test check exited 0. (TCB: trusted code ran them)
+    pub accepted: bool,
+    /// Verus verified the spec and proofs at this commit. (TCB: trusted code ran it)
+    pub proved: bool,
     /// The paths the diff changed, as git reports them.
     pub changed: Set<Path>,
     /// Code: a hash of each agree check's output, in manifest order.
     pub out: Seq<nat>,
-    /// Map: each new intent, by the cue it cites.
+    /// Queue: each new intent, by the cue it cites.
     pub intents: Map<Cue, Intent>,
-    /// Counterexample: whether this candidate's test passes on each candidate
-    /// of the goal's search, by index; index -1 is a compaction search's goal.
-    /// (TCB: trusted code ran it)
-    pub test_passes: Map<int, bool>,
+    /// Counterexample: whether this candidate's test accepts each tested
+    /// commit: the goal search's candidates by index, and trunk's head (or a
+    /// compaction's goal) as index -1. (TCB: trusted code ran it)
+    pub accepts: Map<int, bool>,
+    /// Compaction: this candidate's tests reject every counterexample on
+    /// trunk. (TCB: trusted code ran them)
+    pub rejects_counterexamples: bool,
     pub rank: int,
     /// Lines changed against base.
     pub diff: nat,
@@ -100,7 +110,7 @@ pub struct Capability {
     pub base: Commit,
     /// The paths it may change, attenuated by the search's kind at grant.
     pub authority: ISet<Path>,
-    /// The cost it may spend, reserved from the bon process's limit at grant.
+    /// The generation it may spend, reserved from the bon process's limit at grant.
     pub limit: nat,
 }
 
@@ -119,29 +129,37 @@ pub struct Search {
 
 // ── predicates ──────────────────────────────────────────
 
-/// The map's path.
-pub open spec fn map_path() -> Path { seq!['m', 'a', 'p'] }
+/// bon's directory in the repository: the manifest, the queue, the SBOM and
+/// the traces.
+pub open spec fn bon_path() -> Path { seq!['.', 'b', 'o', 'n', '/'] }
 
-/// The manifest's path. It declares the checks, so it is protected like them.
-pub open spec fn manifest_path() -> Path { seq!['b', 'o', 'n', '.', 't', 'o', 'm', 'l'] }
+/// The queue's path, under bon's directory.
+pub open spec fn queue_path() -> Path { bon_path() + seq!['q', 'u', 'e', 'u', 'e', '.', 't', 's', 'v'] }
 
-/// No candidate may change p: the map, the manifest, or a path under a check.
-/// A check path covers itself and every path it is a prefix of.
-pub open spec fn protected(checks: Set<Path>, p: Path) -> bool {
-    p == map_path() || p == manifest_path()
-    || exists|c: Path| checks.contains(c) && c.is_prefix_of(p)
+/// p is under one of the paths: each covers itself and every path it is a prefix of.
+pub open spec fn under(paths: Set<Path>, p: Path) -> bool {
+    exists|c: Path| paths.contains(c) && c.is_prefix_of(p)
 }
 
-/// Attenuation at grant: what a capability for this kind may change. (intents 3, 10)
-pub open spec fn authority(kind: Kind, checks: Set<Path>) -> ISet<Path> {
+/// No search may change p, except a queue search the queue: bon's directory,
+/// or a path under a check (the spec, the proofs, engineer's tests).
+pub open spec fn protected(checks: Set<Path>, p: Path) -> bool {
+    bon_path().is_prefix_of(p) || under(checks, p)
+}
+
+/// Attenuation at grant: what a capability for this kind may change. `tests`
+/// holds the counterexamples' tests on trunk: code may not change them,
+/// compaction may, and a counterexample writes only there.
+pub open spec fn authority(kind: Kind, checks: Set<Path>, tests: Set<Path>) -> ISet<Path> {
     match kind {
-        Kind::Map { .. } => ISet::new(|p: Path| p == map_path()),
-        Kind::Scrub { path, .. } => ISet::new(|p: Path| p == path),
-        _ => ISet::new(|p: Path| !protected(checks, p)),
+        Kind::Queue { .. } => ISet::new(|p: Path| p == queue_path()),
+        Kind::Code { .. } => ISet::new(|p: Path| !protected(checks, p) && !under(tests, p)),
+        Kind::Compaction { .. } => ISet::new(|p: Path| !protected(checks, p)),
+        Kind::Counterexample { .. } => ISet::new(|p: Path| !protected(checks, p) && under(tests, p)),
     }
 }
 
-/// Who may do what. (intent 8)
+/// Who may do what.
 pub open spec fn policy(u: User, f: Object) -> Permission {
     match (u, f) {
         (User::agent, Object::Checks)           => Permission { read: true,  write: false, execute: true },
@@ -153,7 +171,7 @@ pub open spec fn policy(u: User, f: Object) -> Permission {
     }
 }
 
-/// agent's permissions, as trusted code observed them, match the policy. (intent 9)
+/// agent's permissions, as trusted code observed them, match the policy.
 pub open spec fn isolated(observed: Map<Object, Permission>) -> bool {
     forall|f: Object| observed.contains_key(f) && observed[f] == policy(User::agent, f)
 }
@@ -161,10 +179,19 @@ pub open spec fn isolated(observed: Map<Object, Permission>) -> bool {
 /// The candidate at index i. Meaningful only when one exists.
 pub open spec fn at(s: Search, i: int) -> Candidate { s.results[i]->Some_0 }
 
-/// Passed the vertical bottleneck: every check passes, and every changed path
-/// is within the search's authority. (intent 3)
+/// Every test accepted c.
+pub open spec fn accepted(c: Candidate) -> bool { c.accepted }
+
+/// Some test rejected c.
+pub open spec fn rejected(c: Candidate) -> bool { !c.accepted }
+
+/// Passed the vertical bottleneck: accepted, Verus verified it, and every
+/// changed path is within the search's authority. A compaction's candidate
+/// also keeps rejecting every counterexample.
 pub open spec fn verified(s: Search, c: Candidate) -> bool {
-    c.checks_pass && forall|p: Path| c.changed.contains(p) ==> s.authority.contains(p)
+    accepted(c) && c.proved
+    && (forall|p: Path| c.changed.contains(p) ==> s.authority.contains(p))
+    && (s.kind is Compaction ==> c.rejects_counterexamples)
 }
 
 pub open spec fn verified_at(s: Search, i: int) -> bool {
@@ -177,12 +204,11 @@ pub open spec fn complete(s: Search) -> bool {
 }
 
 /// At least two verified candidates, and every verified pair prints the same.
-/// (intent 4) Compaction also measures them against its goal: every
-/// verified candidate prints the same as the goal. The goal never votes; it is
-/// measured. (intent 17)
+/// Compaction also measures them against its goal: every verified candidate
+/// prints the same as the goal. The goal never votes; it is measured.
 pub open spec fn agree(s: Search) -> bool {
     complete(s) && match s.kind {
-        Kind::Code { .. } | Kind::Scrub { .. } =>
+        Kind::Code { .. } =>
             (exists|i: int, j: int| i != j && verified_at(s, i) && verified_at(s, j))
             && forall|i: int, j: int| verified_at(s, i) && verified_at(s, j) ==> at(s, i).out == at(s, j).out,
         Kind::Compaction { out, .. } =>
@@ -192,29 +218,19 @@ pub open spec fn agree(s: Search) -> bool {
     }
 }
 
-/// Scrub: candidate c's test passes on trunk, as trusted code observed it (index -1).
-pub open spec fn passes_on_trunk(c: Candidate) -> bool {
-    c.test_passes.contains_key(-1) && c.test_passes[-1]
+/// Candidate i of search k may be pushed: a counterexample search on it found none.
+pub open spec fn pushable(searches: Seq<Search>, k: int, i: int) -> bool {
+    exists|x: int| 0 <= x < searches.len()
+        && searches[x].kind == (Kind::Counterexample { goal: Some(AgentProcess { search: k, index: i }) })
+        && not_found(searches[x], searches[k])
 }
 
-/// Candidate i of search k may land on trunk: a code or compaction candidate once
-/// a counterexample search on it cleared; a scrub candidate when its test passes
-/// on trunk. (intents 13, 21)
-pub open spec fn landable(searches: Seq<Search>, k: int, i: int) -> bool {
-    match searches[k].kind {
-        Kind::Scrub { .. } => passes_on_trunk(at(searches[k], i)),
-        _ => exists|x: int| 0 <= x < searches.len()
-            && searches[x].kind == (Kind::Counterexample { goal: AgentProcess { search: k, index: i } })
-            && cleared(searches[x], searches[k]),
-    }
-}
-
-/// a at index ai outranks b at index bi: rank, then smaller diff, then earlier. (intent 5)
+/// a at index ai outranks b at index bi: rank, then smaller diff, then earlier.
 pub open spec fn beats(a: Candidate, ai: int, b: Candidate, bi: int) -> bool {
     a.rank > b.rank || (a.rank == b.rank && (a.diff < b.diff || (a.diff == b.diff && ai < bi)))
 }
 
-/// Code or compaction: index i is selected. (intents 4, 5, 17)
+/// Code or compaction: index i is selected.
 pub open spec fn selected(s: Search, i: int) -> bool {
     agree(s) && verified_at(s, i)
     && forall|j: int| j != i && verified_at(s, j) ==> beats(at(s, i), i, at(s, j), j)
@@ -226,12 +242,13 @@ pub open spec fn member(t: Search, j: int) -> bool {
     verified_at(t, j) || (t.kind is Compaction && j == -1)
 }
 
-/// Counterexample: x's test splits the members of t. A test with no result on
-/// a member counts as splitting. (intents 13, 17)
+/// Counterexample: x's test splits the members of t: it accepts one and
+/// rejects another, so one shows a behavior the spec forbids. A test with no
+/// result on a member counts as splitting.
 pub open spec fn splits(t: Search, x: Candidate) -> bool {
     exists|j1: int, j2: int| member(t, j1) && member(t, j2)
-        && !(x.test_passes.contains_key(j1) && x.test_passes.contains_key(j2)
-             && x.test_passes[j1] == x.test_passes[j2])
+        && !(x.accepts.contains_key(j1) && x.accepts.contains_key(j2)
+             && x.accepts[j1] == x.accepts[j2])
 }
 
 /// Counterexample: some verified candidate of x splits t.
@@ -239,39 +256,53 @@ pub open spec fn found(x: Search, t: Search) -> bool {
     complete(x) && exists|i: int| verified_at(x, i) && splits(t, at(x, i))
 }
 
-/// Counterexample: every agent process of x returned, and no verified test splits t.
-pub open spec fn cleared(x: Search, t: Search) -> bool {
+/// Counterexample: every agent process of x returned, and no verified test splits t:
+/// no counterexample was found. The pair of `found`.
+pub open spec fn not_found(x: Search, t: Search) -> bool {
     complete(x) && forall|i: int| verified_at(x, i) ==> !splits(t, at(x, i))
 }
 
-/// Map: verified candidate i cites cue q.
+/// Counterexample on trunk: x's verified test i rejects trunk's head.
+pub open spec fn rejects_trunk(x: Search, i: int) -> bool {
+    verified_at(x, i) && at(x, i).accepts.contains_key(-1) && !at(x, i).accepts[-1]
+}
+
+/// Counterexample on trunk: at least two verified tests reject trunk's head, so
+/// trunk shows a behavior the spec forbids. The code search that follows
+/// carries the test at index i: of those that reject trunk, the highest rank.
+pub open spec fn found_on_trunk(x: Search, i: int) -> bool {
+    complete(x) && rejects_trunk(x, i)
+    && (exists|j: int| j != i && rejects_trunk(x, j))
+    && forall|j: int| j != i && rejects_trunk(x, j) ==> beats(at(x, i), i, at(x, j), j)
+}
+
+/// Queue: verified candidate i cites cue q.
 pub open spec fn cites(s: Search, i: int, q: Cue) -> bool {
     verified_at(s, i) && at(s, i).intents.contains_key(q)
 }
 
-/// Map: at least two verified candidates cite q. (intent 10)
+/// Queue: at least two verified candidates cite q.
 pub open spec fn agreed(s: Search, q: Cue) -> bool {
     complete(s) && exists|i: int, j: int| i != j && cites(s, i, q) && cites(s, j, q)
 }
 
-/// Map: exactly one verified candidate cites q. Shown to engineer apart from the proposal.
+/// Queue: exactly one verified candidate cites q. Shown to engineer apart from the proposal.
 pub open spec fn contested(s: Search, q: Cue) -> bool {
     complete(s) && (exists|i: int| cites(s, i, q))
     && forall|i: int, j: int| cites(s, i, q) && cites(s, j, q) ==> i == j
 }
 
-/// Map: w is the proposal's wording for q: the shortest among the citing
-/// candidates, ties to the earliest. (intent 10)
+/// Queue: w is the proposal's wording for q: the shortest among the citing
+/// candidates, ties to the earliest.
 pub open spec fn proposed(s: Search, q: Cue, w: Intent) -> bool {
-    s.kind is Map && agreed(s, q)
+    s.kind is Queue && agreed(s, q)
     && exists|i: int| cites(s, i, q) && at(s, i).intents[q] == w
         && forall|j: int| cites(s, j, q) ==>
             w.len() < at(s, j).intents[q].len() || (w.len() == at(s, j).intents[q].len() && i <= j)
 }
 
 /// Where a search's candidates start: always trunk's head. A counterexample's
-/// test is written from the spec and the intent, never from candidate code.
-/// (intent 22)
+/// test is written from the spec, never from candidate code.
 pub open spec fn start(kind: Kind, searches: Seq<Search>, head: Commit) -> Commit {
     head
 }
@@ -294,31 +325,31 @@ tokenized_state_machine!{ bon {
     // ── state ───────────────────────────────────────────
 
     fields {
-        /// The current intents: the map at trunk's head. (intent 1)
-        #[sharding(variable)] pub map: Set<Intent>,
         /// The check paths the manifest declares at trunk's head.
         #[sharding(variable)] pub checks: Set<Path>,
+        /// The paths holding the counterexamples' tests at trunk's head.
+        #[sharding(variable)] pub tests: Set<Path>,
         /// Trunk's history; last() is the head.
         #[sharding(variable)] pub trunk: Seq<Commit>,
         /// The git author of each trunk commit, in step with trunk.
         #[sharding(variable)] pub authors: Seq<User>,
         #[sharding(variable)] pub searches: Seq<Search>,
-        /// The bon process's limit, and what it has spent and reserved against it. (intent 16)
+        /// The bon process's limit, and what it has spent and reserved against it.
         #[sharding(variable)] pub limit: nat,
         #[sharding(variable)] pub spent: nat,
         #[sharding(variable)] pub reserved: nat,
         /// Outstanding capabilities, keyed by the agent process that holds each.
         /// Each is a Verus token: the token is how Verus represents a capability;
         /// capability is the term. An agent process holds exactly one, and waiting
-        /// on it consumes it. (intent 7)
+        /// on it consumes it.
         #[sharding(map)] pub capability: Map<AgentProcess, Capability>,
     }
 
     // ── init ────────────────────────────────────────────
 
-    init!{ initialize(root: Commit, intents: Set<Intent>, checks: Set<Path>, limit: nat) {
-        init map = intents;
+    init!{ initialize(root: Commit, checks: Set<Path>, tests: Set<Path>, limit: nat) {
         init checks = checks;
+        init tests = tests;
         init trunk = Seq::empty().push(root);
         init authors = Seq::empty().push(User::engineer);
         init searches = Seq::empty();
@@ -330,69 +361,57 @@ tokenized_state_machine!{ bon {
 
     // ── transitions ─────────────────────────────────────
 
-    /// engineer committed to trunk, e.g. the map or the checks. (intent 6)
-    transition!{ advance(c: Commit, intents: Set<Intent>, checks: Set<Path>) {
-        update map = intents;
+    /// engineer committed to trunk, e.g. the queue, the spec or the checks.
+    transition!{ advance(c: Commit, checks: Set<Path>, tests: Set<Path>) {
         update checks = checks;
+        update tests = tests;
         update trunk = pre.trunk.push(c);
         update authors = pre.authors.push(User::engineer);
     }}
 
     /// Open a search and grant one capability per agent process, reserving each
     /// one's limit. One search runs at a time; its agent processes run in parallel.
-    /// (intents 2, 7, 9, 10, 13, 16, 17)
     transition!{ grant(kind: Kind, n: nat, l: nat, observed: Map<Object, Permission>) {
         require isolated(observed);
         require forall|k: int| 0 <= k < pre.searches.len() ==> complete(#[trigger] pre.searches[k]);
         require pre.spent + pre.reserved + l * n <= pre.limit;
-        require kind matches Kind::Code { goal } ==> pre.map.contains(goal);
+        require kind matches Kind::Code { goal } ==> goal == pre.trunk.last();
         require kind matches Kind::Compaction { goal, .. } ==> goal == pre.trunk.last();
-        require kind matches Kind::Counterexample { goal } ==>
-            0 <= goal.search < pre.searches.len()
-            && selected(pre.searches[goal.search], goal.index)
-            && pre.searches[goal.search].base == pre.trunk.last();
+        require kind matches Kind::Counterexample { goal: Some(p) } ==>
+            0 <= p.search < pre.searches.len()
+            && selected(pre.searches[p.search], p.index)
+            && pre.searches[p.search].base == pre.trunk.last();
         let k = pre.searches.len() as int;
         let base = start(kind, pre.searches, pre.trunk.last());
-        let a = authority(kind, pre.checks);
+        let a = authority(kind, pre.checks, pre.tests);
         update searches = pre.searches.push(Search { kind, base, n, authority: a, limit: l, results: Map::empty() });
         update reserved = pre.reserved + l * n;
         add capability += (granted(k, n, base, a, l));
     }}
 
     /// The bon process waits on an agent process and records what it returned and
-    /// what it cost, consuming its capability and settling its limit. (OSTEP: wait)
-    /// (intents 2, 7, 16)
-    transition!{ wait(p: AgentProcess, cap: Capability, result: Option<Candidate>, cost: nat) {
+    /// its generation, consuming its capability and settling its limit. Generation is
+    /// what the agent process's models charged for its tokens, at the host file's
+    /// prices (TCB: trusted code counted it). A search's cost is its generation plus
+    /// time: the rate in bon.toml times its wall time. (OSTEP: wait)
+    transition!{ wait(p: AgentProcess, cap: Capability, result: Option<Candidate>, generation: nat) {
         remove capability -= [p => cap];
         require result matches Some(c) ==> c.base == cap.base;
-        require cost <= cap.limit;
+        require generation <= cap.limit;
         let s = pre.searches[p.search];
         update searches = pre.searches.update(p.search,
             Search { results: s.results.insert(p.index, result), ..s });
-        update spent = pre.spent + cost;
+        update spent = pre.spent + generation;
         update reserved = (pre.reserved - cap.limit) as nat;
     }}
 
-    /// Code or compaction: trunk fast-forwards to the selected candidate, if a counterexample
-    /// search on it cleared and trunk hasn't moved. (intents 6, 13)
-    transition!{ fast_forward(k: int, i: int, x: int) {
+    /// Code or compaction: the selected candidate is pushed to trunk, if a
+    /// counterexample search on it found none and trunk hasn't moved. (git: push)
+    transition!{ push(k: int, i: int, x: int) {
         require 0 <= k < pre.searches.len() && 0 <= x < pre.searches.len();
-        require !(pre.searches[k].kind is Scrub);
         require selected(pre.searches[k], i);
-        require pre.searches[x].kind == Kind::Counterexample { goal: AgentProcess { search: k, index: i } };
-        require cleared(pre.searches[x], pre.searches[k]);
-        require pre.searches[k].base == pre.trunk.last();
-        update trunk = pre.trunk.push(at(pre.searches[k], i).commit);
-        update authors = pre.authors.push(User::agent);
-    }}
-
-    /// Scrub: trunk retains the selected test when it passes on trunk and trunk
-    /// hasn't moved. (intent 21)
-    transition!{ retain(k: int, i: int) {
-        require 0 <= k < pre.searches.len();
-        require pre.searches[k].kind is Scrub;
-        require selected(pre.searches[k], i);
-        require passes_on_trunk(at(pre.searches[k], i));
+        require pre.searches[x].kind == Kind::Counterexample { goal: Some(AgentProcess { search: k, index: i }) };
+        require not_found(pre.searches[x], pre.searches[k]);
         require pre.searches[k].base == pre.trunk.last();
         update trunk = pre.trunk.push(at(pre.searches[k], i).commit);
         update authors = pre.authors.push(User::agent);
@@ -414,7 +433,7 @@ tokenized_state_machine!{ bon {
     }
 
     /// Each capability is held by an agent process for one open index of the
-    /// running search, with that search's base, authority and limit. (intent 7)
+    /// running search, with that search's base, authority and limit.
     #[invariant]
     pub fn capability_open(&self) -> bool {
         forall|p: AgentProcess| #[trigger] self.capability.contains_key(p) ==> {
@@ -437,7 +456,7 @@ tokenized_state_machine!{ bon {
     }
 
     /// Nothing spends past its limit: what is reserved is exactly the limits of
-    /// the outstanding capabilities. (intent 16)
+    /// the outstanding capabilities.
     #[invariant]
     pub fn within_limit(&self) -> bool {
         self.spent + self.reserved <= self.limit
@@ -446,7 +465,7 @@ tokenized_state_machine!{ bon {
             self.reserved == self.searches.last().limit * self.capability.dom().len())
     }
 
-    /// Candidates of a search are siblings of its base. (intent 2)
+    /// Candidates of a search are siblings of its base.
     #[invariant]
     pub fn siblings(&self) -> bool {
         forall|k: int, i: int| 0 <= k < self.searches.len()
@@ -454,14 +473,14 @@ tokenized_state_machine!{ bon {
             ==> at(self.searches[k], i).base == self.searches[k].base
     }
 
-    /// Every trunk commit authored by agent is exactly a selected, landable
-    /// candidate of a search on the previous head. (intents 3–6, 13, 21)
+    /// Every trunk commit authored by agent is exactly a selected, pushable
+    /// candidate of a search on the previous head.
     #[invariant]
     pub fn trunk_exact(&self) -> bool {
         forall|t: int| 1 <= t < self.trunk.len() && self.authors[t] == User::agent ==>
             exists|k: int, i: int| 0 <= k < self.searches.len()
                 && selected(self.searches[k], i)
-                && landable(self.searches, k, i)
+                && pushable(self.searches, k, i)
                 && self.searches[k].base == self.trunk[t - 1]
                 && at(self.searches[k], i).commit == self.trunk[t]
     }
@@ -469,10 +488,10 @@ tokenized_state_machine!{ bon {
     // ── proofs ──────────────────────────────────────────
 
     #[inductive(initialize)]
-    fn initialize_inductive(post: Self, root: Commit, intents: Set<Intent>, checks: Set<Path>, limit: nat) {}
+    fn initialize_inductive(post: Self, root: Commit, checks: Set<Path>, tests: Set<Path>, limit: nat) {}
 
     #[inductive(advance)]
-    fn advance_inductive(pre: Self, post: Self, c: Commit, intents: Set<Intent>, checks: Set<Path>) {}
+    fn advance_inductive(pre: Self, post: Self, c: Commit, checks: Set<Path>, tests: Set<Path>) {}
 
     #[inductive(grant)]
     fn grant_inductive(pre: Self, post: Self, kind: Kind, n: nat, l: nat, observed: Map<Object, Permission>) {
@@ -506,30 +525,28 @@ tokenized_state_machine!{ bon {
         assert forall|t: int| 1 <= t < post.trunk.len() && post.authors[t] == User::agent implies
             exists|kk: int, ii: int| 0 <= kk < post.searches.len()
                 && selected(post.searches[kk], ii)
-                && landable(post.searches, kk, ii)
+                && pushable(post.searches, kk, ii)
                 && post.searches[kk].base == post.trunk[t - 1]
                 && at(post.searches[kk], ii).commit == post.trunk[t] by {
             let (kk, ii) = choose|kk: int, ii: int| 0 <= kk < pre.searches.len()
                 && selected(pre.searches[kk], ii)
-                && landable(pre.searches, kk, ii)
+                && pushable(pre.searches, kk, ii)
                 && pre.searches[kk].base == pre.trunk[t - 1]
                 && at(pre.searches[kk], ii).commit == pre.trunk[t];
             assert(post.searches[kk] == pre.searches[kk]);
-            if !(pre.searches[kk].kind is Scrub) {
-                let x = choose|x: int| 0 <= x < pre.searches.len()
-                    && pre.searches[x].kind == (Kind::Counterexample { goal: AgentProcess { search: kk, index: ii } })
-                    && cleared(pre.searches[x], pre.searches[kk]);
-                assert(post.searches[x] == pre.searches[x]);
-            }
-            assert(landable(post.searches, kk, ii));
+            let x = choose|x: int| 0 <= x < pre.searches.len()
+                && pre.searches[x].kind == (Kind::Counterexample { goal: Some(AgentProcess { search: kk, index: ii }) })
+                && not_found(pre.searches[x], pre.searches[kk]);
+            assert(post.searches[x] == pre.searches[x]);
+            assert(pushable(post.searches, kk, ii));
         }
     }
 
     #[inductive(wait)]
-    fn wait_inductive(pre: Self, post: Self, p: AgentProcess, cap: Capability, result: Option<Candidate>, cost: nat) {
+    fn wait_inductive(pre: Self, post: Self, p: AgentProcess, cap: Capability, result: Option<Candidate>, generation: nat) {
         broadcast use vstd::set::lemma_set_remove_len;
         assert(pre.capability.contains_key(p) && pre.capability[p] == cap);
-        // Settling: one capability fewer, its limit released, its cost spent.
+        // Settling: one capability fewer, its limit released, its generation spent.
         assert(post.capability.dom() =~= pre.capability.dom().remove(p));
         assert(post.capability.dom().len() + 1 == pre.capability.dom().len());
         let m = pre.searches.last().limit;
@@ -553,41 +570,34 @@ tokenized_state_machine!{ bon {
                 assert(post.searches[kk] == pre.searches[kk]);
             }
         }
-        // Selected and cleared searches are complete, so they hold no capability:
+        // Selected searches, and searches that found no counterexample, are complete, so they hold no capability:
         // the one waited on here belongs to neither.
         assert forall|t: int| 1 <= t < post.trunk.len() && post.authors[t] == User::agent implies
             exists|kk: int, ii: int| 0 <= kk < post.searches.len()
                 && selected(post.searches[kk], ii)
-                && landable(post.searches, kk, ii)
+                && pushable(post.searches, kk, ii)
                 && post.searches[kk].base == post.trunk[t - 1]
                 && at(post.searches[kk], ii).commit == post.trunk[t] by {
             let (kk, ii) = choose|kk: int, ii: int| 0 <= kk < pre.searches.len()
                 && selected(pre.searches[kk], ii)
-                && landable(pre.searches, kk, ii)
+                && pushable(pre.searches, kk, ii)
                 && pre.searches[kk].base == pre.trunk[t - 1]
                 && at(pre.searches[kk], ii).commit == pre.trunk[t];
             assert(complete(pre.searches[kk]));
             assert(kk != p.search);
             assert(post.searches[kk] == pre.searches[kk]);
-            if !(pre.searches[kk].kind is Scrub) {
-                let x = choose|x: int| 0 <= x < pre.searches.len()
-                    && pre.searches[x].kind == (Kind::Counterexample { goal: AgentProcess { search: kk, index: ii } })
-                    && cleared(pre.searches[x], pre.searches[kk]);
-                assert(complete(pre.searches[x]));
-                assert(x != p.search);
-                assert(post.searches[x] == pre.searches[x]);
-            }
-            assert(landable(post.searches, kk, ii));
+            let x = choose|x: int| 0 <= x < pre.searches.len()
+                && pre.searches[x].kind == (Kind::Counterexample { goal: Some(AgentProcess { search: kk, index: ii }) })
+                && not_found(pre.searches[x], pre.searches[kk]);
+            assert(complete(pre.searches[x]));
+            assert(x != p.search);
+            assert(post.searches[x] == pre.searches[x]);
+            assert(pushable(post.searches, kk, ii));
         }
     }
 
-    #[inductive(fast_forward)]
-    fn fast_forward_inductive(pre: Self, post: Self, k: int, i: int, x: int) {
-        assert(landable(post.searches, k, i));
-    }
-
-    #[inductive(retain)]
-    fn retain_inductive(pre: Self, post: Self, k: int, i: int) {
-        assert(landable(post.searches, k, i));
+    #[inductive(push)]
+    fn push_inductive(pre: Self, post: Self, k: int, i: int, x: int) {
+        assert(pushable(post.searches, k, i));
     }
 }}
