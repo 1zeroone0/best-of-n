@@ -129,7 +129,7 @@ fn authority_contains(kind: &Kind, checks: &Vec<Path>, tests: &Vec<Path>, p: &Pa
 pub fn verified(s: &Search, c: &Candidate) -> (r: bool)
     ensures r == spec::verified(s@, c@),
 {
-    if !c.accepted || !c.proved { return false; }
+    if !c.accepted || (!c.proved && !matches!(&s.kind, Kind::Counterexample { .. })) { return false; }
     match &s.kind {
         Kind::Compaction { .. } => { if !c.rejects_counterexamples { return false; } },
         _ => {},
