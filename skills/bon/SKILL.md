@@ -132,6 +132,19 @@ Read the trace and bring the finding:
   allows two behaviors. Propose the spec or test that decides.
 - **Trunk moved:** run it again.
 
+## In bon's own repository
+
+Only here does bon search for its own kernel. The installed `bon` decides
+with the gates it was built from, not trunk's.
+
+- A spec change to a gate that decides a push (`verified`, `agree`,
+  `selected`, `not_found`) is searched and pushed by the installed `bon`.
+  Change together the gates the next search needs, or it may never push.
+- After that push, reinstall: `cargo install --path . --locked`. Until then
+  the old gates decide.
+
+Everywhere else `bon` is a fixed tool, and none of this applies.
+
 ## Traces
 
 Everything bon observed is on disk. Answer by querying it (DuckDB reads
