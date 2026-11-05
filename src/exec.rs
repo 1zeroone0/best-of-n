@@ -473,6 +473,7 @@ pub fn not_found(x: &Search, t: &Search) -> (r: bool)
     }
     let vx = verified_each(x);
     let vt = verified_each(t);
+    let mut count: usize = 0;
     let mut i = 0;
     while i < vx.len()
         invariant
@@ -480,11 +481,16 @@ pub fn not_found(x: &Search, t: &Search) -> (r: bool)
             t.results.len() == t.n, vt.len() == t.n,
             forall|m: int| 0 <= m < x.n ==> vx[m] == spec::verified_at(xv, m),
             forall|m: int| 0 <= m < t.n ==> vt[m] == spec::verified_at(t@, m),
-            spec::complete(xv),
+            spec::complete(xv), count <= 2,
+            count == 0 ==> forall|m: int| 0 <= m < i ==> !vx[m],
+            count == 1 ==> exists|a: int| 0 <= a < i && vx[a]
+                && forall|b: int| 0 <= b < i && vx[b] ==> a == b,
+            count == 2 ==> exists|a: int, b: int| 0 <= a < i && 0 <= b < i && a != b && vx[a] && vx[b],
             forall|m: int| 0 <= m < i && spec::verified_at(xv, m) ==> !spec::splits(t@, spec::at(xv, m)),
         decreases vx.len() - i,
     {
         if vx[i] {
+            if count < 2 { count += 1; }
             let c = candidate(x, i);
             if splits(t, &vt, c) {
                 assert(spec::verified_at(xv, i as int) && spec::splits(t@, spec::at(xv, i as int)));
@@ -498,7 +504,7 @@ pub fn not_found(x: &Search, t: &Search) -> (r: bool)
             assert(0 <= m < x.n);
         }
     }
-    true
+    count == 2
 }
 
 // ── found on trunk ──────────────────────────────────────
