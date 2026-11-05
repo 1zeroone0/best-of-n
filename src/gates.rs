@@ -450,9 +450,9 @@ impl Tokens {
 
 /// What each bon command runs, on the bon process's one instance. A command
 /// takes the instance's tokens and returns them, the same instance, settled,
-/// with its spending added: so a bon process that runs several commands (a
-/// counterexample on trunk, then the code search that carries its test)
-/// spends from its one limit. `spent` is what the bon process has spent, in
+/// with its spending added; a command that succeeds ran its searches on that
+/// instance: so a bon process that runs several commands (a counterexample on
+/// trunk, then the code search that carries its test) spends from its one limit. `spent` is what the bon process has spent, in
 /// microdollars; it is the instance's.
 #[cfg(not(target_arch = "wasm32"))]
 pub trait Commands {
@@ -471,7 +471,10 @@ pub trait Commands {
             final(t).settled(),
             final(t).instance == old(t).instance,
             final(t).limit.value() == old(t).limit.value(),
-            *final(spent) as nat == final(t).spent.value();
+            *final(spent) as nat == final(t).spent.value(),
+            // Ok is a push: its searches ran on this instance, and it pushed by its transition.
+            r is Ok ==> final(t).searches.value().len() > old(t).searches.value().len()
+                && final(t).trunk.value().len() == old(t).trunk.value().len() + 1;
 
     /// bon counterexample: a counterexample search on trunk; the tests a code
     /// search must carry, if it found one.
@@ -483,7 +486,9 @@ pub trait Commands {
             final(t).settled(),
             final(t).instance == old(t).instance,
             final(t).limit.value() == old(t).limit.value(),
-            *final(spent) as nat == final(t).spent.value();
+            *final(spent) as nat == final(t).spent.value(),
+            // Its search ran on this instance.
+            r is Ok ==> final(t).searches.value().len() > old(t).searches.value().len();
 
     /// bon queue: a queue search on one transcript; the agreed intents and the
     /// contested cues.
@@ -495,7 +500,9 @@ pub trait Commands {
             final(t).settled(),
             final(t).instance == old(t).instance,
             final(t).limit.value() == old(t).limit.value(),
-            *final(spent) as nat == final(t).spent.value();
+            *final(spent) as nat == final(t).spent.value(),
+            // Its search ran on this instance.
+            r is Ok ==> final(t).searches.value().len() > old(t).searches.value().len();
 }
 
 } // verus!
