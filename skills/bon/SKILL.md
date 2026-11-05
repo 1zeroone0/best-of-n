@@ -116,6 +116,11 @@ at a time.
 | spare capacity should work | `bon background` (`--plist` for launchd) |
 | a dependency, tool or trusted function changed | `bon sbom`; commit `.bon/sbom.json` |
 
+**In Rex** (`REX_SESSION` is set), a search runs in its own pane, so it
+outlives this agent, the app and the connection:
+`rex run -s "$REX_SESSION" -- bon code`. Read it with `rex capture`; the
+owner watches it from any client.
+
 ## When bon is blocked
 
 bon reruns wider first; only a spent width list or limit reaches the owner.
