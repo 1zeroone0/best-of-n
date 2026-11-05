@@ -412,6 +412,92 @@ pub trait Gates {
             forall|q: Cue| spec::contested(s@, q as nat) ==> r@.contains(q);
 }
 
+// ── commands ────────────────────────────────────────────
+
+/// The tokens a bon process holds: one per field of the state machine, all of
+/// one instance. (Verus: tokenized state machine)
+pub struct Tokens {
+    pub instance: spec::bon::Instance,
+    pub checks: spec::bon::checks,
+    pub tests: spec::bon::tests,
+    pub trunk: spec::bon::trunk,
+    pub authors: spec::bon::authors,
+    pub searches: spec::bon::searches,
+    pub limit: spec::bon::limit,
+    pub spent: spec::bon::spent,
+    pub reserved: spec::bon::reserved,
+}
+
+impl Tokens {
+    pub open spec fn wf(&self) -> bool {
+        &&& self.checks.instance_id() == self.instance.id()
+        &&& self.tests.instance_id() == self.instance.id()
+        &&& self.trunk.instance_id() == self.instance.id()
+        &&& self.authors.instance_id() == self.instance.id()
+        &&& self.searches.instance_id() == self.instance.id()
+        &&& self.limit.instance_id() == self.instance.id()
+        &&& self.spent.instance_id() == self.instance.id()
+        &&& self.reserved.instance_id() == self.instance.id()
+    }
+
+    /// Between commands: every search complete, nothing reserved.
+    pub open spec fn settled(&self) -> bool {
+        &&& self.wf()
+        &&& self.reserved.value() == 0
+        &&& forall|k: int| 0 <= k < self.searches.value().len() ==> spec::complete(#[trigger] self.searches.value()[k])
+    }
+}
+
+/// What each bon command runs, on the bon process's one instance. A command
+/// takes the instance's tokens and returns them, the same instance, settled,
+/// with its spending added: so a bon process that runs several commands (a
+/// counterexample on trunk, then the code search that carries its test)
+/// spends from its one limit. `spent` is what the bon process has spent, in
+/// microdollars; it is the instance's.
+#[cfg(not(target_arch = "wasm32"))]
+pub trait Commands {
+    /// The bon process's one instance, initialized from trunk's head and the
+    /// limit bon.toml sets for a bon process. Once per bon process.
+    fn start(root: &str) -> (r: Result<Tracked<Tokens>, String>)
+        ensures
+            r matches Ok(t) ==> t@.settled() && t@.spent.value() == 0 && t@.searches.value().len() == 0;
+
+    /// bon code (compaction false) or bon compaction (true).
+    fn to_push(root: &str, compaction: bool, carried: crate::trusted::Carried, spent: &mut u64, Tracked(t): Tracked<&mut Tokens>) -> (r: Result<(), String>)
+        requires
+            old(t).settled(),
+            *old(spent) as nat == old(t).spent.value(),
+        ensures
+            final(t).settled(),
+            final(t).instance == old(t).instance,
+            final(t).limit.value() == old(t).limit.value(),
+            *final(spent) as nat == final(t).spent.value();
+
+    /// bon counterexample: a counterexample search on trunk; the tests a code
+    /// search must carry, if it found one.
+    fn counterexample(root: &str, spent: &mut u64, Tracked(t): Tracked<&mut Tokens>) -> (r: Result<Option<crate::trusted::Carried>, String>)
+        requires
+            old(t).settled(),
+            *old(spent) as nat == old(t).spent.value(),
+        ensures
+            final(t).settled(),
+            final(t).instance == old(t).instance,
+            final(t).limit.value() == old(t).limit.value(),
+            *final(spent) as nat == final(t).spent.value();
+
+    /// bon queue: a queue search on one transcript; the agreed intents and the
+    /// contested cues.
+    fn queue(root: &str, transcript: Transcript, spent: &mut u64, Tracked(t): Tracked<&mut Tokens>) -> (r: Result<(Vec<(Cue, Intent)>, Vec<Cue>), String>)
+        requires
+            old(t).settled(),
+            *old(spent) as nat == old(t).spent.value(),
+        ensures
+            final(t).settled(),
+            final(t).instance == old(t).instance,
+            final(t).limit.value() == old(t).limit.value(),
+            *final(spent) as nat == final(t).spent.value();
+}
+
 } // verus!
 
 /// The kernel implements every gate and the encoding; a build without either fails.
@@ -419,3 +505,11 @@ pub trait Gates {
 fn kernel<K: Gates + Encoding>() {}
 #[allow(dead_code)]
 fn kernel_is_complete() { kernel::<crate::exec::Kernel>(); }
+
+/// The bon process implements every command; a build without one fails.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
+fn bon_process<C: Commands>() {}
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
+fn bon_process_is_complete() { bon_process::<crate::process::BonProcess>(); }

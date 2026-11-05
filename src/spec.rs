@@ -347,6 +347,8 @@ tokenized_state_machine!{ bon {
 
     // ── init ────────────────────────────────────────────
 
+    /// A bon process initializes one instance, once: every command it runs, and
+    /// every search of each, spends from this one limit.
     init!{ initialize(root: Commit, checks: Set<Path>, tests: Set<Path>, limit: nat) {
         init checks = checks;
         init tests = tests;
