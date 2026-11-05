@@ -186,10 +186,13 @@ pub open spec fn accepted(c: Candidate) -> bool { c.accepted }
 pub open spec fn rejected(c: Candidate) -> bool { !c.accepted }
 
 /// Passed the vertical bottleneck: accepted, Verus verified it, and every
-/// changed path is within the search's authority. A compaction's candidate
-/// also keeps rejecting every counterexample.
+/// changed path is within the search's authority. A counterexample's
+/// candidate is a test, which Verus says nothing about: it starts from
+/// trunk's head, which fails Verus while a code search closes a spec change,
+/// so it is verified without `proved`. A compaction's candidate also keeps
+/// rejecting every counterexample.
 pub open spec fn verified(s: Search, c: Candidate) -> bool {
-    accepted(c) && c.proved
+    accepted(c) && (c.proved || s.kind is Counterexample)
     && (forall|p: Path| c.changed.contains(p) ==> s.authority.contains(p))
     && (s.kind is Compaction ==> c.rejects_counterexamples)
 }
