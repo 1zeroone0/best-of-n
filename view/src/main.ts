@@ -490,9 +490,9 @@ function render(): void {
     }
     put(document.querySelector('#recent')!, recent(data));
     put(document.querySelector('#queue')!, queue(data));
-    // The SBOM's filter keeps its focus: only redraw the crate rows while typing.
+    // The SBOM's filter keeps its focus: while it is typed in, its input handler redraws.
     const sb = document.querySelector('#sbom')!;
-    if (!sb.contains(document.activeElement)) put(sb, sbomSection(data));
+    if (!document.activeElement?.matches('[data-sbom-find]')) put(sb, sbomSection(data));
 }
 const soon = (): void => { requestAnimationFrame(render); };
 

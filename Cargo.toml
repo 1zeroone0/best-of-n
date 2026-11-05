@@ -1,6 +1,6 @@
 [package]
 name = "best-of-n"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "best-of-N: you write what the software must do; verified agent search writes the code"
