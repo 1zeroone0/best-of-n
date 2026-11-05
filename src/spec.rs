@@ -256,10 +256,14 @@ pub open spec fn found(x: Search, t: Search) -> bool {
     complete(x) && exists|i: int| verified_at(x, i) && splits(t, at(x, i))
 }
 
-/// Counterexample: every agent process of x returned, and no verified test splits t:
-/// no counterexample was found. The pair of `found`.
+/// Counterexample: every agent process of x returned, at least two of its tests
+/// are verified, and none splits t: no counterexample was found. With fewer than
+/// two verified tests, nothing was looked for: neither `found` nor `not_found`,
+/// so nothing it tested may be pushed.
 pub open spec fn not_found(x: Search, t: Search) -> bool {
-    complete(x) && forall|i: int| verified_at(x, i) ==> !splits(t, at(x, i))
+    complete(x)
+    && (exists|i: int, j: int| i != j && verified_at(x, i) && verified_at(x, j))
+    && forall|i: int| verified_at(x, i) ==> !splits(t, at(x, i))
 }
 
 /// Counterexample on trunk: x's verified test i rejects trunk's head.
