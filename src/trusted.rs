@@ -875,11 +875,19 @@ pub fn record_selected(m: &Manifest, i: usize) {
     record(m, &format!("selected {search} {i}"));
 }
 
-/// Record a grant: its width and when, so a running search's progress shows.
+/// Record a wait: an agent process returned, and when, so a search's time shows as it runs.
 #[verifier::external_body]
-pub fn record_grant(m: &Manifest, n: usize) {
+pub fn record_wait(m: &Manifest) {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    record(m, &format!("grant {n} {now}"));
+    record(m, &format!("wait {now}"));
+}
+
+/// Record a grant: its width, when, its kind and goal, so a running search shows before it reports.
+#[verifier::external_body]
+pub fn record_grant(m: &Manifest, n: usize, kind: &Kind) {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let (k, goal) = label(kind);
+    record(m, &format!("grant {n} {now} {k} {goal}"));
 }
 
 /// Append one line to this command's trace.

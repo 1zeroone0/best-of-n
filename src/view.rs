@@ -253,6 +253,13 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
             let grant: Vec<&str> = segment.first().map(|g| g.split_whitespace().collect()).unwrap_or_default();
             let width = summary["agent_processes"].as_u64().or_else(|| grant.get(1).and_then(|w| w.parse().ok()));
             let started = grant.get(2).and_then(|t| t.parse::<u64>().ok());
+            // A search that has not reported yet is running while its bon process is.
+            let live = running && summary.is_null();
+            // Its time: to its report, else to its last returned agent process, else (running) to now.
+            let last_wait = segment.iter().rev().find_map(|t| t.strip_prefix("wait ")?.parse::<u64>().ok());
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+            let seconds = summary["seconds"].as_f64()
+                .or_else(|| started.map(|s| (if live { now } else { last_wait.unwrap_or(s) }).saturating_sub(s) as f64));
             let kernel = read_words(&rdir.join("search.words")).as_ref().and_then(|w| Kernel::decode(w));
             let mut candidates: Vec<(usize, Value)> = std::fs::read_dir(&rdir).into_iter().flatten().flatten().filter_map(|e| {
                 let i = e.file_name().to_string_lossy().parse::<usize>().ok()?;
@@ -299,9 +306,10 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
             // Kind is shown separately; goal is the kind's goal.
             let base_of = candidates.iter().find_map(|(_, c)| c["commit"].as_str().map(|x| git(root, &["rev-parse", &format!("{x}^")])))
                 .filter(|b| !b.is_empty()).unwrap_or_default();
-            let kind = summary["kind"].as_str().unwrap_or("").to_string();
+            let kind = summary["kind"].as_str().or_else(|| grant.get(3).copied()).unwrap_or("").to_string();
             let blocked = segment.iter().find(|t| t.starts_with("blocked")).cloned();
-            let goal_text = summary["goal"].as_str().unwrap_or("");
+            let granted_goal = grant.get(4..).map(|g| g.join(" ")).unwrap_or_default();
+            let goal_text = summary["goal"].as_str().unwrap_or(&granted_goal);
             let goal = match kind.as_str() {
                 "queue" => json!({ "transcript": goal_text }),
                 "counterexample" if goal_text == "trunk" => json!({ "trunk": base_of }),
@@ -317,11 +325,11 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
             searches.push(json!({
                 "params": { "goal": goal, "base": base_of, "n": width, "limit": summary["limit"], "authority": authority },
                 "generation": generation, "time_cost": time_cost, "rate": summary["rate"], "background": summary["background"] == true,
-                "search": n, "kind": kind, "goal": summary["goal"], "width": width, "started": started,
+                "search": n, "kind": kind, "goal": goal_text, "width": width, "started": started,
                 "returned": returned, "accepted": accepted, "verified": verified,
                 "selected": selected, "recorded_selected": recorded,
                 "kernel": if kernel.is_some() { "derived" } else if rdir.join("search.words").exists() { "unreadable" } else { "none" },
-                "blocked": blocked, "cost": cost, "seconds": summary["seconds"], "time": summary["time"],
+                "blocked": blocked, "cost": cost, "seconds": seconds, "time": summary["time"], "running": live,
                 "candidates": candidates.into_iter().map(|(_, c)| c).collect::<Vec<_>>(),
             }));
         }

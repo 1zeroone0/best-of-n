@@ -46,6 +46,8 @@ pub open spec fn returned(r: Option<Candidate>) -> Option<spec::Candidate> {
 /// each, consuming its capability.
 #[verifier::rlimit(400)]
 #[verifier::spinoff_prover]
+// index is read only by the contract, which cargo erases.
+#[allow(unused_variables)]
 fn search(
     m: &trusted::Manifest, index: usize, a: usize, kind: Kind, start: Commit, checks: &Vec<Path>, tests: &Vec<Path>,
     l: u64, limit: u64, spent: &mut u64, target: Option<&Search>, carried: &trusted::Carried,
@@ -95,7 +97,7 @@ fn search(
     let ghost before = t.searches.value();
     let tracked mut capability = t.instance.grant(kind@, n as nat, l as nat, observed,
         &t.checks, &t.tests, &t.trunk, &mut t.searches, &t.limit, &t.spent, &mut t.reserved);
-    trusted::record_grant(m, n);
+    trusted::record_grant(m, n, &kind);
     let started = trusted::clock();
     let spent_before = *spent;
     let mut results = trusted::run(m, &kind, a, &start, target, carried);
@@ -171,7 +173,7 @@ fn search(
                 assert(spec::AgentProcess { search: k, index: j } != p);
             }
         }
-        trusted::record(m, "wait");
+        trusted::record_wait(m);
         // Restated here so the solver carries it across the trusted call to the invariant.
         proof {
             assert(forall|j: int| i + 1 <= j < n ==> #[trigger] capability.dom().contains(spec::AgentProcess { search: k, index: j })
@@ -293,7 +295,10 @@ pub fn to_push(root: &str, compaction: bool, carried: trusted::Carried) -> (r: R
                     proof {
                         t.instance.push(index as int, i as int, index as int + 1, &mut t.trunk, &mut t.authors, &t.searches);
                     }
-                    trusted::push(&m, &candidate(&s0, i).commit, &carried)?;
+                    if let Err(e) = trusted::push(&m, &candidate(&s0, i).commit, &carried) {
+                        trusted::record(&m, &format!("blocked: {e}"));
+                        return Err(e);
+                    }
                     trusted::record(&m, "push");
                     return Ok(());
                 }

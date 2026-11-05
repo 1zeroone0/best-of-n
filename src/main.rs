@@ -86,7 +86,7 @@ fn running(root: &str) {
 /// bon counterexample, and if trunk shows one, the code search that carries its test.
 fn counterexample(root: &str) -> Result<(), String> {
     match process::counterexample(root)? {
-        None => { println!("not found: no verified test rejects trunk"); Ok(()) }
+        None => { println!("not found: fewer than two verified tests reject trunk"); Ok(()) }
         Some(carried) => {
             println!("found: verified tests reject trunk; searching for code that their test accepts");
             process::to_push(root, false, carried)?;

@@ -1,6 +1,8 @@
 //! The gates, implemented and proved against their contracts in gates.rs.
 
 use vstd::prelude::*;
+// Used only in proofs, which cargo erases.
+#[allow(unused_imports)]
 use crate::spec;
 use crate::gates::*;
 
@@ -210,6 +212,8 @@ pub fn candidate(s: &Search, i: usize) -> (c: &Candidate)
     match &s.results[i] { Some(c) => c, None => vstd::pervasive::unreached() }
 }
 
+// g, the second verified candidate, is read only by the proof, which cargo erases.
+#[allow(unused_variables)]
 pub fn selected(s: &Search) -> (r: Option<usize>)
     requires s.results.len() == s.n,
     ensures
@@ -796,7 +800,7 @@ pub fn proposed(s: &Search) -> (r: Vec<(Cue, Intent)>)
         decreases qs.len() - k,
     {
         let q = qs[k];
-        let (first, second, best) = cites(s, &v, q);
+        let (_, second, best) = cites(s, &v, q);
         let ghost before = r@;
         if second.is_some() {
             let c = candidate(s, best);

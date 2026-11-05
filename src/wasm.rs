@@ -54,3 +54,43 @@ pub unsafe extern "C" fn found_on_trunk(p: *const u64, len: usize) -> i32 {
         None => -2,
     }
 }
+
+/// The verified gate on candidate i of one search: 1 verified, 0 not (or no
+/// candidate), -2 if the words are not a search or it has no agent process i.
+#[no_mangle]
+pub unsafe extern "C" fn verified(p: *const u64, len: usize, i: usize) -> i32 {
+    match Kernel::decode(&words(p, len)) {
+        Some(s) => match s.results.get(i) {
+            Some(Some(c)) => Kernel::verified(&s, c) as i32,
+            Some(None) => 0,
+            None => -2,
+        },
+        None => -2,
+    }
+}
+
+static EMITTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// One search as the kernel's JSON, in the spec's names (UTF-8): a pointer to
+/// it, its length from `emitted`, freed with `dealloc_bytes`; null if the
+/// words are not a search.
+#[no_mangle]
+pub unsafe extern "C" fn emit(p: *const u64, len: usize) -> *mut u8 {
+    let Some(s) = Kernel::decode(&words(p, len)) else { return std::ptr::null_mut() };
+    let mut b = Kernel::emit(&s).into_iter().collect::<String>().into_bytes();
+    b.shrink_to_fit();
+    EMITTED.store(b.len(), std::sync::atomic::Ordering::SeqCst);
+    let q = b.as_mut_ptr();
+    std::mem::forget(b);
+    q
+}
+
+/// The length of the last `emit`.
+#[no_mangle]
+pub extern "C" fn emitted() -> usize { EMITTED.load(std::sync::atomic::Ordering::SeqCst) }
+
+/// Return memory from `emit`.
+#[no_mangle]
+pub unsafe extern "C" fn dealloc_bytes(p: *mut u8, len: usize) {
+    drop(Vec::from_raw_parts(p, len, len));
+}

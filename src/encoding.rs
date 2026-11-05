@@ -259,6 +259,8 @@ impl<T: Wire> Wire for Option<T> {
     }
 }
 
+// Built only in proofs, which cargo erases; inconsistent_fields is Verus's lint.
+#[allow(unknown_lints, dead_code)]
 #[allow(inconsistent_fields)]
 enum KindModel {
     Queue { goal: Seq<char> }, Code { goal: Seq<char> },

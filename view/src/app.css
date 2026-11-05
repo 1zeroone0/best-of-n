@@ -121,10 +121,6 @@ main>section{margin-top:18px;padding:18px 22px 22px;border-radius:6px;background
 .section-head h2{font-size:var(--t3);font-weight:650;letter-spacing:-.2px}
 .section-head .count{margin-left:auto;font-size:var(--t1);font-weight:600;color:var(--muted);padding:2px 10px;border-radius:4px;background:var(--sunk);border:1px solid var(--line)}
 .idle{display:flex;gap:24px;align-items:flex-start;padding-top:16px;flex-wrap:wrap}
-.running{display:grid;gap:14px;padding-top:16px}
-.running-title{display:flex;gap:10px;align-items:center;font-size:var(--t3);font-weight:600}
-.progress{height:8px;border-radius:4px;background:var(--sunk);overflow:hidden}
-.progress i{display:block;height:100%;background:linear-gradient(90deg,var(--red),var(--orange))}
 
 /* rows */
 .group{border-bottom:1px solid var(--line);position:relative}
