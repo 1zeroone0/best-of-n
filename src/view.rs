@@ -841,7 +841,11 @@ fn system(root: &Path, base: &str) -> Value {
     let glines: Vec<&str> = gates_t.lines().collect();
     // A gate is a method of one of the two traits: indented, after its `pub trait`.
     for f in gfns.iter().filter(|f| f.start > enc_at.min(gates_at) && glines[f.start - 1].starts_with(' ')) {
-        let group = if f.start > gates_at { "Gates" } else { "Encoding" };
+        // Its trait: the nearest `pub trait` above it.
+        // Its block: the nearest unindented `pub trait` or `impl` above it; a method of an impl is not a gate.
+        let block = glines[..f.start - 1].iter().rev().find(|l| l.starts_with("pub trait ") || l.starts_with("impl")).copied().unwrap_or("");
+        let Some(group) = block.strip_prefix("pub trait ").map(|r| r.split(|c: char| !c.is_alphanumeric()).next().unwrap_or("").to_string()) else { continue };
+        let group = group.as_str();
         nodes.push(node(format!("gate:{}", f.name), "gates", group, &f.name, "src/gates.rs", Some(f), json!({ "proof": f.body.contains("proof fn") })));
         for p in &preds { if calls(&f.body, "spec::", &p.name) { edges.push(json!([format!("gate:{}", f.name), format!("spec:{}", p.name), "ensures"])); if !cited.contains(&p.name) { cited.push(p.name.clone()); } } }
         gate_names.push(f.name.clone());

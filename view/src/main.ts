@@ -472,7 +472,7 @@ function sbomSection(s: State): string {
 //    and the programs, each named from the next by the source's own syntax ──
 const LAYERS: { key: SysNode['layer']; title: string; tone: Tone; sub: string; kernel?: boolean; groups: [string, string][] }[] = [
     { key: 'spec', title: 'Spec', tone: 'indigo', sub: 'src/spec.rs', kernel: true, groups: [['init', 'init!'], ['transition', 'Transitions'], ['predicate', 'Predicates a gate ensures'], ['property', 'Properties'], ['invariant', 'Invariants']] },
-    { key: 'gates', title: 'Gates', tone: 'blue', sub: 'src/gates.rs', kernel: true, groups: [['Gates', 'trait Gates'], ['Encoding', 'trait Encoding'], ['types', 'Types emitted for programs']] },
+    { key: 'gates', title: 'Gates', tone: 'blue', sub: 'src/gates.rs', kernel: true, groups: [['Gates', 'trait Gates'], ['Encoding', 'trait Encoding'], ['Commands', 'trait Commands'], ['types', 'Types emitted for programs']] },
     { key: 'implementation', title: 'Implementation', tone: 'violet', sub: 'src/exec.rs, src/encoding.rs', kernel: true, groups: [['gate', 'impl Gates for Kernel'], ['encoding', 'impl Encoding for Kernel'], ['process', 'Called by the bon process']] },
     { key: 'process', title: 'bon process', tone: 'green', sub: 'src/process.rs · holds the tokens', groups: [['function', 'Functions']] },
     { key: 'entry', title: 'Entry points', tone: 'red', sub: 'trusted code', groups: [['main', 'src/main.rs'], ['view', 'src/view.rs']] },
