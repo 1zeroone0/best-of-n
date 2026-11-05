@@ -11,6 +11,37 @@ verus! {
 
 broadcast use {vstd::seq_lib::group_seq_properties, vstd::seq::group_seq_axioms};
 
+pub struct BonProcess;
+
+impl Commands for BonProcess {
+    fn start(root: &str) -> (r: Result<Tracked<crate::gates::Tokens>, String>) {
+        let head = trusted::head(root)?;
+        let m = trusted::manifest(root, &head)?;
+        let checks = trusted::checks(&m);
+        let tests = trusted::tests(&m);
+        let limit = trusted::limit(&m);
+        let tracked (Tracked(instance), Tracked(checks), Tracked(tests), Tracked(trunk), Tracked(authors),
+                     Tracked(searches), Tracked(limit), Tracked(spent), Tracked(reserved), Tracked(capability))
+            = spec::bon::Instance::initialize(head@, paths(checks@), paths(tests@), limit as nat);
+        Ok(Tracked(crate::gates::Tokens { instance, checks, tests, trunk, authors, searches, limit, spent, reserved }))
+    }
+
+    fn to_push(root: &str, compaction: bool, carried: trusted::Carried, spent: &mut u64,
+               Tracked(t): Tracked<&mut crate::gates::Tokens>) -> (r: Result<(), String>) {
+        to_push(root, compaction, carried)
+    }
+
+    fn counterexample(root: &str, spent: &mut u64, Tracked(t): Tracked<&mut crate::gates::Tokens>)
+        -> (r: Result<Option<trusted::Carried>, String>) {
+        counterexample(root)
+    }
+
+    fn queue(root: &str, transcript: Transcript, spent: &mut u64, Tracked(t): Tracked<&mut crate::gates::Tokens>)
+        -> (r: Result<(Vec<(Cue, Intent)>, Vec<Cue>), String>) {
+        queue(root, transcript)
+    }
+}
+
 /// The tokens the bon process holds: one per field of the state machine.
 pub struct Tokens {
     pub instance: spec::bon::Instance,
