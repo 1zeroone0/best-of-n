@@ -392,3 +392,67 @@ details.queue-section:not([open])>summary.section-head{padding-bottom:10px}
 .went{display:grid;gap:6px}
 .legend.row{display:flex;flex-wrap:wrap;gap:6px 18px}
 .legend.row b{font-weight:600;color:var(--ink);font-variant-numeric:tabular-nums}
+
+/* system: spec → gates → kernel → programs, linked as the source names them */
+details.system-section>summary.section-head{cursor:pointer}
+details.system-section:not([open])>summary.section-head{padding-bottom:10px}
+.sys-body{display:grid;gap:12px;padding-top:12px}
+.sys-legend{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:var(--t1);color:var(--muted);align-items:center}
+.sys-legend span{display:inline-flex;align-items:center;gap:6px}
+.sys-legend .ln{display:inline-block;width:22px;height:0;border-top:2px solid}
+.ln.ensures{border-color:var(--indigo)}.ln.implements{border-color:var(--violet)}.ln.calls{border-color:var(--faint)}.ln.transition{border-color:var(--green);border-top-style:dashed}.ln.types{border-color:var(--orange);border-top-style:dotted}
+.sys-grid{position:relative;display:grid;grid-template-columns:repeat(5,minmax(0,1fr)) minmax(0,.8fr);column-gap:34px;row-gap:8px}
+.sys-kernel{grid-column:1 / span 3;display:flex;align-items:baseline;gap:10px;padding:4px 10px;border-bottom:2px solid var(--violet);font-size:var(--t1);font-weight:650;letter-spacing:.06em;text-transform:uppercase;color:color-mix(in srgb,var(--violet) var(--lift),var(--ink))}
+.sys-kernel small{font-weight:500;letter-spacing:0;text-transform:none;color:var(--muted)}
+.sys-grid>.sys-col{grid-row:2}
+.sys-edges{position:absolute;inset:0;pointer-events:none;overflow:visible}
+.sys-edges path{fill:none;stroke-width:1.25;opacity:.35;transition:opacity .12s}
+.sys-edges path.ensures{stroke:var(--indigo)}.sys-edges path.implements{stroke:var(--violet)}.sys-edges path.calls{stroke:var(--faint)}
+.sys-edges path.types{stroke:var(--orange);stroke-dasharray:1.5 3}
+.sys-edges path.transition{stroke:var(--green);stroke-dasharray:4 3;opacity:.3}
+.sys-grid.focused .sys-edges path{opacity:.06}
+.sys-grid.focused .sys-edges path.lit{opacity:1;stroke-width:2}
+.sys-col{position:relative;display:grid;gap:12px;align-content:start;min-width:0}
+.sys-col>header{display:grid;gap:2px;padding:8px 10px;border-radius:4px;border-top:3px solid var(--tone);background:color-mix(in srgb,var(--tone) 10%,var(--sunk))}
+.sys-col>header b{font-size:var(--t3);font-weight:650;color:color-mix(in srgb,var(--tone) var(--lift),var(--ink))}
+.sys-col>header span{font-size:var(--t1);color:var(--muted)}
+.sys-group{display:grid;gap:6px}
+.sys-node{position:relative;z-index:1;display:grid;gap:2px;padding:6px 10px;border-radius:5px;background:var(--raised);border:1px solid var(--line);border-left:3px solid color-mix(in srgb,var(--tone) 70%,var(--line));cursor:default;transition:opacity .12s}
+.sys-node .nm{font-family:var(--mono);font-size:12.5px;font-weight:600;color:color-mix(in srgb,var(--tone) var(--lift),var(--ink));overflow-wrap:anywhere}
+.sys-node .sub{display:flex;flex-wrap:wrap;gap:2px 8px;font-size:11.5px;color:var(--muted)}
+.sys-node .tok{font-family:var(--mono);font-weight:600}
+.sys-node .tok.add{color:color-mix(in srgb,var(--green) var(--lift),var(--ink))}
+.sys-node .tok.rm{color:color-mix(in srgb,var(--red) var(--lift),var(--ink))}
+.sys-node .g.tr{color:color-mix(in srgb,var(--red) var(--lift),var(--ink))}
+.sys-node .dot,.sys-legend .dot{width:8px;height:8px;border-radius:50%;background:var(--yellow);display:inline-block}
+.sys-node .dot{position:absolute;top:8px;right:8px}
+.sys-node.changed{border-color:color-mix(in srgb,var(--yellow) 70%,var(--line));background:color-mix(in srgb,var(--yellow) 8%,var(--raised))}
+.sys-node .pulse{position:absolute;top:7px;right:20px;width:10px;height:10px;border-radius:50%;background:var(--orange);animation:pulse 1.4s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.35}}
+.sys-node.live{border-color:var(--orange)}
+.sys-grid.focused .sys-node{opacity:.35}
+.sys-grid.focused .sys-node.lit{opacity:1}
+.sys-node.focus{box-shadow:0 0 0 2px color-mix(in srgb,var(--tone) 60%,transparent)}
+.sys-trusted{display:grid;gap:8px;padding:10px 12px;border-radius:5px;border-top:3px solid var(--tone);background:color-mix(in srgb,var(--tone) 6%,var(--sunk))}
+.sys-trusted div{display:flex;flex-wrap:wrap;gap:6px}
+.sys-trusted code{font-size:var(--t1);padding:1px 7px;border-radius:4px;background:var(--raised);border:1px solid var(--line)}
+.sys-trusted code.changed{border-color:var(--yellow)}
+.sys-trusted code.lit{border-color:var(--red);color:color-mix(in srgb,var(--red) var(--lift),var(--ink))}
+@media(max-width:860px){.sys-grid{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:24px}.sys-edges{display:none}}
+.sys-group .label{white-space:normal}
+.sys-group code.glabel{font-size:11.5px;color:var(--muted)}
+.sys-node,.sys-trusted code{cursor:pointer}
+.sys-node:hover{border-color:color-mix(in srgb,var(--tone) 60%,var(--line))}
+.sys-target{grid-column:3 / span 4;grid-row:3;display:grid;gap:8px;margin-top:22px;padding:8px 10px 10px;border-radius:5px;border:1px dashed color-mix(in srgb,var(--violet) 55%,var(--line));background:color-mix(in srgb,var(--violet) 5%,transparent)}
+.sys-target>header{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline}
+.sys-target>header b{font-family:var(--mono);font-size:var(--t2);color:color-mix(in srgb,var(--violet) var(--lift),var(--ink))}
+.sys-target>header span{font-size:var(--t1);color:var(--muted)}
+.sys-target .row{display:flex;flex-wrap:wrap;gap:8px}
+.sys-target .sys-node{--tone:var(--red);min-width:120px}
+.sys-pick{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;font-size:var(--t1)}
+.sys-pick label{display:inline-flex;gap:8px;align-items:center}
+.sys-pick select{font:inherit;font-size:var(--t1);color:var(--ink);background:var(--sunk);border:1px solid var(--line);border-radius:5px;padding:5px 8px;max-width:520px}
+.by{display:inline-block;padding:0 6px;border-radius:4px;font-family:var(--mono);font-size:11px;font-weight:600;color:color-mix(in srgb,var(--blue) var(--lift),var(--ink));background:color-mix(in srgb,var(--blue) 14%,transparent);border:1px solid color-mix(in srgb,var(--blue) 35%,transparent)}
+.by.sel{border:2px solid var(--blue);font-weight:750}
+.sys-node .by{position:absolute;top:6px;right:22px}
+.sys-node.touched{background:color-mix(in srgb,var(--blue) 7%,var(--raised))}

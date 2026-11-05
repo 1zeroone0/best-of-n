@@ -28,7 +28,11 @@ interface Group {
     kind: string; title: string; about: About; outcome: string; sentence: string; cost: number; generation: number; time_cost: number;
     push?: { cost?: number; to_selection?: number; counterexample?: number; commit?: string | null; processes?: number } | null; time: number; running: boolean; processes: Process[];
 }
-interface SpecItem { kind: string; name: string; doc?: string }
+interface SpecItem { kind: string; name: string; doc?: string; reads?: string[]; updates?: string[]; requires?: string[] }
+interface SpecField { name: string; type: string; sharding?: string; doc?: string }
+interface SysNode { id: string; layer: 'spec' | 'gates' | 'implementation' | 'target' | 'process' | 'entry' | 'program'; group: string; name: string; file: string; line?: number; end?: number; doc?: string; changed?: boolean;
+    guards?: string[]; adds?: string[]; removes?: string[]; uses?: string[]; trusted?: string[]; proof?: boolean }
+interface System { nodes: SysNode[]; edges: [string, string, 'ensures' | 'implements' | 'calls' | 'transition' | 'types'][]; trusted: { name: string; line: number; doc?: string; changed?: boolean }[]; counts: { predicates: number; private: number; trusted: number } }
 interface State {
     configured: boolean;
     repo: { name?: string; head?: string; trunk?: string; remote?: string; remote_head?: string; remote_time?: number | null; subject?: string; last_push?: { commit?: string; time?: number } | null; since_push?: { commits: number; authors: string[] } | null; pushed?: boolean; now: number };
@@ -38,8 +42,9 @@ interface State {
     queue: { id: number; intent: string }[] | null;
     filter: { since?: number | null; until?: number | null; find?: string | null };
     bounds: { earliest?: number | null; latest?: number | null };
-    spec?: { items?: SpecItem[] } | null;
+    spec?: { path?: string; fields?: SpecField[]; items?: SpecItem[] } | null;
     sbom?: { source: string; document: Sbom } | null;
+    system?: System | null;
 }
 interface SbomComponent { type: string; name: string; version: string; group?: string; purl?: string }
 interface Sbom {
@@ -60,6 +65,14 @@ let recentCount = 12;
 let tracesOpen = true;
 let sbomOpen = false;
 let queueOpen = true;
+let systemOpen = true;
+/** The node the owner points at, or pinned with a click: its chain lights up. */
+let sysFocus: string | null = null;
+let sysPinned = false;
+/** The search whose candidates' changes the System view shows: 'pid/search', '' for none, null to follow the running (or latest) one. */
+let sysSearch: string | null = null;
+/** What each candidate commit changed against its base; a commit never changes, so this is kept. */
+const itemsOf = new Map<string, { files: string[]; items: [string, string][] } | null>();
 let sbomFind = '';
 /** The open drill-down under the results card: verified candidates, or pushes. */
 let drill: 'verified' | 'pushes' | null = null;
@@ -455,6 +468,179 @@ function sbomSection(s: State): string {
 </div></details>`;
 }
 
+// ── the system: the kernel (spec, gates, implementation), the bon process, the entry points
+//    and the programs, each named from the next by the source's own syntax ──
+const LAYERS: { key: SysNode['layer']; title: string; tone: Tone; sub: string; kernel?: boolean; groups: [string, string][] }[] = [
+    { key: 'spec', title: 'Spec', tone: 'indigo', sub: 'src/spec.rs', kernel: true, groups: [['init', 'init!'], ['transition', 'Transitions'], ['predicate', 'Predicates a gate ensures'], ['property', 'Properties'], ['invariant', 'Invariants']] },
+    { key: 'gates', title: 'Gates', tone: 'blue', sub: 'src/gates.rs', kernel: true, groups: [['Gates', 'trait Gates'], ['Encoding', 'trait Encoding'], ['types', 'Types emitted for programs']] },
+    { key: 'implementation', title: 'Implementation', tone: 'violet', sub: 'src/exec.rs, src/encoding.rs', kernel: true, groups: [['gate', 'impl Gates for Kernel'], ['encoding', 'impl Encoding for Kernel'], ['process', 'Called by the bon process']] },
+    { key: 'process', title: 'bon process', tone: 'green', sub: 'src/process.rs · holds the tokens', groups: [['function', 'Functions']] },
+    { key: 'entry', title: 'Entry points', tone: 'red', sub: 'trusted code', groups: [['main', 'src/main.rs'], ['view', 'src/view.rs']] },
+    { key: 'program', title: 'Programs', tone: 'orange', sub: 'built from the types the kernel emits', groups: [['typescript', 'view/src · TypeScript']] },
+];
+/** The transitions running bon processes have fired. */
+function operating(s: State): Set<string> {
+    const out = new Set<string>();
+    for (const p of s.processes.filter(p => p.running)) for (const t of p.transitions) out.add(t.split(/[: ]/)[0]!);
+    return out;
+}
+function sysNode(n: SysNode, live: Set<string>, by?: Touch): string {
+    const sub: string[] = [];
+    if (n.guards?.length) sub.push(`<span class="g">requires ${n.guards.map(g => e(g)).join(', ')}</span>`);
+    for (const a of n.adds ?? []) sub.push(`<span class="tok add">+ ${e(a)}</span>`);
+    for (const r of n.removes ?? []) sub.push(`<span class="tok rm">− ${e(r)}</span>`);
+    if (n.uses?.length) sub.push(`<span class="g">${e(n.uses.slice(0, 3).join(', '))}${n.uses.length > 3 ? ` +${n.uses.length - 3}` : ''}</span>`);
+    if (n.trusted?.length) sub.push(`<span class="g tr">calls ${n.trusted.length} in trusted code</span>`);
+    if (n.proof) sub.push('<span class="g">proof</span>');
+    const on = n.layer === 'spec' && live.has(n.name);
+    const t = by?.get(n.id);
+    const note = `${n.file}${n.line && n.line > 1 ? `:${n.line}` : ''}${n.doc ? ` — ${n.doc}` : ''}${t ? ` · changed by candidate${t.who.length > 1 ? 's' : ''} ${t.who.map(i => `#${i}`).join(', ')}` : ''}`;
+    return `<div class="sys-node${n.changed ? ' changed' : ''}${on ? ' live' : ''}${t ? ' touched' : ''}" data-node="${e(n.id)}" data-src="${e(srcUrl(n.file, n.line, n.end))}" tabindex="0" data-note="${e(note)}"><span class="nm">${e(n.name)}</span>${on ? '<i class="pulse" title="A running search fired it"></i>' : ''}${n.changed ? '<i class="dot" title="Differs from trunk"></i>' : ''}${t ? `<span class="by${t.selected ? ' sel' : ''}">${t.who.length}/${t.of}</span>` : ''}${sub.length ? `<span class="sub">${sub.join('')}</span>` : ''}</div>`;
+}
+type Touch = Map<string, { who: number[]; of: number; selected: boolean }>;
+/** Every search on the page, running first, then latest first. */
+function allSearches(s: State): { key: string; pid: number; r: Search }[] {
+    const seen = new Set<number>();
+    const out: { key: string; pid: number; r: Search }[] = [];
+    for (const p of [...s.processes, ...s.groups.flatMap(g => g.processes)]) {
+        if (seen.has(p.pid)) continue; seen.add(p.pid);
+        for (const r of p.searches) out.push({ key: `${p.pid}/${r.search}`, pid: p.pid, r });
+    }
+    return out.sort((a, b) => Number(!!b.r.running) - Number(!!a.r.running) || (b.r.started ?? b.r.time ?? 0) - (a.r.started ?? a.r.time ?? 0));
+}
+/** The chosen search's candidates' changes, by item: who changed it, of how many, and whether the selected one did.
+ *  Fetches what is not yet known and redraws when it arrives. */
+function touched(sys: System, pick: { r: Search } | undefined): { by: Touch; other: string[]; pending: number } {
+    const by: Touch = new Map();
+    const other = new Set<string>();
+    let pending = 0;
+    if (!pick) return { by, other: [], pending };
+    const base = pick.r.params?.base;
+    const cands = pick.r.candidates.filter(c => c.commit);
+    const of = pick.r.width ?? pick.r.params?.n ?? cands.length;
+    const shown = new Set(sys.nodes.map(n => n.file));
+    for (const c of cands) {
+        const got = itemsOf.get(c.commit!);
+        if (got === undefined && base) {
+            itemsOf.set(c.commit!, null); pending++;
+            fetch(`/api/items?base=${base}&commit=${c.commit}`).then(r => r.ok ? r.json() : null)
+                .then(v => { itemsOf.set(c.commit!, v ?? { files: [], items: [] }); soon(); })
+                .catch(() => { itemsOf.set(c.commit!, { files: [], items: [] }); });
+            continue;
+        }
+        if (!got) { pending++; continue; }
+        const hit = new Set<string>();
+        for (const [file, name] of got.items) for (const n of sys.nodes) if (n.file === file && n.name === name) hit.add(n.id);
+        for (const n of sys.nodes) if ((n.line ?? 1) <= 1 && got.files.includes(n.file)) hit.add(n.id);
+        for (const f of got.files) if (!shown.has(f)) other.add(f);
+        for (const id of hit) {
+            const t = by.get(id) ?? { who: [], of, selected: false };
+            t.who.push(c.index);
+            if (pick.r.selected === c.index) t.selected = true;
+            by.set(id, t);
+        }
+    }
+    return { by, other: [...other].sort(), pending };
+}
+/** Where an item is written: the file, its lines marked, from the working tree. */
+const srcUrl = (file: string, line?: number, end?: number): string =>
+    `/source?path=${encodeURIComponent(file)}${line && line > 1 ? `&from=${line}&to=${end ?? line}#L${line}` : ''}`;
+function systemSection(s: State): string {
+    const sys = s.system;
+    const changed = sys ? sys.nodes.filter(n => n.changed).length + sys.trusted.filter(t => t.changed).length : 0;
+    const live = operating(s);
+    const searches = sys ? allSearches(s) : [];
+    const pick = sysSearch === '' ? undefined : searches.find(x => x.key === sysSearch) ?? (sysSearch == null ? searches[0] : undefined);
+    const { by, other, pending } = sys ? touched(sys, pick) : { by: new Map() as Touch, other: [] as string[], pending: 0 };
+    const count = sys ? `${sys.nodes.length} items · ${sys.edges.length} references` : 'None';
+    const head = `<summary class="section-head">${chevron}<h2>System</h2>${changed ? chip(`${changed} differ from trunk`, 'yellow') : ''}${live.size ? chip(`Running: ${[...live].join(', ')}`, 'orange') : ''}<span class="count">${count}</span></summary>`;
+    if (!systemOpen || !sys) return `<details class="system-section indigo" data-section="system" ${systemOpen ? 'open' : ''}>${head}${systemOpen ? '<div class="empty">No state machine in src/spec.rs</div>' : ''}</details>`;
+    const cols = LAYERS.map(L => {
+        const mine = sys.nodes.filter(n => n.layer === L.key);
+        const groups = L.groups.map(([g, label]) => {
+            const ns = mine.filter(n => n.group === g);
+            return ns.length ? `<div class="sys-group">${/^(init!|trait |impl |src\/|view\/)/.test(label) ? `<code class="glabel">${e(label)}</code>` : `<span class="label">${e(label)}</span>`}${ns.map(n => sysNode(n, live, by)).join('')}</div>` : '';
+        }).join('');
+        return `<div class="sys-col ${L.tone}"><header><b>${L.title}</b><span>${e(L.sub)}</span></header>${groups}</div>`;
+    }).join('');
+    const wasm = sys.nodes.filter(n => n.layer === 'target');
+    const target = wasm.length ? `<div class="sys-target"><header><b>wasm32</b><span>the kernel, compiled · <code>gates.wasm</code> · entry points in <code>src/wasm.rs</code>, trusted code</span></header><div class="row">${wasm.map(n => sysNode(n, live, by)).join('')}</div></div>` : '';
+    const kernel = `<div class="sys-kernel"><span>Kernel</span><small>the spec, the gates and their implementation · proven by Verus</small></div>`;
+    const legend = `<div class="sys-legend"><span><i class="ln ensures"></i>ensures</span><span><i class="ln implements"></i>implements</span><span><i class="ln calls"></i>calls</span><span><i class="ln transition"></i>calls a transition</span><span><i class="ln types"></i>uses an emitted type</span><span><i class="dot"></i>differs from trunk</span><span class="muted">Hover an item for what it reaches and what reaches it; click to open it in its file; shift-click to pin.</span></div>`;
+    const trusted = `<div class="sys-trusted red"><span class="label">Trusted code · src/trusted.rs · ${sys.trusted.length} of its ${sys.counts.trusted} functions the bon process calls; Verus does not check them</span><div>${sys.trusted.map(t => `<code class="${t.changed ? 'changed' : ''}" data-trusted="${e(t.name)}" data-src="${e(srcUrl('src/trusted.rs', t.line))}" data-note="${e(`src/trusted.rs:${t.line}${t.doc ? ` — ${t.doc}` : ''}`)}">${e(t.name)}</code>`).join('')}</div></div>`;
+    const label = (x: { pid: number; r: Search }): string => `bon process ${x.pid} · search ${x.r.search} · ${x.r.kind} · ${x.r.candidates.length}/${x.r.width ?? x.r.params?.n ?? '?'} returned${x.r.running ? ' · running' : ''}${x.r.selected != null ? ` · selected #${x.r.selected}` : ''}`;
+    const picker = `<div class="sys-pick"><label><span class="label">${word('search', 'Search')}</span><select data-sys-search>`
+        + `<option value="" ${!pick ? 'selected' : ''}>None</option>`
+        + searches.slice(0, 40).map(x => `<option value="${e(x.key)}" ${pick?.key === x.key ? 'selected' : ''}>${e(label(x))}</option>`).join('')
+        + `</select></label>${pick ? `<span class="muted">${by.size} item${by.size === 1 ? '' : 's'} changed by its candidates${pending ? ` · reading ${pending}…` : ''}; <span class="by">2/8</span> two of eight changed it, <span class="by sel">bold</span> the selected one did</span>` : '<span class="muted">Pick a search to see what its candidates changed, item by item.</span>'}`
+        + (other.length ? `<span class="muted">Also changed: ${other.map(f => `<code>${e(f)}</code>`).join(' ')}</span>` : '') + `</div>`;
+    return `<details class="system-section indigo" data-section="system" open>${head}<div class="sys-body">${picker}${legend}<div class="sys-grid">${kernel}<svg class="sys-edges" aria-hidden="true"></svg>${cols}${target}</div>${trusted}</div></details>`;
+}
+/** Draw each link between columns as a curve, from the caller's left edge to the callee's right. */
+function drawSystem(): void {
+    const grid = document.querySelector<HTMLElement>('.sys-grid');
+    const svg = grid?.querySelector<SVGSVGElement>('svg.sys-edges');
+    const sys = data?.system;
+    if (!grid || !svg || !sys) return;
+    const box = grid.getBoundingClientRect();
+    svg.setAttribute('width', String(box.width)); svg.setAttribute('height', String(box.height));
+    const at = new Map<string, DOMRect>();
+    for (const el of grid.querySelectorAll<HTMLElement>('[data-node]')) at.set(el.dataset.node!, el.getBoundingClientRect());
+    const order = { spec: 0, gates: 1, implementation: 2, target: 3, process: 4, entry: 5, program: 6 } as const;
+    const layer = new Map(sys.nodes.map(n => [n.id, order[n.layer]]));
+    svg.innerHTML = sys.edges.map(([from, to, kind]) => {
+        const a = at.get(from), b = at.get(to);
+        if (!a || !b || layer.get(from) === layer.get(to)) return '';
+        const L = box.left, T = box.top;
+        let d: string;
+        if (b.right <= a.left) {        // the callee is left of the caller: left edge to right edge
+            const x1 = a.left - L, y1 = a.top + a.height / 2 - T, x2 = b.right - L, y2 = b.top + b.height / 2 - T, dx = Math.max(24, (x1 - x2) / 2);
+            d = `M${x1},${y1} C${x1 - dx},${y1} ${x2 + dx},${y2} ${x2},${y2}`;
+        } else if (a.right <= b.left) { // right of it
+            const x1 = a.right - L, y1 = a.top + a.height / 2 - T, x2 = b.left - L, y2 = b.top + b.height / 2 - T, dx = Math.max(24, (x2 - x1) / 2);
+            d = `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`;
+        } else {                        // above or below it
+            const down = b.top > a.bottom;
+            const x1 = a.left + a.width / 2 - L, y1 = (down ? a.bottom : a.top) - T, x2 = b.left + b.width / 2 - L, y2 = (down ? b.top : b.bottom) - T, dy = Math.max(24, Math.abs(y2 - y1) / 2) * (down ? 1 : -1);
+            d = `M${x1},${y1} C${x1},${y1 + dy} ${x2},${y2 - dy} ${x2},${y2}`;
+        }
+        return `<path class="${kind}" data-from="${e(from)}" data-to="${e(to)}" d="${d}"/>`;
+    }).join('');
+    lightSystem();
+}
+/** Light the focused part's chain: everything it reaches (down to the spec) and everything that reaches it. */
+function lightSystem(): void {
+    const sys = data?.system;
+    const grid = document.querySelector<HTMLElement>('.sys-grid');
+    if (!sys || !grid) return;
+    grid.classList.toggle('focused', sysFocus != null);
+    const lit = new Set<string>();
+    if (sysFocus) {
+        const walk = (start: string, next: (id: string) => string[]) => { const todo = [start]; while (todo.length) { const id = todo.pop()!; if (lit.has(id) && id !== start) continue; lit.add(id); todo.push(...next(id).filter(x => !lit.has(x))); } };
+        walk(sysFocus, id => sys.edges.filter(x => x[0] === id).map(x => x[1]));
+        walk(sysFocus, id => sys.edges.filter(x => x[1] === id).map(x => x[0]));
+    }
+    for (const el of grid.querySelectorAll<HTMLElement>('[data-node]')) { el.classList.toggle('lit', lit.has(el.dataset.node!)); el.classList.toggle('focus', el.dataset.node === sysFocus); }
+    for (const el of grid.querySelectorAll<SVGPathElement>('path')) el.classList.toggle('lit', lit.has(el.dataset.from!) && lit.has(el.dataset.to!));
+    const used = new Set(sys.nodes.filter(n => lit.has(n.id)).flatMap(n => n.trusted ?? []));
+    for (const el of document.querySelectorAll<HTMLElement>('[data-trusted]')) el.classList.toggle('lit', used.has(el.dataset.trusted!));
+}
+app.addEventListener('pointerover', ev => {
+    if (sysPinned) return;
+    const t = (ev.target as Element).closest<HTMLElement>('[data-node]');
+    const next = t?.dataset.node ?? null;
+    if (next !== sysFocus) { sysFocus = next; lightSystem(); }
+});
+app.addEventListener('click', ev => {
+    const src = (ev.target as Element).closest<HTMLElement>('[data-src]');
+    const t = (ev.target as Element).closest<HTMLElement>('[data-node]');
+    if (src && !ev.shiftKey) { window.open(src.dataset.src!, 'bon-source'); return; }
+    if (t) { sysPinned = !(sysPinned && sysFocus === t.dataset.node); sysFocus = t.dataset.node!; lightSystem(); }
+    else if (sysPinned && !(ev.target as Element).closest('.sys-grid')) { sysPinned = false; sysFocus = null; lightSystem(); }
+});
+window.addEventListener('resize', () => drawSystem());
+
+
 function queue(s: State): string {
     const head = `<summary class="section-head">${chevron}<h2>${word('queue', 'Queue')}</h2><span class="count">${s.queue ? `${s.queue.length} not in the spec` : 'None'}</span></summary>`;
     const body = !s.queue ? `<div class="empty">No <code>.bon/queue.tsv</code> at trunk's head</div>`
@@ -465,12 +651,12 @@ function queue(s: State): string {
 // ── rendering ──
 const markup = new WeakMap<Element, string>();
 function put(el: Element, html: string): void { if (markup.get(el) !== html) { el.innerHTML = html; markup.set(el, html); } }
-app.innerHTML = '<header id="header" class="top"></header><section id="sbom"></section><div id="controls" class="toolbar"></div><main><section id="now"></section><section id="queue" tabindex="-1"></section><section id="recent"></section></main>';
+app.innerHTML = '<header id="header" class="top"></header><section id="sbom"></section><div id="controls" class="toolbar"></div><main><section id="now"></section><section id="system"></section><section id="queue" tabindex="-1"></section><section id="recent"></section></main>';
 let controlsDrawn = false;
 function render(): void {
     if (!data) { put(document.querySelector('#now')!, '<div class="empty">Reading the repository…</div>'); return; }
     document.title = `${data.repo.name ?? 'bon'} · bon view`;
-    for (const id of ['header', 'controls', 'sbom', 'queue', 'recent']) document.querySelector<HTMLElement>(`#${id}`)!.hidden = !data.configured;
+    for (const id of ['header', 'controls', 'sbom', 'system', 'queue', 'recent']) document.querySelector<HTMLElement>(`#${id}`)!.hidden = !data.configured;
     const nowEl = document.querySelector<HTMLElement>('#now')!;
     if (!data.configured) {
         put(nowEl, '<div class="card empty">No .bon/bon.toml at trunk&#39;s head — run bon init</div>'); nowEl.hidden = false; return;
@@ -489,6 +675,8 @@ function render(): void {
         for (const k of keys) if (!autoOpened.has(k)) { autoOpened.add(k); opened.add(k); }
     }
     put(document.querySelector('#recent')!, recent(data));
+    if (!document.activeElement?.matches('[data-sys-search]')) put(document.querySelector('#system')!, systemSection(data));
+    drawSystem();
     put(document.querySelector('#queue')!, queue(data));
     // The SBOM's filter keeps its focus: while it is typed in, its input handler redraws.
     const sb = document.querySelector('#sbom')!;
@@ -496,10 +684,15 @@ function render(): void {
 }
 const soon = (): void => { requestAnimationFrame(render); };
 
+app.addEventListener('change', ev => {
+    const el = ev.target as HTMLSelectElement;
+    if (el.matches('[data-sys-search]')) { sysSearch = el.value; el.blur(); render(); }
+});
 app.addEventListener('toggle', ev => {
     const el = ev.target as HTMLDetailsElement;
     if (el.dataset.section === 'traces') { if (el.open !== tracesOpen) { tracesOpen = el.open; soon(); } return; }
     if (el.dataset.section === 'sbom') { if (el.open !== sbomOpen) { sbomOpen = el.open; soon(); } return; }
+    if (el.dataset.section === 'system') { if (el.open !== systemOpen) { systemOpen = el.open; soon(); } return; }
     if (el.dataset.section === 'queue') { if (el.open !== queueOpen) { queueOpen = el.open; soon(); } return; }
     const key = el.dataset.open; if (!key || el.open === opened.has(key)) return;
     if (el.open) opened.add(key); else opened.delete(key);
