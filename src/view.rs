@@ -42,26 +42,22 @@ fn respond(root: &Path, mut stream: TcpStream) -> std::io::Result<()> {
             Some(b) => ("200 OK", "application/octet-stream", b),
             None => ("404 Not Found", "text/plain", b"no such search".to_vec()),
         },
-        _ => { let (status, kind, body) = match path {
-        "/" => ("200 OK", "text/html; charset=utf-8", INDEX.to_string()),
-        "/app.js" => ("200 OK", "text/javascript; charset=utf-8", APP.to_string()),
-        "/app.css" => ("200 OK", "text/css; charset=utf-8", STYLE.to_string()),
-        "/api/state" => ("200 OK", "application/json", state(root, &Filter::query(query)).to_string()),
+        "/" => ("200 OK", "text/html; charset=utf-8", INDEX.as_bytes().to_vec()),
+        "/app.js" => ("200 OK", "text/javascript; charset=utf-8", APP.as_bytes().to_vec()),
+        "/app.css" => ("200 OK", "text/css; charset=utf-8", STYLE.as_bytes().to_vec()),
+        "/api/state" => ("200 OK", "application/json", state(root, &Filter::query(query)).to_string().into_bytes()),
         "/api/log" => match log(root, query) {
-            Some(text) => ("200 OK", "text/plain; charset=utf-8", text),
-            None => ("404 Not Found", "text/plain", "no such log".into()),
+            Some(text) => ("200 OK", "text/plain; charset=utf-8", text.into_bytes()),
+            None => ("404 Not Found", "text/plain", b"no such log".to_vec()),
         },
-        _ => ("404 Not Found", "text/plain", "not found".into()),
-        }; (status, kind, body.into_bytes()) }
+        _ => ("404 Not Found", "text/plain", b"not found".to_vec()),
     };
     write!(stream, "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", body.len())?;
     stream.write_all(&body)
 }
 
 fn git(root: &Path, args: &[&str]) -> String {
-    Command::new("git").args(args).current_dir(root).output().ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string()).unwrap_or_default()
+    super::git(root, args).unwrap_or_default()
 }
 
 fn jsonl(path: &Path) -> Vec<Value> {
