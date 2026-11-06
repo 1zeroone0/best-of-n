@@ -371,9 +371,10 @@ pub fn counterexample(root: &str) -> (r: Result<bool, String>) {
     }
 }
 
-/// bon queue: one queue search on a transcript, and its proposal for engineer:
-/// the agreed intents with their wording, and the contested cues.
-pub fn queue(root: &str, transcript: Transcript) -> (r: Result<(Vec<(Cue, Intent)>, Vec<Cue>), String>) {
+/// bon queue: one queue search per transcript, all in one run of the bon
+/// process, and for each its proposal for engineer: the agreed intents with
+/// their wording, and the contested cues.
+pub fn queue(root: &str, transcripts: &Vec<Transcript>) -> (r: Result<Vec<(Vec<(Cue, Intent)>, Vec<Cue>)>, String>) {
     let head = trusted::head(root)?;
     let m = trusted::manifest(root, &head)?;
     trusted::on_trunk(&m)?;
@@ -392,10 +393,36 @@ pub fn queue(root: &str, transcript: Transcript) -> (r: Result<(Vec<(Cue, Intent
     let tracked mut t = Tokens { instance, checks: checks_t, tests: tests_t, trunk, authors, searches, limit: limit_t, spent: spent_t, reserved };
     let mut spent: u64 = 0;
     trusted::record(&m, "initialize");
-    let s = search(&m, 0, 0, Kind::Queue { goal: transcript }, head.clone(), &checks, &tests, l, limit, &mut spent,
-                   None, Ghost(observed), Tracked(&mut t))?;
-    trusted::record(&m, "proposal");
-    Ok((proposed(&s), contested(&s)))
+    let mut out: Vec<(Vec<(Cue, Intent)>, Vec<Cue>)> = Vec::new();
+    let mut k: usize = 0;
+    while k < transcripts.len()
+        invariant
+            t.wf(),
+            spec::isolated(observed),
+            t.searches.value().len() == k as int,
+            forall|j: int| 0 <= j < t.searches.value().len() ==> spec::complete(#[trigger] t.searches.value()[j]),
+            t.reserved.value() == 0,
+            t.spent.value() == spent as nat,
+            t.trunk.value() == Seq::<spec::Commit>::empty().push(head@),
+            t.checks.value() == paths(checks@),
+            t.tests.value() == paths(tests@),
+            t.limit.value() == limit as nat,
+            k <= transcripts.len(),
+        decreases transcripts.len() - k,
+    {
+        let ghost before = t.searches.value();
+        let s = search(&m, k, 0, Kind::Queue { goal: transcripts[k].clone() }, head.clone(), &checks, &tests, l, limit, &mut spent,
+                       None, Ghost(observed), Tracked(&mut t))?;
+        proof {
+            assert forall|j: int| 0 <= j < t.searches.value().len() implies spec::complete(#[trigger] t.searches.value()[j]) by {
+                if j < k { assert(t.searches.value()[j] == before[j]); }
+            }
+        }
+        trusted::record(&m, "proposal");
+        out.push((proposed(&s), contested(&s)));
+        k += 1;
+    }
+    Ok(out)
 }
 
 } // verus!

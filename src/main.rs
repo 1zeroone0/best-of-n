@@ -295,16 +295,17 @@ fn queue(root: &str) -> Result<(), String> {
         return Err(format!("no transcripts directory '{dir}': set transcripts in .bon/bon.toml or add .vtt files"));
     }
     let cited = git(r, &["log", "--format=%(trailers:key=Source,valueonly)"])?;
-    let mut any = false;
     let mut entries: Vec<PathBuf> = std::fs::read_dir(r.join(&dir)).map_err(|e| format!("{dir}: {e}"))?
         .filter_map(|e| e.ok().map(|e| e.path())).filter(|p| p.extension().is_some_and(|x| x == "vtt")).collect();
     entries.sort();
-    for p in entries {
-        let rel = format!("{dir}/{}", p.file_name().unwrap().to_string_lossy());
-        if cited.lines().any(|l| l.trim() == rel) { continue; }
-        any = true;
-        println!("{rel}: searching");
-        let (agreed, contested) = process::queue(root, rel.chars().collect())?;
+    // Each transcript no commit cites yet: one search each, in one bon process.
+    let new: Vec<(PathBuf, String)> = entries.into_iter()
+        .map(|p| { let rel = format!("{dir}/{}", p.file_name().unwrap().to_string_lossy()); (p, rel) })
+        .filter(|(_, rel)| !cited.lines().any(|l| l.trim() == rel)).collect();
+    if new.is_empty() { println!("no new transcripts in {dir}"); return Ok(()); }
+    for (_, rel) in &new { println!("{rel}: searching"); }
+    let found = process::queue(root, &new.iter().map(|(_, rel)| rel.chars().collect()).collect())?;
+    for ((p, rel), (agreed, contested)) in new.iter().zip(found) {
         let head = git(r, &["rev-parse", "HEAD"])?;
         let mut text = git(r, &["show", "HEAD:.bon/queue.tsv"]).unwrap_or_else(|_| "id\tintent\n".into());
         if !text.ends_with('\n') { text.push('\n'); }
@@ -323,7 +324,6 @@ fn queue(root: &str) -> Result<(), String> {
         println!("  review: cat .bon/traces/proposals/{name}.patch");
         println!("  accept: git apply .bon/traces/proposals/{name}.patch && git commit -m 'queue: {rel}' -m 'Source: {rel}' -- .bon/queue.tsv");
     }
-    if !any { println!("no new transcripts in {dir}"); }
     Ok(())
 }
 

@@ -31,7 +31,7 @@ pub struct Config {
     /// every selected candidate is pushed to it.
     #[serde(default = "remote_default")]
     pub remote: String,
-    /// The bon process's limit, in dollars, per command.
+    /// The bon process's limit, in dollars.
     pub limit: f64,
     /// engineer's time, in dollars per hour.
     pub rate: f64,
