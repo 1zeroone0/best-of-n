@@ -389,12 +389,19 @@ pub trait Gates {
         requires x.results.len() == x.n, t.results.len() == t.n,
         ensures r == spec::not_found(x@, t@);
 
-    /// The test a code search carries, if x found a counterexample on trunk.
+    /// The test that lands on trunk, if x found a counterexample on trunk.
     fn found_on_trunk(x: &Search) -> (r: Option<usize>)
         requires x.results.len() == x.n,
         ensures
             r matches Some(i) ==> spec::found_on_trunk(x@, i as int),
             r is None ==> forall|i: int| !spec::found_on_trunk(x@, i);
+
+    /// The test that lands on trunk, if x's tests split t, the search it tested.
+    fn landing(x: &Search, t: &Search) -> (r: Option<usize>)
+        requires x.results.len() == x.n, t.results.len() == t.n,
+        ensures
+            r matches Some(i) ==> spec::lands_on(t@, x@, i as int),
+            r is None ==> forall|i: int| !spec::lands_on(t@, x@, i);
 
     /// The proposal: each agreed cue with its proposed wording, once.
     fn proposed(s: &Search) -> (r: Vec<(Cue, Intent)>)

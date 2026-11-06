@@ -50,7 +50,7 @@ pub open spec fn returned(r: Option<Candidate>) -> Option<spec::Candidate> {
 #[allow(unused_variables)]
 fn search(
     m: &trusted::Manifest, index: usize, a: usize, kind: Kind, start: Commit, checks: &Vec<Path>, tests: &Vec<Path>,
-    l: u64, limit: u64, spent: &mut u64, target: Option<&Search>, carried: &trusted::Carried,
+    l: u64, limit: u64, spent: &mut u64, target: Option<&Search>,
     Ghost(observed): Ghost<Map<Object, Permission>>, Tracked(t): Tracked<&mut Tokens>,
 ) -> (r: Result<Search, String>)
     requires
@@ -100,7 +100,7 @@ fn search(
     trusted::record_grant(m, n, &kind);
     let started = trusted::clock();
     let spent_before = *spent;
-    let mut results = trusted::run(m, &kind, a, &start, target, carried);
+    let mut results = trusted::run(m, &kind, a, &start, target);
     if results.len() != n {
         return Err("trusted code returned the wrong number of agent processes".into());
     }
@@ -206,12 +206,11 @@ fn search(
 
 /// bon code (compaction false) or bon compaction (true). Each attempt is a
 /// search and, if it selects, a counterexample search on the selection; the
-/// selected candidate is pushed once one clears. A blocked attempt reruns
-/// wider, carrying the counterexample's tests, which every later candidate must
-/// accept, until the attempts run out. `carried` holds tests a counterexample
-/// on trunk found.
-pub fn to_push(root: &str, compaction: bool, carried: trusted::Carried) -> (r: Result<(), String>) {
-    let head = trusted::head(root)?;
+/// selected candidate is pushed once one clears. When a test splits the
+/// candidates, the best such test lands on trunk, and the next attempt runs
+/// wider from that head, until the attempts run out.
+pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
+    let mut head = trusted::head(root)?;
     let m = trusted::manifest(root, &head)?;
     trusted::on_trunk(&m)?;
     let checks = trusted::checks(&m);
@@ -223,7 +222,7 @@ pub fn to_push(root: &str, compaction: bool, carried: trusted::Carried) -> (r: R
         return Err("agent is not isolated: its permissions differ from the policy; run bon setup".into());
     }
     // Code is for a trunk its checks reject; compaction, for one they accept.
-    let accepted = trusted::trunk_accepted(&m, &head, &carried);
+    let accepted = trusted::trunk_accepted(&m, &head);
     if !compaction && accepted { return Err("trunk's checks accept it: there is no code to write".into()); }
     if compaction && !accepted { return Err("trunk's checks reject it: run bon code first".into()); }
     let ghost observed = observed(pc, pt, pw, pr, pd);
@@ -235,7 +234,6 @@ pub fn to_push(root: &str, compaction: bool, carried: trusted::Carried) -> (r: R
     trusted::record(&m, "initialize");
 
     let attempts = trusted::attempts(&m);
-    let mut carried = carried;
     let mut a: usize = 0;
     let mut index: usize = 0;
     while a < attempts
@@ -246,7 +244,8 @@ pub fn to_push(root: &str, compaction: bool, carried: trusted::Carried) -> (r: R
             forall|k: int| 0 <= k < t.searches.value().len() ==> spec::complete(#[trigger] t.searches.value()[k]),
             t.reserved.value() == 0,
             t.spent.value() == spent as nat,
-            t.trunk.value() == Seq::<spec::Commit>::empty().push(head@),
+            t.trunk.value().len() >= 1,
+            t.trunk.value().last() == head@,
             t.checks.value() == paths(checks@),
             t.tests.value() == paths(tests@),
             t.limit.value() == limit as nat,
@@ -260,7 +259,7 @@ pub fn to_push(root: &str, compaction: bool, carried: trusted::Carried) -> (r: R
             Kind::Code { goal: head.clone() }
         };
         let ghost before = t.searches.value();
-        let s0 = search(&m, index, a, kind, head.clone(), &checks, &tests, l, limit, &mut spent, None, &carried,
+        let s0 = search(&m, index, a, kind, head.clone(), &checks, &tests, l, limit, &mut spent, None,
                         Ghost(observed), Tracked(&mut t))?;
         proof {
             assert(t.searches.value()[index as int] == s0@);
@@ -277,7 +276,7 @@ pub fn to_push(root: &str, compaction: bool, carried: trusted::Carried) -> (r: R
                 trusted::record_selected(&m, i);
                 let ghost before1 = t.searches.value();
                 let s1 = search(&m, index + 1, a, Kind::Counterexample { goal: Some(AgentProcess { search: index, index: i }) },
-                                head.clone(), &checks, &tests, l, limit, &mut spent, Some(&s0), &carried,
+                                head.clone(), &checks, &tests, l, limit, &mut spent, Some(&s0),
                                 Ghost(observed), Tracked(&mut t))?;
                 proof {
                     assert(t.searches.value()[index as int] == s0@);
@@ -295,15 +294,29 @@ pub fn to_push(root: &str, compaction: bool, carried: trusted::Carried) -> (r: R
                     proof {
                         t.instance.push(index as int, i as int, index as int + 1, &mut t.trunk, &mut t.authors, &t.searches);
                     }
-                    if let Err(e) = trusted::push(&m, &candidate(&s0, i).commit, &carried) {
+                    if let Err(e) = trusted::push(&m, &candidate(&s0, i).commit) {
                         trusted::record(&m, &format!("blocked: {e}"));
                         return Err(e);
                     }
                     trusted::record(&m, "push");
                     return Ok(());
                 }
-                trusted::record(&m, "blocked: a counterexample split the agreed candidates; its tests are carried");
-                trusted::carry(&m, &mut carried, &s1, Some(&s0));
+                match landing(&s1, &s0) {
+                    Some(j) => {
+                        proof {
+                            t.instance.land(index as int + 1, j as int, &mut t.trunk, &mut t.authors, &t.searches);
+                        }
+                        if let Err(e) = trusted::land(&m, &s1, j, Some(&s0)) {
+                            trusted::record(&m, &format!("blocked: {e}"));
+                            return Err(e);
+                        }
+                        trusted::record(&m, "land");
+                        head = candidate(&s1, j).commit.clone();
+                    }
+                    None => {
+                        trusted::record(&m, "blocked: fewer than two verified tests, and none splits the candidates");
+                    }
+                }
                 index = index + 2;
             }
         }
@@ -314,11 +327,11 @@ pub fn to_push(root: &str, compaction: bool, carried: trusted::Carried) -> (r: R
 
 /// bon counterexample: tests written from the spec, never the implementation,
 /// looking for a behavior on trunk the spec forbids. When at least two verified
-/// tests reject trunk, returns the selected one to carry into a code search
-/// (Ok(Some)); otherwise Ok(None), and nothing is pushed: a test that accepts
+/// tests reject trunk, the best lands on trunk, whose checks then reject it
+/// (Ok(true)); otherwise Ok(false), and nothing lands: a test that accepts
 /// trunk shows nothing.
 #[verifier::rlimit(100)]
-pub fn counterexample(root: &str) -> (r: Result<Option<trusted::Carried>, String>) {
+pub fn counterexample(root: &str) -> (r: Result<bool, String>) {
     let head = trusted::head(root)?;
     let m = trusted::manifest(root, &head)?;
     trusted::on_trunk(&m)?;
@@ -330,8 +343,7 @@ pub fn counterexample(root: &str) -> (r: Result<Option<trusted::Carried>, String
     if !isolated(pc, pt, pw, pr, pd) {
         return Err("agent is not isolated: its permissions differ from the policy; run bon setup".into());
     }
-    let none = trusted::no_tests();
-    if !trusted::trunk_accepted(&m, &head, &none) { return Err("trunk's checks reject it: run bon code first".into()); }
+    if !trusted::trunk_accepted(&m, &head) { return Err("trunk's checks reject it: run bon code first".into()); }
     let ghost observed = observed(pc, pt, pw, pr, pd);
     let tracked (Tracked(instance), Tracked(checks_t), Tracked(tests_t), Tracked(trunk), Tracked(authors),
                  Tracked(searches), Tracked(limit_t), Tracked(spent_t), Tracked(reserved), Tracked(capability))
@@ -340,18 +352,21 @@ pub fn counterexample(root: &str) -> (r: Result<Option<trusted::Carried>, String
     let mut spent: u64 = 0;
     trusted::record(&m, "initialize");
     let s = search(&m, 0, 0, Kind::Counterexample { goal: None }, head.clone(), &checks, &tests, l, limit, &mut spent,
-                   None, &none, Ghost(observed), Tracked(&mut t))?;
+                   None, Ghost(observed), Tracked(&mut t))?;
     match found_on_trunk(&s) {
         Some(i) => {
             trusted::record_selected(&m, i);
-            trusted::record(&m, "found: a counterexample on trunk; a code search carries its test");
-            let mut carried = trusted::no_tests();
-            trusted::carry_one(&m, &mut carried, &s, i);
-            Ok(Some(carried))
+            proof {
+                assert(t.searches.value()[0] == s@);
+                t.instance.land(0, i as int, &mut t.trunk, &mut t.authors, &t.searches);
+            }
+            trusted::land(&m, &s, i, None)?;
+            trusted::record(&m, "land");
+            Ok(true)
         }
         None => {
             trusted::record(&m, "not found: fewer than two verified tests reject trunk");
-            Ok(None)
+            Ok(false)
         }
     }
 }
@@ -378,7 +393,7 @@ pub fn queue(root: &str, transcript: Transcript) -> (r: Result<(Vec<(Cue, Intent
     let mut spent: u64 = 0;
     trusted::record(&m, "initialize");
     let s = search(&m, 0, 0, Kind::Queue { goal: transcript }, head.clone(), &checks, &tests, l, limit, &mut spent,
-                   None, &trusted::no_tests(), Ghost(observed), Tracked(&mut t))?;
+                   None, Ghost(observed), Tracked(&mut t))?;
     trusted::record(&m, "proposal");
     Ok((proposed(&s), contested(&s)))
 }

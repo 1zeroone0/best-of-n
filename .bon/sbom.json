@@ -556,7 +556,7 @@
       },
       {
         "name": "bon:trusted-functions",
-        "value": "Manifest,manifest,limit,agent_process_limit,checks,tests,harnesses,at,width,attempts,Carried,no_tests,bundle,written,carry,carry_one,head,on_trunk,trunk_accepted,observe,run,push,append,record_push,Clock,clock,report,record_selected,record_wait,record_grant,record,agree_outputs"
+        "value": "Manifest,manifest,limit,agent_process_limit,checks,tests,harnesses,at,width,attempts,bundle,land,head,on_trunk,trunk_accepted,observe,run,push,append,record_push,Clock,clock,report,record_selected,record_wait,record_grant,record,agree_outputs"
       }
     ]
   },

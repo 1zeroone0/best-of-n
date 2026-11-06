@@ -131,9 +131,9 @@ pub struct Counterexample {
     pub visible: Vec<String>,
 }
 
-/// Where a carried test goes on trunk: the counterexample path with a short
-/// hash of the test before its extension, so each keeps its own file.
-fn carried_path(config: &Config, test: &[u8]) -> String {
+/// Where a counterexample's test lands on trunk: the counterexample path with a
+/// short hash of the test before its extension, so each keeps its own file.
+fn landed_path(config: &Config, test: &[u8]) -> String {
     let p = &config.counterexample.path;
     let id = format!("{:08x}", hash(&String::from_utf8_lossy(test)) >> 32);
     match p.rsplit_once('.') { Some((stem, ext)) if !ext.contains('/') => format!("{stem}_{id}.{ext}"), _ => format!("{p}_{id}") }
@@ -484,17 +484,11 @@ fn generation(h: &Harness, config: &Config, stdout: &str) -> Result<(u64, Option
     }
 }
 
-fn prompt(kind: &Kind, config: &Config, carried: &Carried) -> String {
+fn prompt(kind: &Kind, config: &Config) -> String {
     let c = &config.counterexample;
     let blind = if c.visible.is_empty() { "" } else { "You will not see any implementation's code on purpose: write it from the spec and the checks alone." };
     let goal = match kind {
-        Kind::Code { .. } => {
-            let mut g = "Trunk's checks reject this code. Change the code until every check accepts it.\n".to_string();
-            for (path, _, _) in &carried.tests {
-                g.push_str(&format!("The test at {path} must also accept it; it runs with: {}\n", c.run.replace(&c.path, path)));
-            }
-            g
-        }
+        Kind::Code { .. } => "Trunk's checks reject this code. Change the code until every check accepts it.\n".to_string(),
         Kind::Compaction { .. } => format!(
             "Remove what is stale, in the code and in the tests under {:?}, or write it cleaner, without changing \
              behavior: every check must still accept it, the program must print the same, and the tests must \
@@ -589,16 +583,6 @@ pub fn attempts(m: &Manifest) -> usize {
     m.config.harness.iter().chain(m.config.counterexample.harness.iter()).map(|h| h.n.len()).max().unwrap_or(1)
 }
 
-/// Tests a counterexample found, carried into the code searches that follow:
-/// every later candidate must accept each, and each is pushed with the
-/// candidate that does. Each is (its path on trunk, the test, the commits it
-/// rejected: its evidence).
-#[verifier::external_body]
-pub struct Carried { pub tests: Vec<(String, Vec<u8>, Vec<String>)> }
-
-#[verifier::external_body]
-pub fn no_tests() -> Carried { Carried { tests: Vec::new() } }
-
 /// A candidate commit kept in its trace as a git bundle, so it outlives git's
 /// garbage collection with no ref: a counterexample's evidence. (TCB: git)
 #[verifier::external]
@@ -610,48 +594,40 @@ fn bundle(m: &Manifest, commit: &str, base: &str, trace: &std::path::Path) -> Op
     ok.then(|| file.strip_prefix(&m.root).unwrap_or(&file).to_string_lossy().to_string())
 }
 
-/// The test candidate c of x wrote, if it has one.
-#[verifier::external]
-fn written(m: &Manifest, c: &Candidate) -> Option<Vec<u8>> {
-    let commit: String = c.commit.iter().collect();
-    Command::new("git").args(["show", &format!("{commit}:{}", m.config.counterexample.path)]).current_dir(&m.root)
-        .output().ok().filter(|o| o.status.success()).map(|o| o.stdout)
-}
-
-/// Carry each verified test of the counterexample search x that splits t: its
-/// evidence is the members of t it rejects, each kept as a bundle.
+/// The test of x's candidate i lands on the remote's trunk by itself: its
+/// commit, whose parent is trunk's head, fast-forward only; then the local trunk
+/// follows. Its evidence, for compaction to keep rejecting: the members of t it
+/// rejects, each kept as a bundle; or, on trunk's head (t None), trunk's head,
+/// which git keeps. (TCB: git, the remote)
 #[verifier::external_body]
-pub fn carry(m: &Manifest, carried: &mut Carried, x: &Search, t: Option<&Search>) {
-    let Some(t) = t else { return };
-    let d = trace_dir(&m.root);
-    let search = RUNS.load(std::sync::atomic::Ordering::SeqCst).saturating_sub(2);
-    for r in x.results.iter() {
-        let Some(c) = r else { continue };
-        if !crate::exec::verified(x, c) { continue; }
-        let Some(test) = written(m, c) else { continue };
-        let mut evidence = Vec::new();
-        for (j, accepts) in c.accepts.iter() {
-            if *accepts || *j < 0 { continue; }
-            if let Some(Some(e)) = t.results.get(*j as usize) {
-                let commit: String = e.commit.iter().collect();
-                let base: String = e.base.iter().collect();
-                if bundle(m, &commit, &base, &d.join(search.to_string()).join(j.to_string())).is_some() { evidence.push(commit); }
+pub fn land(m: &Manifest, x: &Search, i: usize, t: Option<&Search>) -> (r: Result<(), String>) {
+    let Some(Some(c)) = x.results.get(i) else { return Err("no candidate to land".into()) };
+    let commit: String = c.commit.iter().collect();
+    let path = c.changed.iter().map(|p| p.iter().collect::<String>()).next()
+        .ok_or_else(|| "the test changed no path".to_string())?;
+    let mut evidence: Vec<String> = Vec::new();
+    match t {
+        None => evidence.push(x.base.iter().collect()),
+        Some(t) => {
+            let d = trace_dir(&m.root);
+            let search = RUNS.load(std::sync::atomic::Ordering::SeqCst).saturating_sub(2);
+            for (j, accepts) in c.accepts.iter() {
+                if *accepts || *j < 0 { continue; }
+                if let Some(Some(e)) = t.results.get(*j as usize) {
+                    let ec: String = e.commit.iter().collect();
+                    let eb: String = e.base.iter().collect();
+                    if bundle(m, &ec, &eb, &d.join(search.to_string()).join(j.to_string())).is_some() { evidence.push(ec); }
+                }
             }
         }
-        if evidence.is_empty() { continue; }
-        carried.tests.push((carried_path(&m.config, &test), test, evidence));
     }
-}
-
-/// Carry the test of x's candidate i, which rejects trunk: its evidence is
-/// trunk's head, which git keeps.
-#[verifier::external_body]
-pub fn carry_one(m: &Manifest, carried: &mut Carried, x: &Search, i: usize) {
-    if let Some(Some(c)) = x.results.get(i) {
-        if let Some(test) = written(m, c) {
-            carried.tests.push((carried_path(&m.config, &test), test, vec![x.base.iter().collect()]));
-        }
-    }
+    let (r, tr) = (&m.config.remote, &m.config.trunk);
+    git(&m.root, &["push", "--quiet", r, &format!("{commit}:refs/heads/{tr}")])
+        .map_err(|e| format!("blocked: {r}/{tr} moved during the search, so the test could not land; run it again ({e})"))?;
+    git(&m.root, &["merge", "--ff-only", "--quiet", &commit])?;
+    append(&m.root.join(BON).join("traces").join("counterexamples.jsonl"),
+           &serde_json::json!({ "test": path, "evidence": evidence }));
+    Ok(())
 }
 
 /// trunk's head, if trunk is checked out with no uncommitted changes to tracked files.
@@ -680,16 +656,13 @@ pub fn on_trunk(m: &Manifest) -> (r: Result<(), String>) {
     Ok(())
 }
 
-/// Whether trunk's checks accept its head: every test (and every carried
-/// test) accepts it and Verus verifies it. Builds trunk for the candidates.
+/// Whether trunk's checks accept its head: every test accepts it and Verus
+/// verifies it. Builds trunk for the candidates.
 #[verifier::external_body]
-pub fn trunk_accepted(m: &Manifest, head: &Commit, carried: &Carried) -> bool {
+pub fn trunk_accepted(m: &Manifest, head: &Commit) -> bool {
     let h: String = head.iter().collect();
     let (tests, proved) = warm(m, &h);
-    let build = WARM.get().cloned().flatten().unwrap_or_else(|| scratch("trunk.build/build"));
-    let log = trace_dir(&m.root);
-    tests && proved && carried.tests.iter().enumerate()
-        .all(|(k, (_, t, _))| test_on(m, &h, t, &build, &log.join(format!("trunk-carried-{k}"))))
+    tests && proved
 }
 
 /// agent's effective permissions on each file the policy covers, observed by
@@ -725,7 +698,7 @@ pub fn observe(m: &Manifest, commit: &Commit) -> (r: Result<(Permission, Permiss
 /// (None if it produced none) and its cost in microdollars. `target` is the
 /// search a counterexample attacks.
 #[verifier::external_body]
-pub fn run(m: &Manifest, kind: &Kind, a: usize, start: &Commit, target: Option<&Search>, carried: &Carried) -> Vec<(Option<Candidate>, u64)> {
+pub fn run(m: &Manifest, kind: &Kind, a: usize, start: &Commit, target: Option<&Search>) -> Vec<(Option<Candidate>, u64)> {
     // Number runs once per bon process, so a command that runs several drivers
     // (a counterexample on trunk, then a code search) never reuses a working directory or trace.
     let search = RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -744,51 +717,23 @@ pub fn run(m: &Manifest, kind: &Kind, a: usize, start: &Commit, target: Option<&
             scope.spawn(|| loop {
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let Some(h) = slots.get(i) else { break };
-                *out[i].lock().unwrap() = agent_process(m, kind, search, i, h, &start, target, carried, &traces.join(i.to_string()));
+                *out[i].lock().unwrap() = agent_process(m, kind, search, i, h, &start, target, &traces.join(i.to_string()));
             });
         }
     });
     out.into_iter().map(|c| c.into_inner().unwrap_or((None, 0))).collect()
 }
 
-/// The selected candidate is pushed to the remote's trunk, with the carried
-/// tests committed on top of it, then the local trunk follows. The push is
-/// fast-forward only: if the remote's trunk moved, it is refused and nothing
-/// changes. (TCB: git, the remote)
+/// The selected candidate is pushed to the remote's trunk, then the local trunk
+/// follows. The push is fast-forward only: if the remote's trunk moved, it is
+/// refused and nothing changes. (TCB: git, the remote)
 #[verifier::external_body]
-pub fn push(m: &Manifest, commit: &Commit, carried: &Carried) -> (r: Result<(), String>) {
-    let mut c: String = commit.iter().collect();
-    if !carried.tests.is_empty() {
-        // The carried tests, as engineer's commit on the candidate.
-        let index = trace_dir(&m.root).join("push-index");
-        let with = |args: &[&str]| -> Result<String, String> {
-            let out = Command::new("git").args(args).current_dir(&m.root).env("GIT_INDEX_FILE", &index)
-                .stdin(Stdio::null()).output().map_err(|e| e.to_string())?;
-            if !out.status.success() { return Err(String::from_utf8_lossy(&out.stderr).to_string()); }
-            Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
-        };
-        with(&["read-tree", &c])?;
-        for (path, test, _) in &carried.tests {
-            let mut h = Command::new("git").args(["hash-object", "-w", "--stdin"]).current_dir(&m.root)
-                .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
-            h.stdin.take().unwrap().write_all(test).map_err(|e| e.to_string())?;
-            let blob = String::from_utf8_lossy(&h.wait_with_output().map_err(|e| e.to_string())?.stdout).trim().to_string();
-            with(&["update-index", "--add", "--cacheinfo", &format!("100644,{blob},{path}")])?;
-        }
-        let tree = with(&["write-tree"])?;
-        let _ = std::fs::remove_file(&index);
-        let paths: Vec<&str> = carried.tests.iter().map(|(p, _, _)| p.as_str()).collect();
-        c = git(&m.root, &["commit-tree", &tree, "-p", &c, "-m", &format!("counterexample tests: {}", paths.join(", "))])?;
-    }
+pub fn push(m: &Manifest, commit: &Commit) -> (r: Result<(), String>) {
+    let c: String = commit.iter().collect();
     let (r, t) = (&m.config.remote, &m.config.trunk);
     git(&m.root, &["push", "--quiet", r, &format!("{c}:refs/heads/{t}")])
         .map_err(|e| format!("blocked: {r}/{t} moved during the search, so the push was refused; run it again ({e})"))?;
     git(&m.root, &["merge", "--ff-only", "--quiet", &c])?;
-    // Each carried test, with its evidence, for compaction to keep rejecting.
-    for (path, _, evidence) in &carried.tests {
-        append(&m.root.join(BON).join("traces").join("counterexamples.jsonl"),
-               &serde_json::json!({ "test": path, "evidence": evidence }));
-    }
     record_push(m, &c);
     Ok(())
 }
@@ -929,7 +874,7 @@ pub const SBOM: &str = ".bon/sbom.json";
 /// One agent process: generate, capture, observe. Its log goes under `trace`.
 #[allow(clippy::too_many_arguments)]
 fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Harness, start: &str,
-                 target: Option<&Search>, carried: &Carried, trace: &std::path::Path) -> (Option<Candidate>, u64) {
+                 target: Option<&Search>, trace: &std::path::Path) -> (Option<Candidate>, u64) {
     let _ = std::fs::create_dir_all(trace);
     let config = &m.config;
     let dir = scratch(&format!("{search}.{index}/{}", repository_name(&m.root)));
@@ -943,15 +888,6 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
         let _ = std::fs::write(trace.join("error"), e);
         return (None, 0);
     }
-    // A carried test sits where it will be pushed, read-only, for the agent to run.
-    if matches!(kind, Kind::Code { .. }) {
-        for (path, test, _) in &carried.tests {
-            let p = dir.join(path);
-            let _ = std::fs::create_dir_all(p.parent().unwrap_or(&dir));
-            let _ = std::fs::write(&p, test);
-            let _ = Command::new("chmod").arg("a-w").arg(&p).status();
-        }
-    }
     if let Kind::Counterexample { .. } = kind {
         if !config.counterexample.visible.is_empty() {
             let mut keep: Vec<String> = config.counterexample.visible.iter().chain(config.checks.paths.iter())
@@ -962,14 +898,14 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
     }
     let argv = harness_argv(h, config, &dir);
     let _ = std::fs::write(trace.join("argv"), argv.join(" "));
-    let text = prompt(kind, config, carried);
+    let text = prompt(kind, config);
     let _ = std::fs::write(trace.join("prompt"), &text);
     let c = as_agent(config, &dir, &[], &argv);
     let (_, stdout, killed) = supervise(c, Some(text), Duration::from_secs(config.agent_process.time), &trace.join("harness"));
     // Without token counts there is no measured cost: charge the whole limit.
     let (spent, harness_cost, prices) = generation(h, config, &stdout).unwrap_or((micro(config.agent_process.limit), None, HashMap::new()));
     if killed { let _ = std::fs::write(trace.join("killed"), "time limit"); }
-    let candidate = capture(m, kind, search, index, start, &dir, target, carried, trace).map_err(|e| {
+    let candidate = capture(m, kind, search, index, start, &dir, target, trace).map_err(|e| {
         let _ = std::fs::write(trace.join("error"), &e);
     }).ok();
     let _ = Command::new("chmod").args(["-R", "-N"]).arg(&dir).stderr(Stdio::null()).status();
@@ -1005,7 +941,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
 /// its test accepts.
 #[allow(clippy::too_many_arguments)]
 fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, dir: &std::path::Path,
-           target: Option<&Search>, carried: &Carried, trace: &std::path::Path) -> Result<Candidate, String> {
+           target: Option<&Search>, trace: &std::path::Path) -> Result<Candidate, String> {
     let root = &m.root;
     let config = &m.config;
     let index_file = trace.join("index");
@@ -1025,30 +961,34 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
         Kind::Queue { .. } => { if dir.join(QUEUE).exists() { with(&["add", "--", QUEUE])?; } }
         _ => { with(&["add", "-A", "."])?; }
     }
-    // The carried tests were bon's to place, not the candidate's to commit.
-    for (path, _, _) in &carried.tests { let _ = with(&["rm", "--cached", "-q", "--ignore-unmatch", "--", path]); }
     let tree = with(&["write-tree"])?;
     let _ = std::fs::remove_file(&index_file);
     let (name, goal) = label(kind);
     let message = format!("{name}{}\n\nTrace: {BON}/traces/{}/{search}/{index}\n",
                           if goal.is_empty() { String::new() } else { format!(": {goal}") }, std::process::id());
-    let commit = {
-        let out = Command::new("git").args(["commit-tree", &tree, "-p", start, "-m", &message]).current_dir(root)
+    let commit_of = |tree: &str| -> Result<String, String> {
+        let out = Command::new("git").args(["commit-tree", tree, "-p", start, "-m", &message]).current_dir(root)
             .env("GIT_AUTHOR_NAME", "agent").env("GIT_AUTHOR_EMAIL", "agent@localhost")
             .stdin(Stdio::null()).output().map_err(|e| e.to_string())?;
         if !out.status.success() { return Err(String::from_utf8_lossy(&out.stderr).to_string()); }
-        String::from_utf8_lossy(&out.stdout).trim().to_string()
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
-
-    let numstat = git(root, &["diff-tree", "-r", "--numstat", "--no-renames", start, &commit])?;
-    let mut changed = Vec::new();
-    let mut diff = 0u64;
-    for l in numstat.lines() {
-        let f: Vec<&str> = l.splitn(3, '\t').collect();
-        if f.len() < 3 { continue; }
-        diff += f[0].parse::<u64>().unwrap_or(1) + f[1].parse::<u64>().unwrap_or(1);
-        changed.push(f[2].chars().collect::<Path>());
-    }
+    let commit = commit_of(&tree)?;
+    let changes = |commit: &str| -> Result<(Vec<Path>, u64), String> {
+        let numstat = git(root, &["diff-tree", "-r", "--numstat", "--no-renames", start, commit])?;
+        let mut changed = Vec::new();
+        let mut diff = 0u64;
+        for l in numstat.lines() {
+            let f: Vec<&str> = l.splitn(3, '\t').collect();
+            if f.len() < 3 { continue; }
+            diff += f[0].parse::<u64>().unwrap_or(1) + f[1].parse::<u64>().unwrap_or(1);
+            changed.push(f[2].chars().collect::<Path>());
+        }
+        Ok((changed, diff))
+    };
+    let (mut changed, mut diff) = changes(&commit)?;
+    let mut commit = commit;
+    let mut written: Option<Vec<u8>> = None;
 
     // Checks run in a read-only checkout, as agent.
     let cdir = scratch(&format!("{search}.{index}.check/{}", repository_name(root)));
@@ -1065,9 +1005,6 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
         Kind::Code { .. } | Kind::Compaction { .. } => {
             for (k, v) in config.checks.test.iter().enumerate() {
                 if !run_check(config, &cdir, &build, v, &trace.join(format!("test-{k}"))).0 { accepted = false; break; }
-            }
-            for (k, (_, t, _)) in carried.tests.iter().enumerate() {
-                if accepted && !test_on(m, &commit, t, &build, &trace.join(format!("carried-{k}"))) { accepted = false; }
             }
             for (k, v) in config.checks.verify.iter().enumerate() {
                 if !accepted { proved = false; break; }
@@ -1091,6 +1028,7 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
             accepted = run_check(config, &cdir, &build, &config.counterexample.build, &trace.join("build")).0;
             proved = trunk_proved;
             let test = std::fs::read(dir.join(&config.counterexample.path)).ok();
+            written = test.clone();
             let mut members: Vec<(i64, String)> = Vec::new();
             match target {
                 Some(t) => {
@@ -1115,6 +1053,22 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
     }
     let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&cdir).status();
     let _ = std::fs::remove_dir_all(&cdir);
+    // A counterexample's test keeps its own file, where it lands: its commit
+    // moves the test there, so the commit that lands is the candidate itself.
+    if let (Kind::Counterexample { .. }, Some(bytes)) = (kind, &written) {
+        let path = landed_path(config, bytes);
+        with(&["read-tree", &commit])?;
+        with(&["rm", "--cached", "-q", "--", &config.counterexample.path])?;
+        let mut h = Command::new("git").args(["hash-object", "-w", "--stdin"]).current_dir(root)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+        h.stdin.take().ok_or("hash-object: no stdin")?.write_all(bytes).map_err(|e| e.to_string())?;
+        let blob = String::from_utf8_lossy(&h.wait_with_output().map_err(|e| e.to_string())?.stdout).trim().to_string();
+        with(&["update-index", "--add", "--cacheinfo", &format!("100644,{blob},{path}")])?;
+        let tree = with(&["write-tree"])?;
+        let _ = std::fs::remove_file(&index_file);
+        commit = commit_of(&tree)?;
+        (changed, diff) = changes(&commit)?;
+    }
 
     let intents: Vec<(Cue, Intent)> = match kind {
         Kind::Queue { .. } => queue_intents(root, start, &commit),
@@ -1303,11 +1257,11 @@ mod tests {
     }
 
     #[test]
-    fn carried_tests_keep_their_own_file() {
+    fn landed_tests_keep_their_own_file() {
         let c = config();
-        let p = carried_path(&c, b"one");
+        let p = landed_path(&c, b"one");
         assert!(p.starts_with("tests/c_") && p.ends_with(".sh"), "{p}");
-        assert_ne!(p, carried_path(&c, b"two"));
+        assert_ne!(p, landed_path(&c, b"two"));
     }
 
     #[test]

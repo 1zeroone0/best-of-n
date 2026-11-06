@@ -48,8 +48,8 @@ fn main() {
 fn dispatch(root: &str, args: &[String]) -> Result<(), String> {
     let root = root.to_string();
     match args.first().map(String::as_str) {
-        Some("code") => process::to_push(&root, false, best_of_n::trusted::no_tests()).map(|_| println!("pushed")),
-        Some("compaction") => process::to_push(&root, true, best_of_n::trusted::no_tests()).map(|_| println!("pushed")),
+        Some("code") => process::to_push(&root, false).map(|_| println!("pushed")),
+        Some("compaction") => process::to_push(&root, true).map(|_| println!("pushed")),
         Some("init") => init(&root),
         Some("counterexample") => counterexample(&root),
         Some("background") if args.get(1).map(String::as_str) == Some("--plist") => { plist(&root); Ok(()) }
@@ -83,17 +83,15 @@ fn running(root: &str) {
     let _ = std::fs::write(d.join("running"), std::process::id().to_string());
 }
 
-/// bon counterexample, and if trunk shows one, the code search that carries its test.
+/// bon counterexample: if trunk shows a behavior the spec forbids, the test that
+/// shows it lands on trunk, and trunk's checks reject trunk until bon code.
 fn counterexample(root: &str) -> Result<(), String> {
-    match process::counterexample(root)? {
-        None => { println!("not found: fewer than two verified tests reject trunk"); Ok(()) }
-        Some(carried) => {
-            println!("found: verified tests reject trunk; searching for code that their test accepts");
-            process::to_push(root, false, carried)?;
-            println!("pushed, with the test");
-            Ok(())
-        }
+    if process::counterexample(root)? {
+        println!("found: verified tests reject trunk; the best landed on trunk, so trunk's checks reject it: run bon code");
+    } else {
+        println!("not found: fewer than two verified tests reject trunk");
     }
+    Ok(())
 }
 
 /// bon background: the stalest of compaction and a counterexample on trunk,
@@ -132,7 +130,7 @@ fn background(root: &str) -> Result<(), String> {
         counterexample(root)
     } else {
         println!("compaction ({compaction} commits stale)");
-        process::to_push(root, true, best_of_n::trusted::no_tests()).map(|_| println!("pushed"))
+        process::to_push(root, true).map(|_| println!("pushed"))
     }
 }
 

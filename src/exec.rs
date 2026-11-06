@@ -507,6 +507,74 @@ pub fn not_found(x: &Search, t: &Search) -> (r: bool)
     count == 2
 }
 
+// ── landing ─────────────────────────────────────────────
+
+#[verifier::rlimit(400)]
+pub fn landing(x: &Search, t: &Search) -> (r: Option<usize>)
+    requires x.results.len() == x.n, t.results.len() == t.n,
+    ensures
+        r matches Some(i) ==> spec::lands_on(t@, x@, i as int),
+        r is None ==> forall|i: int| !spec::lands_on(t@, x@, i),
+{
+    let ghost xv = x@;
+    let ghost tv = t@;
+    assert(spec::complete(xv)) by {
+        assert forall|i: int| 0 <= i < x.n implies xv.results.contains_key(i) by {}
+    }
+    assert(spec::complete(tv)) by {
+        assert forall|i: int| 0 <= i < t.n implies tv.results.contains_key(i) by {}
+    }
+    let vx = verified_each(x);
+    let vt = verified_each(t);
+    // The best verified test that splits t.
+    let mut best: Option<usize> = None;
+    let mut i = 0;
+    while i < x.n
+        invariant
+            xv == x@, tv == t@, vx.len() == x.n, vt.len() == t.n,
+            x.results.len() == x.n, t.results.len() == t.n, 0 <= i <= x.n,
+            forall|m: int| 0 <= m < x.n ==> vx[m] == spec::verified_at(xv, m),
+            forall|m: int| 0 <= m < t.n ==> vt[m] == spec::verified_at(tv, m),
+            spec::complete(xv), spec::complete(tv),
+            best is None ==> forall|m: int| 0 <= m < i ==> !spec::splits_at(tv, xv, m),
+            best matches Some(b) ==> b < i && spec::splits_at(tv, xv, b as int)
+                && forall|m: int| 0 <= m < i && m != b && spec::splits_at(tv, xv, m) ==>
+                    spec::beats(spec::at(xv, b as int), b as int, spec::at(xv, m), m),
+        decreases x.n - i,
+    {
+        if vx[i] {
+            let c = candidate(x, i);
+            if splits(t, &vt, c) {
+                match best {
+                    None => { best = Some(i); }
+                    Some(b) => {
+                        let d = candidate(x, b);
+                        if c.rank > d.rank || (c.rank == d.rank && c.diff < d.diff) { best = Some(i); }
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    match best {
+        Some(b) => {
+            assert(spec::lands_on(tv, xv, b as int)) by {
+                assert forall|m: int| m != b as int && spec::splits_at(tv, xv, m) implies
+                    spec::beats(spec::at(xv, b as int), b as int, spec::at(xv, m), m) by {
+                    assert(0 <= m < x.n);
+                }
+            }
+            Some(b)
+        }
+        None => {
+            assert forall|k: int| !spec::lands_on(tv, xv, k) by {
+                if spec::lands_on(tv, xv, k) { assert(0 <= k < x.n); }
+            }
+            None
+        }
+    }
+}
+
 // ── found on trunk ──────────────────────────────────────
 
 /// Whether verified test i rejects trunk's head.
@@ -926,6 +994,7 @@ impl Gates for Kernel {
     fn selected(s: &Search) -> (r: Option<usize>) { selected(s) }
     fn not_found(x: &Search, t: &Search) -> (r: bool) { not_found(x, t) }
     fn found_on_trunk(x: &Search) -> (r: Option<usize>) { found_on_trunk(x) }
+    fn landing(x: &Search, t: &Search) -> (r: Option<usize>) { landing(x, t) }
     fn proposed(s: &Search) -> (r: Vec<(Cue, Intent)>) { proposed(s) }
     fn contested(s: &Search) -> (r: Vec<Cue>) { contested(s) }
 }

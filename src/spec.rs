@@ -74,8 +74,7 @@ pub enum Kind {
     /// Candidates write a test from the spec, never from code, looking for a
     /// behavior the spec forbids. The goal is the selected candidate of a code
     /// or compaction search, whose push it clears or blocks; or, when None,
-    /// trunk's head, where a counterexample starts a code search that carries
-    /// its test.
+    /// trunk's head. A test that shows the behavior lands on trunk (`land`).
     Counterexample { goal: Option<AgentProcess> },
 }
 
@@ -275,12 +274,52 @@ pub open spec fn rejects_trunk(x: Search, i: int) -> bool {
 }
 
 /// Counterexample on trunk: at least two verified tests reject trunk's head, so
-/// trunk shows a behavior the spec forbids. The code search that follows
-/// carries the test at index i: of those that reject trunk, the highest rank.
+/// trunk shows a behavior the spec forbids. Test i, of those that reject trunk
+/// the highest rank, is the one that lands.
 pub open spec fn found_on_trunk(x: Search, i: int) -> bool {
     complete(x) && rejects_trunk(x, i)
     && (exists|j: int| j != i && rejects_trunk(x, j))
     && forall|j: int| j != i && rejects_trunk(x, j) ==> beats(at(x, i), i, at(x, j), j)
+}
+
+/// Counterexample: x's verified test i splits t.
+pub open spec fn splits_at(t: Search, x: Search, i: int) -> bool {
+    verified_at(x, i) && splits(t, at(x, i))
+}
+
+/// Counterexample on a selected candidate: x's verified test i splits t, the
+/// search it tested, and of the tests that do, it is the highest rank.
+pub open spec fn lands_on(t: Search, x: Search, i: int) -> bool {
+    complete(x) && complete(t) && splits_at(t, x, i)
+    && forall|j: int| j != i && splits_at(t, x, j) ==> beats(at(x, i), i, at(x, j), j)
+}
+
+/// Counterexample: x's test i lands on trunk. On trunk's head, the test
+/// `found_on_trunk` names; on a selected candidate, the test `lands_on` names.
+pub open spec fn lands(searches: Seq<Search>, x: int, i: int) -> bool {
+    0 <= x < searches.len() && complete(searches[x]) && match searches[x].kind {
+        Kind::Counterexample { goal: None } => found_on_trunk(searches[x], i),
+        Kind::Counterexample { goal: Some(p) } =>
+            0 <= p.search < searches.len() && lands_on(searches[p.search], searches[x], i),
+        _ => false,
+    }
+}
+
+/// Trunk commit c, after prev, is a selected candidate pushed once a
+/// counterexample search on it found none.
+pub open spec fn pushed(searches: Seq<Search>, prev: Commit, c: Commit) -> bool {
+    exists|k: int, i: int| 0 <= k < searches.len()
+        && selected(searches[k], i)
+        && pushable(searches, k, i)
+        && searches[k].base == prev
+        && at(searches[k], i).commit == c
+}
+
+/// Trunk commit c, after prev, is a counterexample's test that landed.
+pub open spec fn landed(searches: Seq<Search>, prev: Commit, c: Commit) -> bool {
+    exists|x: int, i: int| lands(searches, x, i)
+        && searches[x].base == prev
+        && at(searches[x], i).commit == c
 }
 
 /// Queue: verified candidate i cites cue q.
@@ -424,6 +463,16 @@ tokenized_state_machine!{ bon {
         update authors = pre.authors.push(User::agent);
     }}
 
+    /// Counterexample: its test that shows a behavior the spec forbids lands on
+    /// trunk by itself, if trunk hasn't moved. Trunk's checks then reject trunk
+    /// until a code search writes code they accept. (git: push)
+    transition!{ land(x: int, i: int) {
+        require lands(pre.searches, x, i);
+        require pre.searches[x].base == pre.trunk.last();
+        update trunk = pre.trunk.push(at(pre.searches[x], i).commit);
+        update authors = pre.authors.push(User::agent);
+    }}
+
     // ── properties ──────────────────────────────────────
 
     /// What's selected is verified: exec code can rely on this.
@@ -481,15 +530,13 @@ tokenized_state_machine!{ bon {
     }
 
     /// Every trunk commit authored by agent is exactly a selected, pushable
-    /// candidate of a search on the previous head.
+    /// candidate of a search on the previous head, or a counterexample's test
+    /// that landed on it.
     #[invariant]
     pub fn trunk_exact(&self) -> bool {
         forall|t: int| 1 <= t < self.trunk.len() && self.authors[t] == User::agent ==>
-            exists|k: int, i: int| 0 <= k < self.searches.len()
-                && selected(self.searches[k], i)
-                && pushable(self.searches, k, i)
-                && self.searches[k].base == self.trunk[t - 1]
-                && at(self.searches[k], i).commit == self.trunk[t]
+            pushed(self.searches, self.trunk[t - 1], self.trunk[t])
+            || landed(self.searches, self.trunk[t - 1], self.trunk[t])
     }
 
     // ── proofs ──────────────────────────────────────────
@@ -530,22 +577,33 @@ tokenized_state_machine!{ bon {
             requires post.reserved == l * n, post.searches.last().limit == l, post.capability.dom().len() == n;
         // Earlier searches are unchanged, so their witnesses still hold.
         assert forall|t: int| 1 <= t < post.trunk.len() && post.authors[t] == User::agent implies
-            exists|kk: int, ii: int| 0 <= kk < post.searches.len()
-                && selected(post.searches[kk], ii)
-                && pushable(post.searches, kk, ii)
-                && post.searches[kk].base == post.trunk[t - 1]
-                && at(post.searches[kk], ii).commit == post.trunk[t] by {
-            let (kk, ii) = choose|kk: int, ii: int| 0 <= kk < pre.searches.len()
-                && selected(pre.searches[kk], ii)
-                && pushable(pre.searches, kk, ii)
-                && pre.searches[kk].base == pre.trunk[t - 1]
-                && at(pre.searches[kk], ii).commit == pre.trunk[t];
-            assert(post.searches[kk] == pre.searches[kk]);
-            let x = choose|x: int| 0 <= x < pre.searches.len()
-                && pre.searches[x].kind == (Kind::Counterexample { goal: Some(AgentProcess { search: kk, index: ii }) })
-                && not_found(pre.searches[x], pre.searches[kk]);
-            assert(post.searches[x] == pre.searches[x]);
-            assert(pushable(post.searches, kk, ii));
+            pushed(post.searches, post.trunk[t - 1], post.trunk[t])
+            || landed(post.searches, post.trunk[t - 1], post.trunk[t]) by {
+            if pushed(pre.searches, pre.trunk[t - 1], pre.trunk[t]) {
+                let (kk, ii) = choose|kk: int, ii: int| 0 <= kk < pre.searches.len()
+                    && selected(pre.searches[kk], ii)
+                    && pushable(pre.searches, kk, ii)
+                    && pre.searches[kk].base == pre.trunk[t - 1]
+                    && at(pre.searches[kk], ii).commit == pre.trunk[t];
+                assert(post.searches[kk] == pre.searches[kk]);
+                let x = choose|x: int| 0 <= x < pre.searches.len()
+                    && pre.searches[x].kind == (Kind::Counterexample { goal: Some(AgentProcess { search: kk, index: ii }) })
+                    && not_found(pre.searches[x], pre.searches[kk]);
+                assert(post.searches[x] == pre.searches[x]);
+                assert(pushable(post.searches, kk, ii));
+                assert(pushed(post.searches, post.trunk[t - 1], post.trunk[t]));
+            } else {
+                let (x, i) = choose|x: int, i: int| lands(pre.searches, x, i)
+                    && pre.searches[x].base == pre.trunk[t - 1]
+                    && at(pre.searches[x], i).commit == pre.trunk[t];
+                assert(post.searches[x] == pre.searches[x]);
+                match pre.searches[x].kind {
+                    Kind::Counterexample { goal: Some(q) } => { assert(post.searches[q.search] == pre.searches[q.search]); }
+                    _ => {}
+                }
+                assert(lands(post.searches, x, i));
+                assert(landed(post.searches, post.trunk[t - 1], post.trunk[t]));
+            }
         }
     }
 
@@ -577,34 +635,71 @@ tokenized_state_machine!{ bon {
                 assert(post.searches[kk] == pre.searches[kk]);
             }
         }
-        // Selected searches, and searches that found no counterexample, are complete, so they hold no capability:
-        // the one waited on here belongs to neither.
+        // Selected searches, searches that found no counterexample, and the searches a landed test
+        // depends on are complete, so they hold no capability: the one waited on here is none of them.
         assert forall|t: int| 1 <= t < post.trunk.len() && post.authors[t] == User::agent implies
-            exists|kk: int, ii: int| 0 <= kk < post.searches.len()
-                && selected(post.searches[kk], ii)
-                && pushable(post.searches, kk, ii)
-                && post.searches[kk].base == post.trunk[t - 1]
-                && at(post.searches[kk], ii).commit == post.trunk[t] by {
-            let (kk, ii) = choose|kk: int, ii: int| 0 <= kk < pre.searches.len()
-                && selected(pre.searches[kk], ii)
-                && pushable(pre.searches, kk, ii)
-                && pre.searches[kk].base == pre.trunk[t - 1]
-                && at(pre.searches[kk], ii).commit == pre.trunk[t];
-            assert(complete(pre.searches[kk]));
-            assert(kk != p.search);
-            assert(post.searches[kk] == pre.searches[kk]);
-            let x = choose|x: int| 0 <= x < pre.searches.len()
-                && pre.searches[x].kind == (Kind::Counterexample { goal: Some(AgentProcess { search: kk, index: ii }) })
-                && not_found(pre.searches[x], pre.searches[kk]);
-            assert(complete(pre.searches[x]));
-            assert(x != p.search);
-            assert(post.searches[x] == pre.searches[x]);
-            assert(pushable(post.searches, kk, ii));
+            pushed(post.searches, post.trunk[t - 1], post.trunk[t])
+            || landed(post.searches, post.trunk[t - 1], post.trunk[t]) by {
+            if pushed(pre.searches, pre.trunk[t - 1], pre.trunk[t]) {
+                let (kk, ii) = choose|kk: int, ii: int| 0 <= kk < pre.searches.len()
+                    && selected(pre.searches[kk], ii)
+                    && pushable(pre.searches, kk, ii)
+                    && pre.searches[kk].base == pre.trunk[t - 1]
+                    && at(pre.searches[kk], ii).commit == pre.trunk[t];
+                assert(complete(pre.searches[kk]));
+                assert(kk != p.search);
+                assert(post.searches[kk] == pre.searches[kk]);
+                let x = choose|x: int| 0 <= x < pre.searches.len()
+                    && pre.searches[x].kind == (Kind::Counterexample { goal: Some(AgentProcess { search: kk, index: ii }) })
+                    && not_found(pre.searches[x], pre.searches[kk]);
+                assert(complete(pre.searches[x]));
+                assert(x != p.search);
+                assert(post.searches[x] == pre.searches[x]);
+                assert(pushable(post.searches, kk, ii));
+                assert(pushed(post.searches, post.trunk[t - 1], post.trunk[t]));
+            } else {
+                let (x, i) = choose|x: int, i: int| lands(pre.searches, x, i)
+                    && pre.searches[x].base == pre.trunk[t - 1]
+                    && at(pre.searches[x], i).commit == pre.trunk[t];
+                assert(complete(pre.searches[x]));
+                assert(x != p.search);
+                assert(post.searches[x] == pre.searches[x]);
+                match pre.searches[x].kind {
+                    Kind::Counterexample { goal: Some(q) } => {
+                        assert(complete(pre.searches[q.search]));
+                        assert(q.search != p.search);
+                        assert(post.searches[q.search] == pre.searches[q.search]);
+                    }
+                    _ => {}
+                }
+                assert(lands(post.searches, x, i));
+                assert(landed(post.searches, post.trunk[t - 1], post.trunk[t]));
+            }
         }
     }
 
     #[inductive(push)]
     fn push_inductive(pre: Self, post: Self, k: int, i: int, x: int) {
         assert(pushable(post.searches, k, i));
+        let n = post.trunk.len() - 1;
+        assert(post.trunk[n - 1] == pre.trunk.last());
+        assert(pushed(post.searches, post.trunk[n - 1], post.trunk[n]));
+        assert forall|t: int| 1 <= t < post.trunk.len() && post.authors[t] == User::agent implies
+            pushed(post.searches, post.trunk[t - 1], post.trunk[t])
+            || landed(post.searches, post.trunk[t - 1], post.trunk[t]) by {
+            if t < n { assert(post.trunk[t - 1] == pre.trunk[t - 1] && post.trunk[t] == pre.trunk[t] && post.authors[t] == pre.authors[t]); }
+        }
+    }
+
+    #[inductive(land)]
+    fn land_inductive(pre: Self, post: Self, x: int, i: int) {
+        let n = post.trunk.len() - 1;
+        assert(post.trunk[n - 1] == pre.trunk.last());
+        assert(landed(post.searches, post.trunk[n - 1], post.trunk[n]));
+        assert forall|t: int| 1 <= t < post.trunk.len() && post.authors[t] == User::agent implies
+            pushed(post.searches, post.trunk[t - 1], post.trunk[t])
+            || landed(post.searches, post.trunk[t - 1], post.trunk[t]) by {
+            if t < n { assert(post.trunk[t - 1] == pre.trunk[t - 1] && post.trunk[t] == pre.trunk[t] && post.authors[t] == pre.authors[t]); }
+        }
     }
 }}
