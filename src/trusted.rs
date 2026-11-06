@@ -1256,6 +1256,80 @@ mod tests {
         assert!(prices.contains_key("gpt-6.1-sol"));
     }
 
+    /// A repository whose trunk is pushed to a bare remote, and a test commit on
+    /// trunk's head that only exists as an object, as a counterexample's does.
+    fn landing_fixture(name: &str) -> (PathBuf, PathBuf, String, String) {
+        let d = std::env::temp_dir().join(format!("bon-land-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (remote, work) = (d.join("remote.git"), d.join("work"));
+        let sh = |dir: &std::path::Path, args: &[&str]| -> String {
+            let out = Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)
+                .current_dir(dir).output().unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        std::fs::create_dir_all(&work).unwrap();
+        sh(&d, &["init", "-q", "--bare", "-b", "main", "remote.git"]);
+        sh(&work, &["init", "-q", "-b", "main"]);
+        std::fs::write(work.join("a"), "a").unwrap();
+        sh(&work, &["add", "a"]);
+        sh(&work, &["commit", "-q", "-m", "base"]);
+        sh(&work, &["remote", "add", "origin", remote.to_str().unwrap()]);
+        sh(&work, &["push", "-q", "origin", "main"]);
+        let base = sh(&work, &["rev-parse", "HEAD"]);
+        std::fs::create_dir_all(work.join("tests")).unwrap();
+        std::fs::write(work.join("tests/c_1.sh"), "exit 1").unwrap();
+        sh(&work, &["add", "tests/c_1.sh"]);
+        sh(&work, &["commit", "-q", "-m", "counterexample"]);
+        let test = sh(&work, &["rev-parse", "HEAD"]);
+        sh(&work, &["reset", "-q", "--hard", &base]);
+        (remote, work, base, test)
+    }
+
+    fn rejecting_trunk(base: &str, test: &str) -> Search {
+        let text = |s: &str| s.chars().collect::<Vec<char>>();
+        Search {
+            kind: Kind::Counterexample { goal: None }, base: text(base), n: 1, checks: vec![], tests: vec![text("tests/")], limit: 1,
+            results: vec![Some(Candidate {
+                commit: text(test), base: text(base), accepted: true, proved: false, changed: vec![text("tests/c_1.sh")],
+                out: vec![], intents: vec![], accepts: vec![(-1, false)], rejects_counterexamples: false, rank: 0, diff: 1,
+            })],
+        }
+    }
+
+    #[test]
+    fn a_test_lands_on_trunk_by_itself() {
+        let (remote, work, base, test) = landing_fixture("lands");
+        let m = Manifest { config: config(), root: work.clone() };
+        land(&m, &rejecting_trunk(&base, &test), 0, None).unwrap();
+        let rev = |dir: &std::path::Path, r: &str| git(dir, &["rev-parse", r]).unwrap();
+        assert_eq!(rev(&remote, "main"), test, "the remote's trunk is the test's commit");
+        assert_eq!(rev(&work, "HEAD"), test, "the local trunk follows");
+        let record = std::fs::read_to_string(work.join(BON).join("traces").join("counterexamples.jsonl")).unwrap();
+        assert_eq!(record.trim(), serde_json::json!({ "test": "tests/c_1.sh", "evidence": [base] }).to_string());
+        let _ = std::fs::remove_dir_all(work.parent().unwrap());
+    }
+
+    #[test]
+    fn a_test_does_not_land_when_trunk_moved() {
+        let (remote, work, base, test) = landing_fixture("moved");
+        // Someone else pushes to the remote's trunk first.
+        let other = remote.parent().unwrap().join("other");
+        assert!(Command::new("git").args(["clone", "-q", remote.to_str().unwrap(), other.to_str().unwrap()]).status().unwrap().success());
+        std::fs::write(other.join("b"), "b").unwrap();
+        for args in [vec!["add", "b"], vec!["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "moved"], vec!["push", "-q", "origin", "main"]] {
+            assert!(Command::new("git").args(&args).current_dir(&other).status().unwrap().success());
+        }
+        let moved = git(&remote, &["rev-parse", "main"]).unwrap();
+        let m = Manifest { config: config(), root: work.clone() };
+        let e = land(&m, &rejecting_trunk(&base, &test), 0, None).unwrap_err();
+        assert!(e.contains("moved"), "{e}");
+        assert_eq!(git(&remote, &["rev-parse", "main"]).unwrap(), moved, "the remote's trunk is unchanged");
+        assert_eq!(git(&work, &["rev-parse", "HEAD"]).unwrap(), base, "the local trunk is unchanged");
+        assert!(!work.join(BON).join("traces").join("counterexamples.jsonl").exists(), "nothing is recorded");
+        let _ = std::fs::remove_dir_all(work.parent().unwrap());
+    }
+
     #[test]
     fn landed_tests_keep_their_own_file() {
         let c = config();
