@@ -10,3 +10,4 @@ id	intent
 28	The kernel is the spec, the gates and their implementation, in Rust and Verus; programs, in TypeScript or Go, are built from the types the kernel emits and run its gates compiled in, and add no trusted code beyond their entry points.
 29	bon and bon view show one projection of the traces: what is running, what was pushed, the queue and what it cost, over any time range; the page re-derives each selection with the kernel's gates in WebAssembly and marks any disagreement with the trace.
 31	A verified counterexample test that rejects every candidate it tests is not "not found": rejecting them all does not split them, but it is not a sign that nothing is wrong.
+32	Before a search, bon checks that each harness it will run is logged in as agent, the way it runs it, and refuses to start with the command that fixes it.
