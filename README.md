@@ -41,7 +41,7 @@ bon view
 | `bon` | what is running, what was pushed, the queue |
 | `bon code` | search for code that trunk's checks accept; push it |
 | `bon compaction` | remove what is stale in code and tests, behavior unchanged |
-| `bon counterexample` | look for a behavior on trunk the spec forbids, with tests written blind; if found, fix it |
+| `bon counterexample` | look for a behavior on trunk the spec forbids, with tests written blind; if found, its test lands on trunk: then `bon code` |
 | `bon queue` | turn each new transcript into a proposal for the queue |
 | `bon background` | the stalest of compaction and counterexample, on spare capacity |
 | `bon view` | the same, live, on localhost |

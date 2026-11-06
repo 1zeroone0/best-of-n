@@ -30,8 +30,13 @@ with them on the spec level, and you run bon.
 10. **Where things stand is answered against the spec and the queue:** in
     the spec and pushed, built but never run, still queued. No new next steps.
 11. **Old documents are intent,** not authority over what is built and tested.
-12. **Make the owner's part cheap:** a dry run, then each command in its own
-    copy-paste block.
+12. **Make the owner's part cheap:** run the commands yourself; in Rex, each
+    search in its own pane. Only what needs the owner (an interactive login,
+    sudo) goes to them, each in its own copy-paste block.
+13. **Ground every claim in the spec and the code.** Before agreeing,
+    disagreeing or proposing, read what it concerns and cite `file:line`; say
+    where the code agrees with the owner and where it disagrees. A word not in
+    the spec is undefined: use the spec's word or say it is missing.
 
 ## Read first
 
@@ -110,7 +115,7 @@ at a time.
 |---|---|
 | see everything | `bon` in the terminal, `bon view` on a page |
 | the spec changed and trunk's checks reject it | `bon code` |
-| trunk may do what the spec forbids | `bon counterexample` (a code search fixes it if found) |
+| trunk may do what the spec forbids | `bon counterexample` (if found, its test lands on trunk, whose checks then reject it: run `bon code`) |
 | trunk should lose what is stale | `bon compaction` |
 | a new transcript arrived | `bon queue`; show the owner the patch it names and the contested cues |
 | spare capacity should work | `bon background` (`--plist` for launchd) |

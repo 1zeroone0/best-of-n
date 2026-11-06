@@ -3,9 +3,9 @@
   "components": [
     {
       "name": "best-of-n",
-      "purl": "pkg:cargo/best-of-n@0.1.0",
+      "purl": "pkg:cargo/best-of-n@0.2.0",
       "type": "library",
-      "version": "0.1.0"
+      "version": "0.2.0"
     },
     {
       "hashes": [
@@ -532,7 +532,7 @@
     "properties": [
       {
         "name": "bon:version",
-        "value": "0.1.0"
+        "value": "0.2.0"
       },
       {
         "name": "bon:trusted-file",
