@@ -32,8 +32,8 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let root = match git(Path::new("."), &["rev-parse", "--show-toplevel"]) {
         Ok(r) => r,
-        // init checks for a repository itself; sbom also runs without .git (a check).
-        Err(_) if matches!(args.first().map(String::as_str), Some("init" | "setup" | "sbom" | "help" | "-h" | "--help")) => ".".into(),
+        // init checks for a repository itself; sbom and types also run without .git (checks).
+        Err(_) if matches!(args.first().map(String::as_str), Some("init" | "setup" | "sbom" | "types" | "help" | "-h" | "--help")) => ".".into(),
         Err(e) => fail(&format!("not in a git repository: {e}")),
     };
     let command = args.first().map(String::as_str).unwrap_or("");
@@ -681,6 +681,9 @@ mod tests {
         std::fs::create_dir_all(d.join(".bon")).unwrap();
         let sh = |args: &[&str]| { let o = Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).current_dir(&d).output().unwrap(); assert!(o.status.success()); String::from_utf8_lossy(&o.stdout).trim().to_string() };
         sh(&["init", "-q", "-b", "main"]);
+        // Checks run as agent, who may have no git identity of its own.
+        sh(&["config", "user.name", "t"]);
+        sh(&["config", "user.email", "t@t"]);
         std::fs::write(d.join(".bon/queue.tsv"), "id\tintent\n").unwrap();
         sh(&["add", "."]);
         sh(&["commit", "-q", "-m", "base"]);

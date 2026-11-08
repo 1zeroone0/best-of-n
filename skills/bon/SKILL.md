@@ -32,7 +32,10 @@ with them on the spec level, and you run bon.
 11. **Old documents are intent,** not authority over what is built and tested.
 12. **Make the owner's part cheap:** run the commands yourself; in Rex, each
     search in its own pane. Only what needs the owner (an interactive login,
-    sudo) goes to them, each in its own copy-paste block.
+    sudo, their own settings) goes to them, each in its own copy-paste block.
+    Anything longer than a short line goes in a script at a short path
+    (`~/name.sh`), so the block is one line, `! sh ~/name.sh`: a pasted long
+    command wraps and breaks.
 13. **Ground every claim in the spec and the code.** Before agreeing,
     disagreeing or proposing, read what it concerns and cite `file:line`; say
     where the code agrees with the owner and where it disagrees. A word not in
@@ -57,6 +60,9 @@ The repository holds the words; this skill does not repeat them.
 **Spec level: the owner decides, with you.** The queue, the spec and its
 proofs, the gates' contracts, the tests. A spec change verifies
 (`cargo verus verify`, alone if the code lags) before the owner sees it.
+Trusted code and the checks are yours to keep passing: no search may change
+them, so before a search, run the test checks as agent in a checkout without
+`.git`, as candidates do, with what the search will write stood in.
 
 **Implementation level: search decides.** You run bon; you never write a
 candidate yourself.
