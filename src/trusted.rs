@@ -1024,11 +1024,15 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
             }
         }
         Kind::Counterexample { .. } => {
-            // Its test is accepted when it builds; the code is trunk's, so Verus's verdict is trunk's.
-            accepted = run_check(config, &cdir, &build, &config.counterexample.build, &trace.join("build")).0;
-            proved = trunk_proved;
+            // Its test is accepted when it builds on the tree it tests: trunk's own build
+            // lags a spec change that adds or changes a gate. Verus's verdict is trunk's.
             let test = std::fs::read(dir.join(&config.counterexample.path)).ok();
             written = test.clone();
+            accepted = match &test {
+                Some(bytes) => test_on(m, &tested_tree(kind, target, start), bytes, &build, &config.counterexample.build, &trace.join("build")),
+                None => false,
+            };
+            proved = trunk_proved;
             let mut members: Vec<(i64, String)> = Vec::new();
             match target {
                 Some(t) => {
@@ -1041,7 +1045,7 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
             }
             if accepted {
                 for (j, mc) in members {
-                    let a = match &test { Some(bytes) => test_on(m, &mc, bytes, &build, &trace.join(format!("accepts-{j}"))), None => false };
+                    let a = match &test { Some(bytes) => test_on(m, &mc, bytes, &build, &config.counterexample.run, &trace.join(format!("accepts-{j}"))), None => false };
                     accepts.push((j, a));
                 }
             }
@@ -1140,9 +1144,22 @@ pub fn added_removed(root: &std::path::Path, base: &str, commit: &str) -> (u64, 
 
 /// Whether a test accepts `commit`: a read-only checkout of it with the test at
 /// the counterexample path, run as agent.
-fn test_on(m: &Manifest, commit: &str, test: &[u8], build: &std::path::Path, log: &std::path::Path) -> bool {
+/// The tree a counterexample's test builds on: the selected candidate it tests,
+/// or trunk's head.
+fn tested_tree(kind: &Kind, target: Option<&Search>, start: &str) -> String {
+    match (kind, target) {
+        (Kind::Counterexample { goal: Some(p) }, Some(t)) => match t.results.get(p.index) {
+            Some(Some(c)) => c.commit.iter().collect(),
+            _ => start.to_string(),
+        },
+        _ => start.to_string(),
+    }
+}
+
+/// Whether command exits 0 on commit's tree with the test written at its path.
+fn test_on(m: &Manifest, commit: &str, test: &[u8], build: &std::path::Path, command: &str, log: &std::path::Path) -> bool {
     let config = &m.config;
-    let (path, run) = (&config.counterexample.path, &config.counterexample.run);
+    let (path, run) = (&config.counterexample.path, command);
     let dir = scratch(&format!("test.{}/{}", hash(&format!("{commit}{log:?}")), repository_name(&m.root)));
     let accepts = match materialize(&m.root, commit, &dir) {
         Ok(()) => {
@@ -1336,6 +1353,24 @@ mod tests {
         let p = landed_path(&c, b"one");
         assert!(p.starts_with("tests/c_") && p.ends_with(".sh"), "{p}");
         assert_ne!(p, landed_path(&c, b"two"));
+    }
+
+    #[test]
+    fn a_test_builds_on_the_tree_it_tests() {
+        let text = |s: &str| s.chars().collect::<Vec<char>>();
+        let candidate = |commit: &str| Candidate {
+            commit: text(commit), base: text("head"), accepted: true, proved: true, changed: vec![], out: vec![],
+            intents: vec![], accepts: vec![], rejects_counterexamples: false, rank: 0, diff: 1,
+        };
+        let tested = Search {
+            kind: Kind::Code { goal: text("head") }, base: text("head"), n: 2, checks: vec![], tests: vec![], limit: 1,
+            results: vec![Some(candidate("first")), Some(candidate("selected"))],
+        };
+        let on = |goal| Kind::Counterexample { goal };
+        // On a selected candidate: its tree, which builds even while trunk's head does not.
+        assert_eq!(tested_tree(&on(Some(crate::gates::AgentProcess { search: 0, index: 1 })), Some(&tested), "head"), "selected");
+        // On trunk: trunk's head.
+        assert_eq!(tested_tree(&on(None), None, "head"), "head");
     }
 
     #[test]
