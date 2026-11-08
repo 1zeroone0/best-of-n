@@ -1,6 +1,8 @@
 # bon's own manifest: bon builds bon.
 limit = 200.00
 rate = 120
+# The private git remote for this repository's traces (prompts, arguments, outputs).
+traces = "git@github.com:1zeroone0/bon-traces.git"
 
 [agent_process]
 limit = 5.00
