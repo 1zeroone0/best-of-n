@@ -63,7 +63,7 @@ fn search(
         old(t).limit.value() == limit as nat,
         old(t).spent.value() == *old(spent) as nat,
         old(t).reserved.value() == 0,
-        start@ == spec::start(kind@, old(t).searches.value(), old(t).trunk.value().last()),
+        start@ == old(t).trunk.value().last(),
         kind@ matches spec::Kind::Code { goal } ==> goal == old(t).trunk.value().last(),
         kind@ matches spec::Kind::Compaction { goal, .. } ==> goal == old(t).trunk.value().last(),
         kind@ matches spec::Kind::Counterexample { goal: Some(p) } ==>
@@ -81,7 +81,7 @@ fn search(
         r matches Ok(s) ==> {
             &&& s.results.len() == s.n
             &&& s@.kind == kind@
-            &&& s@.base == spec::start(kind@, old(t).searches.value(), old(t).trunk.value().last())
+            &&& s@.base == old(t).trunk.value().last()
             &&& final(t).searches.value() == old(t).searches.value().push(s@)
             &&& spec::complete(s@)
             &&& final(t).reserved.value() == 0

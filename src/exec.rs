@@ -401,7 +401,7 @@ pub fn accepts_on(c: &Candidate, j: Option<usize>) -> (r: Option<bool>)
 fn splits(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
     requires t.results.len() == t.n, vt.len() == t.n,
         forall|j: int| 0 <= j < t.n ==> vt[j] == spec::verified_at(t@, j),
-    ensures r == spec::splits(t@, c@),
+    ensures r == spec::splits(c@, t@),
 {
     let ghost tv = t@;
     let ghost tp = c@.accepts;
@@ -486,21 +486,21 @@ pub fn not_found(x: &Search, t: &Search) -> (r: bool)
             count == 1 ==> exists|a: int| 0 <= a < i && vx[a]
                 && forall|b: int| 0 <= b < i && vx[b] ==> a == b,
             count == 2 ==> exists|a: int, b: int| 0 <= a < i && 0 <= b < i && a != b && vx[a] && vx[b],
-            forall|m: int| 0 <= m < i && spec::verified_at(xv, m) ==> !spec::splits(t@, spec::at(xv, m)),
+            forall|m: int| 0 <= m < i && spec::verified_at(xv, m) ==> !spec::splits(spec::at(xv, m), t@),
         decreases vx.len() - i,
     {
         if vx[i] {
             if count < 2 { count += 1; }
             let c = candidate(x, i);
             if splits(t, &vt, c) {
-                assert(spec::verified_at(xv, i as int) && spec::splits(t@, spec::at(xv, i as int)));
+                assert(spec::verified_at(xv, i as int) && spec::splits(spec::at(xv, i as int), t@));
                 return false;
             }
         }
         i += 1;
     }
     proof {
-        assert forall|m: int| spec::verified_at(xv, m) implies !spec::splits(t@, spec::at(xv, m)) by {
+        assert forall|m: int| spec::verified_at(xv, m) implies !spec::splits(spec::at(xv, m), t@) by {
             assert(0 <= m < x.n);
         }
     }
@@ -513,8 +513,8 @@ pub fn not_found(x: &Search, t: &Search) -> (r: bool)
 pub fn landing(x: &Search, t: &Search) -> (r: Option<usize>)
     requires x.results.len() == x.n, t.results.len() == t.n,
     ensures
-        r matches Some(i) ==> spec::lands_on(t@, x@, i as int),
-        r is None ==> forall|i: int| !spec::lands_on(t@, x@, i),
+        r matches Some(i) ==> spec::lands_on(x@, t@, i as int),
+        r is None ==> forall|i: int| !spec::lands_on(x@, t@, i),
 {
     let ghost xv = x@;
     let ghost tv = t@;
@@ -536,9 +536,9 @@ pub fn landing(x: &Search, t: &Search) -> (r: Option<usize>)
             forall|m: int| 0 <= m < x.n ==> vx[m] == spec::verified_at(xv, m),
             forall|m: int| 0 <= m < t.n ==> vt[m] == spec::verified_at(tv, m),
             spec::complete(xv), spec::complete(tv),
-            best is None ==> forall|m: int| 0 <= m < i ==> !spec::splits_at(tv, xv, m),
-            best matches Some(b) ==> b < i && spec::splits_at(tv, xv, b as int)
-                && forall|m: int| 0 <= m < i && m != b && spec::splits_at(tv, xv, m) ==>
+            best is None ==> forall|m: int| 0 <= m < i ==> !spec::splits_at(xv, tv, m),
+            best matches Some(b) ==> b < i && spec::splits_at(xv, tv, b as int)
+                && forall|m: int| 0 <= m < i && m != b && spec::splits_at(xv, tv, m) ==>
                     spec::beats(spec::at(xv, b as int), b as int, spec::at(xv, m), m),
         decreases x.n - i,
     {
@@ -558,8 +558,8 @@ pub fn landing(x: &Search, t: &Search) -> (r: Option<usize>)
     }
     match best {
         Some(b) => {
-            assert(spec::lands_on(tv, xv, b as int)) by {
-                assert forall|m: int| m != b as int && spec::splits_at(tv, xv, m) implies
+            assert(spec::lands_on(xv, tv, b as int)) by {
+                assert forall|m: int| m != b as int && spec::splits_at(xv, tv, m) implies
                     spec::beats(spec::at(xv, b as int), b as int, spec::at(xv, m), m) by {
                     assert(0 <= m < x.n);
                 }
@@ -567,8 +567,8 @@ pub fn landing(x: &Search, t: &Search) -> (r: Option<usize>)
             Some(b)
         }
         None => {
-            assert forall|k: int| !spec::lands_on(tv, xv, k) by {
-                if spec::lands_on(tv, xv, k) { assert(0 <= k < x.n); }
+            assert forall|k: int| !spec::lands_on(xv, tv, k) by {
+                if spec::lands_on(xv, tv, k) { assert(0 <= k < x.n); }
             }
             None
         }
@@ -769,7 +769,9 @@ fn cites(s: &Search, v: &Vec<bool>, q: Cue) -> (r: (Option<usize>, Option<usize>
 fn cues(s: &Search, v: &Vec<bool>) -> (r: Vec<Cue>)
     requires s.results.len() == s.n, v.len() == s.n,
         forall|j: int| 0 <= j < s.n ==> v[j] == spec::verified_at(s@, j),
-    ensures forall|q: Cue, i: int| spec::cites(s@, i, q as nat) ==> r@.contains(q),
+    ensures
+        forall|q: Cue, i: int| spec::cites(s@, i, q as nat) ==> r@.contains(q),
+        forall|a: int, b: int| 0 <= a < b < r.len() ==> r[a] < r[b],
 {
     let ghost sv = s@;
     let mut r: Vec<Cue> = Vec::new();
@@ -778,6 +780,7 @@ fn cues(s: &Search, v: &Vec<bool>) -> (r: Vec<Cue>)
         invariant
             sv == s@, s.results.len() == s.n, v.len() == s.n, 0 <= i <= v.len(),
             forall|j: int| 0 <= j < s.n ==> v[j] == spec::verified_at(sv, j),
+            forall|a: int, b: int| 0 <= a < b < r.len() ==> r[a] < r[b],
             forall|q: Cue, j: int| 0 <= j < i && spec::cites(sv, j, q as nat) ==> r@.contains(q),
         decreases v.len() - i,
     {
@@ -790,6 +793,7 @@ fn cues(s: &Search, v: &Vec<bool>) -> (r: Vec<Cue>)
                     sv == s@, 0 <= k <= c.intents.len(), i < s.n,
                     m == c.intents@.map_values(|e: (Cue, Intent)| (e.0 as nat, e.1@)),
                     c@ == spec::at(sv, i as int),
+                    forall|a: int, b: int| 0 <= a < b < r.len() ==> r[a] < r[b],
                     forall|q: Cue, j: int| 0 <= j < i && spec::cites(sv, j, q as nat) ==> r@.contains(q),
                     forall|p: int| 0 <= p < k ==> r@.contains(c.intents@[p].0),
                 decreases c.intents.len() - k,
@@ -805,14 +809,23 @@ fn cues(s: &Search, v: &Vec<bool>) -> (r: Vec<Cue>)
                     p += 1;
                 }
                 let ghost before = r@;
-                if !seen { r.push(q); }
+                if !seen {
+                    let mut pos = 0;
+                    while pos < r.len() && r[pos] < q
+                        invariant
+                            0 <= pos <= r.len(),
+                            forall|a: int, b: int| 0 <= a < b < r.len() ==> r[a] < r[b],
+                            forall|a: int| 0 <= a < pos ==> r[a] < q,
+                            !r@.contains(q),
+                        decreases r.len() - pos,
+                    { pos += 1; }
+                    r.insert(pos, q);
+                }
                 proof {
-                    assert(r@.contains(q)) by {
-                        if !seen { assert(r@[r.len() - 1] == q); }
-                    }
+                    assert(r@.contains(q));
                     assert forall|q2: Cue| before.contains(q2) implies r@.contains(q2) by {
                         let x = choose|x: int| 0 <= x < before.len() && before[x] == q2;
-                        assert(r@[x] == q2);
+                        assert(r@.contains(q2));
                     }
                 }
                 k += 1;
@@ -854,6 +867,7 @@ pub fn proposed(s: &Search) -> (r: Vec<(Cue, Intent)>)
         forall|k: int| 0 <= k < r.len() ==> spec::proposed(s@, r[k].0 as nat, r[k].1@),
         forall|q: Cue, w: Seq<char>| spec::proposed(s@, q as nat, w) ==>
             exists|k: int| 0 <= k < r.len() && r[k].0 == q,
+        forall|a: int, b: int| 0 <= a < b < r.len() ==> r[a].0 < r[b].0,
 {
     hide(spec::proposed);
     hide(spec::agreed);
@@ -868,6 +882,9 @@ pub fn proposed(s: &Search) -> (r: Vec<(Cue, Intent)>)
         invariant
             sv == s@, sv.kind is Queue, spec::complete(sv), s.results.len() == s.n, v.len() == s.n, 0 <= k <= qs.len(),
             forall|j: int| 0 <= j < s.n ==> v[j] == spec::verified_at(sv, j),
+            forall|a: int, b: int| 0 <= a < b < qs.len() ==> qs[a] < qs[b],
+            forall|a: int, b: int| 0 <= a < b < r.len() ==> r[a].0 < r[b].0,
+            forall|a: int, b: int| 0 <= a < r.len() && k <= b < qs.len() ==> r[a].0 < qs[b],
             forall|x: int| 0 <= x < r.len() ==> #[trigger] spec::proposed(sv, r[x].0 as nat, r[x].1@),
             forall|x: int| 0 <= x < k && #[trigger] spec::agreed(sv, qs@[x] as nat) ==>
                 exists|y: int| 0 <= y < r.len() && r[y].0 == qs@[x],
@@ -918,6 +935,7 @@ pub fn contested(s: &Search) -> (r: Vec<Cue>)
     ensures
         forall|k: int| 0 <= k < r.len() ==> spec::contested(s@, r[k] as nat),
         forall|q: Cue| spec::contested(s@, q as nat) ==> r@.contains(q),
+        forall|a: int, b: int| 0 <= a < b < r.len() ==> r[a] < r[b],
 {
     let ghost sv = s@;
     proof { complete(s); }
@@ -930,6 +948,9 @@ pub fn contested(s: &Search) -> (r: Vec<Cue>)
             sv == s@, spec::complete(sv), s.results.len() == s.n, v.len() == s.n, 0 <= k <= qs.len(),
             forall|j: int| 0 <= j < s.n ==> v[j] == spec::verified_at(sv, j),
             forall|q: Cue, i: int| spec::cites(sv, i, q as nat) ==> qs@.contains(q),
+            forall|a: int, b: int| 0 <= a < b < qs.len() ==> qs[a] < qs[b],
+            forall|a: int, b: int| 0 <= a < b < r.len() ==> r[a] < r[b],
+            forall|a: int, b: int| 0 <= a < r.len() && k <= b < qs.len() ==> r[a] < qs[b],
             forall|x: int| 0 <= x < r.len() ==> spec::contested(sv, r[x] as nat),
             forall|x: int| 0 <= x < k && spec::contested(sv, qs@[x] as nat) ==> r@.contains(qs@[x]),
         decreases qs.len() - k,
