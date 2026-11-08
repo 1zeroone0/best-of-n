@@ -552,7 +552,7 @@
       },
       {
         "name": "bon:trusted-file",
-        "value": "examples/types.rs"
+        "value": "src/types.rs"
       },
       {
         "name": "bon:trusted-functions",

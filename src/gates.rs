@@ -29,6 +29,10 @@ pub type Transcript = Path;
 /// A WebVTT cue, by its start time in milliseconds.
 pub type Cue = u64;
 
+/// A hash of an agree check's output. Programs read it as a decimal string,
+/// since a JSON number loses u64 precision in a browser.
+pub type Hash = u64;
+
 /// A process running as agent that writes one candidate.
 pub struct AgentProcess { pub search: usize, pub index: usize }
 
@@ -44,7 +48,7 @@ impl View for AgentProcess {
 pub enum Kind {
     Queue { goal: Transcript },
     Code { goal: Commit },
-    Compaction { goal: Commit, out: Vec<u64> },
+    Compaction { goal: Commit, out: Vec<Hash> },
     Counterexample { goal: Option<AgentProcess> },
 }
 
@@ -68,7 +72,7 @@ pub struct Candidate {
     pub accepted: bool,
     pub proved: bool,
     pub changed: Vec<Path>,
-    pub out: Vec<u64>,
+    pub out: Vec<Hash>,
     /// Each new intent, by the cue it cites. A repeated cue: the first counts.
     pub intents: Vec<(Cue, Intent)>,
     /// Whether this candidate's test accepts each tested commit: the goal

@@ -48,6 +48,9 @@ pub struct Config {
     /// What `bon sbom` lists beyond the lockfiles; its `trusted` list is also every search's trusted code.
     #[serde(default)]
     pub sbom: Option<toml::Value>,
+    /// What `bon types` emits for programs: read by it alone.
+    #[serde(default)]
+    pub programs: Option<toml::Value>,
     /// Prices by canonical model, from the host file.
     #[serde(skip)]
     pub prices: HashMap<String, Price>,

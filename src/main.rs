@@ -6,6 +6,7 @@ use std::process::Command;
 
 use best_of_n::process;
 
+mod types;
 mod view;
 
 const USAGE: &str = "usage:
@@ -21,7 +22,8 @@ const USAGE: &str = "usage:
   bon setup [--dry-run] [--for <user>]
                           create user agent and group bon, and let <user> (default: you) run commands as agent;
                           run it as an administrator
-  bon sbom [--check]      write .bon/sbom.json, or fail if it differs from this machine";
+  bon sbom [--check]      write .bon/sbom.json, or fail if it differs from this machine
+  bon types [--check]     write the types programs are built on, or fail if one is stale";
 
 /// The commands that grant capabilities.
 const SEARCHES: [&str; 5] = ["code", "compaction", "counterexample", "queue", "background"];
@@ -69,6 +71,7 @@ fn dispatch(root: &str, args: &[String]) -> Result<(), String> {
             setup(dry_run, user)
         }
         Some("sbom") => sbom(&root, args.get(1).map(String::as_str) == Some("--check")),
+        Some("types") => types::run(&root, args.get(1).map(String::as_str) == Some("--check")),
         Some("help" | "-h" | "--help") => { println!("{USAGE}"); Ok(()) }
         None => status(&root, args),
         Some(a) if a.starts_with("--") => status(&root, args),
