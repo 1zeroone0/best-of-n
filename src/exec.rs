@@ -1015,7 +1015,7 @@ impl Gates for Kernel {
     fn selected(s: &Search) -> (r: Option<usize>) { selected(s) }
     fn not_found(x: &Search, t: &Search) -> (r: bool) { not_found(x, t) }
     fn found_on_trunk(x: &Search) -> (r: Option<usize>) { found_on_trunk(x) }
-    fn landing(x: &Search, t: &Search) -> (r: Option<usize>) { landing(x, t) }
+    fn lands_on(x: &Search, t: &Search) -> (r: Option<usize>) { landing(x, t) }
     fn proposed(s: &Search) -> (r: Vec<(Cue, Intent)>) { proposed(s) }
     fn contested(s: &Search) -> (r: Vec<Cue>) { contested(s) }
 }
