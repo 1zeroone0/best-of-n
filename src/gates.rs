@@ -404,7 +404,7 @@ pub trait Gates {
             r is None ==> forall|i: int| !spec::found_on_trunk(counterexample@, i);
 
     /// The test that lands on trunk, if counterexample's tests split tested.
-    fn landing(counterexample: &Search, tested: &Search) -> (r: Option<usize>)
+    fn lands_on(counterexample: &Search, tested: &Search) -> (r: Option<usize>)
         requires counterexample.results.len() == counterexample.n, tested.results.len() == tested.n,
         ensures
             r matches Some(i) ==> spec::lands_on(counterexample@, tested@, i as int),
