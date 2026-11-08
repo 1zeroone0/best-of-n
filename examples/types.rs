@@ -54,4 +54,10 @@ fn main() {
             println!("export type {name} = {variants};");
         } else { println!("export interface {name} {{ {} }}", fields(body)); }
     }
+    // The gates' answer codes in WebAssembly, as src/wasm.rs declares them.
+    for l in include_str!("../src/wasm.rs").lines() {
+        let Some(rest) = l.strip_prefix("pub const ") else { continue };
+        let (name, value) = rest.split_once(": i32 = ").expect("wasm code");
+        println!("export const {name} = {};", value.trim_end_matches(';'));
+    }
 }

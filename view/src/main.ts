@@ -54,6 +54,7 @@ interface Sbom {
 }
 
 import type { Search as KernelSearch } from './kernel';
+import { NONE, NOT_A_SEARCH } from './kernel';
 const app = document.querySelector<HTMLDivElement>('#app')!;
 let data: State | null = null;
 let connection = true;
@@ -197,17 +198,18 @@ async function rederive(s: State): Promise<void> {
             const k = emit(ptr, len);
             if (!k) return null;
             const got = call('selected', ptr, len);
-            const kernel = got < 0 ? null : got;
+            const kernel = got === NONE ? null : got;
             if (r.recorded_selected != null && kernel !== r.recorded_selected) said.push(`kernel selected ${kernel ?? 'none'}, trace recorded ${r.recorded_selected}`);
             for (const c of r.candidates) {
                 const v = call('verified', ptr, len, c.index);
-                if (v >= 0 && (v === 1) !== c.verified) said.push(`kernel says #${c.index} is ${v === 1 ? '' : 'not '}verified`);
+                if (v !== NOT_A_SEARCH && (v === 1) !== c.verified) said.push(`kernel says #${c.index} is ${v === 1 ? '' : 'not '}verified`);
                 const kc = k.results[c.index];
                 if (kc && c.commit && kc.commit !== c.commit) said.push(`kernel has #${c.index} at ${short(kc.commit)}`);
             }
             if ('counterexample' in k.kind && k.kind.counterexample.goal === null) {
                 // On trunk: two verified tests that reject it, or not found.
-                const found = call('found_on_trunk', ptr, len) >= 0;
+                const onTrunk = call('found_on_trunk', ptr, len);
+                const found = onTrunk !== NONE && onTrunk !== NOT_A_SEARCH;
                 const last = p.transitions.at(-1) ?? '';
                 const traced = last.startsWith('found') ? true : last.startsWith('not found') ? false : null;
                 if (traced !== null && traced !== found) said.push(`kernel: counterexample ${found ? 'found' : 'not found'}, trace says otherwise`);
@@ -222,7 +224,7 @@ async function rederive(s: State): Promise<void> {
             const traced = later ? false : p.outcome === 'pushed' ? true : null;
             if (tested && traced !== null) {
                 const nf = withWords(bytes, (xp, xl) => withWords(tested, (tp, tl) => call('not_found', xp, xl, tp, tl)));
-                if (nf >= 0 && (nf === 1) !== traced) said.push(`kernel: counterexample ${nf === 1 ? 'not found' : 'found'}, trace says otherwise`);
+                if (nf !== NOT_A_SEARCH && (nf === 1) !== traced) said.push(`kernel: counterexample ${nf === 1 ? 'not found' : 'found'}, trace says otherwise`);
             }
         }
         if (said.length) mismatches.set(key, cap(said.join('; ')));

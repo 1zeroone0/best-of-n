@@ -6,6 +6,11 @@
 use crate::exec::Kernel;
 use crate::gates::{Encoding, Gates};
 
+/// A gate's answer when it names no candidate.
+pub const NONE: i32 = -1;
+/// A gate's answer when the words are not a search (or name no such agent process).
+pub const NOT_A_SEARCH: i32 = -2;
+
 /// Memory for len words.
 #[no_mangle]
 pub extern "C" fn alloc(len: usize) -> *mut u64 {
@@ -25,47 +30,46 @@ unsafe fn words(p: *const u64, len: usize) -> Vec<u64> {
     std::slice::from_raw_parts(p, len).to_vec()
 }
 
-/// The selected gate on one search: its index, -1 for none, -2 if the words
-/// are not a search.
+/// The selected gate on one search: its index, NONE, or NOT_A_SEARCH.
 #[no_mangle]
 pub unsafe extern "C" fn selected(p: *const u64, len: usize) -> i32 {
     match Kernel::decode(&words(p, len)) {
-        Some(s) => Kernel::selected(&s).map_or(-1, |i| i as i32),
-        None => -2,
+        Some(s) => Kernel::selected(&s).map_or(NONE, |i| i as i32),
+        None => NOT_A_SEARCH,
     }
 }
 
 /// The not_found gate on x, a counterexample search, and t, the search it
-/// tested: 1 not found, 0 found, -2 if either is not a search.
+/// tested: 1 not found, 0 found, or NOT_A_SEARCH if either is not one.
 #[no_mangle]
 pub unsafe extern "C" fn not_found(x: *const u64, xlen: usize, t: *const u64, tlen: usize) -> i32 {
     match (Kernel::decode(&words(x, xlen)), Kernel::decode(&words(t, tlen))) {
         (Some(x), Some(t)) => Kernel::not_found(&x, &t) as i32,
-        _ => -2,
+        _ => NOT_A_SEARCH,
     }
 }
 
 /// The found_on_trunk gate on a counterexample search of trunk: the index of
-/// the test a code search carries, -1 for none, -2 if the words are not a search.
+/// the test a code search carries, NONE, or NOT_A_SEARCH.
 #[no_mangle]
 pub unsafe extern "C" fn found_on_trunk(p: *const u64, len: usize) -> i32 {
     match Kernel::decode(&words(p, len)) {
-        Some(s) => Kernel::found_on_trunk(&s).map_or(-1, |i| i as i32),
-        None => -2,
+        Some(s) => Kernel::found_on_trunk(&s).map_or(NONE, |i| i as i32),
+        None => NOT_A_SEARCH,
     }
 }
 
 /// The verified gate on candidate i of one search: 1 verified, 0 not (or no
-/// candidate), -2 if the words are not a search or it has no agent process i.
+/// candidate), or NOT_A_SEARCH.
 #[no_mangle]
 pub unsafe extern "C" fn verified(p: *const u64, len: usize, i: usize) -> i32 {
     match Kernel::decode(&words(p, len)) {
         Some(s) => match s.results.get(i) {
             Some(Some(c)) => Kernel::verified(&s, c) as i32,
             Some(None) => 0,
-            None => -2,
+            None => NOT_A_SEARCH,
         },
-        None => -2,
+        None => NOT_A_SEARCH,
     }
 }
 
