@@ -133,13 +133,13 @@ impl View for Search {
 // ── conversions ─────────────────────────────────────────
 
 /// Exec paths as the spec's set of paths.
-pub open spec fn paths(exec: Seq<Path>) -> Set<spec::Path> {
-    exec.map_values(|path: Path| path@).to_set()
+pub open spec fn paths(list: Seq<Path>) -> Set<spec::Path> {
+    list.map_values(|path: Path| path@).to_set()
 }
 
 /// Exec hashes as the spec's naturals, in order.
-pub open spec fn hashes(exec: Seq<u64>) -> Seq<nat> {
-    exec.map_values(|hash: u64| hash as nat)
+pub open spec fn hashes(list: Seq<u64>) -> Seq<nat> {
+    list.map_values(|hash: u64| hash as nat)
 }
 
 /// The index of the first pair in pairs with key.

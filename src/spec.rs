@@ -129,11 +129,12 @@ pub struct Search {
 // ── predicates ──────────────────────────────────────────
 //
 // Names: a parameter is the word for what it is (`search`, `candidate`,
-// `path`), or for its role when two of one type meet (`tested`,
-// `counterexample`, always in that order). Two letters remain: a candidate's
+// `path`), or for its role when two of one type meet (`counterexample`, then
+// `tested`, always in that order). Two letters remain: a candidate's
 // index, `i` (and `j`, a second one), into `search.results`, see `at`; and a
 // gate's return value, `r`. An index into `searches` is named for its search:
-// `search_index`, `tested_index`, `counterexample_index`.
+// `search_index`, `tested_index`, `counterexample_index`; an index into trunk
+// is `trunk_index` (the head's, `head_index`).
 
 /// bon's directory in the repository: the manifest, the queue, the SBOM and
 /// the traces.
@@ -319,21 +320,21 @@ pub open spec fn lands(searches: Seq<Search>, counterexample_index: int, i: int)
     }
 }
 
-/// Trunk commit next, after prev, is a selected candidate pushed once a
-/// counterexample search on it found none.
-pub open spec fn pushed(searches: Seq<Search>, prev: Commit, next: Commit) -> bool {
+/// Trunk commit commit, after its parent, is a selected candidate pushed once
+/// a counterexample search on it found none.
+pub open spec fn pushed(searches: Seq<Search>, parent: Commit, commit: Commit) -> bool {
     exists|tested_index: int, i: int| 0 <= tested_index < searches.len()
         && selected(searches[tested_index], i)
         && pushable(searches, tested_index, i)
-        && searches[tested_index].base == prev
-        && at(searches[tested_index], i).commit == next
+        && searches[tested_index].base == parent
+        && at(searches[tested_index], i).commit == commit
 }
 
-/// Trunk commit next, after prev, is a counterexample's test that landed.
-pub open spec fn landed(searches: Seq<Search>, prev: Commit, next: Commit) -> bool {
+/// Trunk commit commit, after its parent, is a counterexample's test that landed.
+pub open spec fn landed(searches: Seq<Search>, parent: Commit, commit: Commit) -> bool {
     exists|counterexample_index: int, i: int| lands(searches, counterexample_index, i)
-        && searches[counterexample_index].base == prev
-        && at(searches[counterexample_index], i).commit == next
+        && searches[counterexample_index].base == parent
+        && at(searches[counterexample_index], i).commit == commit
 }
 
 /// Queue: verified candidate i cites cue.
@@ -416,10 +417,10 @@ tokenized_state_machine!{ bon {
     // ── transitions ─────────────────────────────────────
 
     /// engineer committed to trunk, e.g. the queue, the spec or the checks.
-    transition!{ advance(next: Commit, checks: Set<Path>, tests: Set<Path>) {
+    transition!{ advance(commit: Commit, checks: Set<Path>, tests: Set<Path>) {
         update checks = checks;
         update tests = tests;
-        update trunk = pre.trunk.push(next);
+        update trunk = pre.trunk.push(commit);
         update authors = pre.authors.push(User::engineer);
     }}
 
@@ -545,9 +546,9 @@ tokenized_state_machine!{ bon {
     /// that landed on it.
     #[invariant]
     pub fn trunk_exact(&self) -> bool {
-        forall|position: int| 1 <= position < self.trunk.len() && self.authors[position] == User::agent ==>
-            pushed(self.searches, self.trunk[position - 1], self.trunk[position])
-            || landed(self.searches, self.trunk[position - 1], self.trunk[position])
+        forall|trunk_index: int| 1 <= trunk_index < self.trunk.len() && self.authors[trunk_index] == User::agent ==>
+            pushed(self.searches, self.trunk[trunk_index - 1], self.trunk[trunk_index])
+            || landed(self.searches, self.trunk[trunk_index - 1], self.trunk[trunk_index])
     }
 
     // ── proofs ──────────────────────────────────────────
@@ -556,7 +557,7 @@ tokenized_state_machine!{ bon {
     fn initialize_inductive(post: Self, root: Commit, checks: Set<Path>, tests: Set<Path>, limit: nat) {}
 
     #[inductive(advance)]
-    fn advance_inductive(pre: Self, post: Self, next: Commit, checks: Set<Path>, tests: Set<Path>) {}
+    fn advance_inductive(pre: Self, post: Self, commit: Commit, checks: Set<Path>, tests: Set<Path>) {}
 
     #[inductive(grant)]
     fn grant_inductive(pre: Self, post: Self, kind: Kind, n: nat, agent_process_limit: nat, observed: Map<Object, Permission>) {
@@ -587,33 +588,33 @@ tokenized_state_machine!{ bon {
         assert(post.reserved == post.searches.last().limit * post.capability.dom().len()) by(nonlinear_arith)
             requires post.reserved == agent_process_limit * n, post.searches.last().limit == agent_process_limit, post.capability.dom().len() == n;
         // Earlier searches are unchanged, so their witnesses still hold.
-        assert forall|position: int| 1 <= position < post.trunk.len() && post.authors[position] == User::agent implies
-            pushed(post.searches, post.trunk[position - 1], post.trunk[position])
-            || landed(post.searches, post.trunk[position - 1], post.trunk[position]) by {
-            if pushed(pre.searches, pre.trunk[position - 1], pre.trunk[position]) {
+        assert forall|trunk_index: int| 1 <= trunk_index < post.trunk.len() && post.authors[trunk_index] == User::agent implies
+            pushed(post.searches, post.trunk[trunk_index - 1], post.trunk[trunk_index])
+            || landed(post.searches, post.trunk[trunk_index - 1], post.trunk[trunk_index]) by {
+            if pushed(pre.searches, pre.trunk[trunk_index - 1], pre.trunk[trunk_index]) {
                 let (tested_index, i) = choose|tested_index: int, i: int| 0 <= tested_index < pre.searches.len()
                     && selected(pre.searches[tested_index], i)
                     && pushable(pre.searches, tested_index, i)
-                    && pre.searches[tested_index].base == pre.trunk[position - 1]
-                    && at(pre.searches[tested_index], i).commit == pre.trunk[position];
+                    && pre.searches[tested_index].base == pre.trunk[trunk_index - 1]
+                    && at(pre.searches[tested_index], i).commit == pre.trunk[trunk_index];
                 assert(post.searches[tested_index] == pre.searches[tested_index]);
                 let counterexample_index = choose|counterexample_index: int| 0 <= counterexample_index < pre.searches.len()
                     && pre.searches[counterexample_index].kind == (Kind::Counterexample { goal: Some(AgentProcess { search: tested_index, index: i }) })
                     && not_found(pre.searches[counterexample_index], pre.searches[tested_index]);
                 assert(post.searches[counterexample_index] == pre.searches[counterexample_index]);
                 assert(pushable(post.searches, tested_index, i));
-                assert(pushed(post.searches, post.trunk[position - 1], post.trunk[position]));
+                assert(pushed(post.searches, post.trunk[trunk_index - 1], post.trunk[trunk_index]));
             } else {
                 let (counterexample_index, i) = choose|counterexample_index: int, i: int| lands(pre.searches, counterexample_index, i)
-                    && pre.searches[counterexample_index].base == pre.trunk[position - 1]
-                    && at(pre.searches[counterexample_index], i).commit == pre.trunk[position];
+                    && pre.searches[counterexample_index].base == pre.trunk[trunk_index - 1]
+                    && at(pre.searches[counterexample_index], i).commit == pre.trunk[trunk_index];
                 assert(post.searches[counterexample_index] == pre.searches[counterexample_index]);
                 match pre.searches[counterexample_index].kind {
                     Kind::Counterexample { goal: Some(goal) } => { assert(post.searches[goal.search] == pre.searches[goal.search]); }
                     _ => {}
                 }
                 assert(lands(post.searches, counterexample_index, i));
-                assert(landed(post.searches, post.trunk[position - 1], post.trunk[position]));
+                assert(landed(post.searches, post.trunk[trunk_index - 1], post.trunk[trunk_index]));
             }
         }
     }
@@ -648,15 +649,15 @@ tokenized_state_machine!{ bon {
         }
         // Selected searches, searches that found no counterexample, and the searches a landed test
         // depends on are complete, so they hold no capability: the one waited on here is none of them.
-        assert forall|position: int| 1 <= position < post.trunk.len() && post.authors[position] == User::agent implies
-            pushed(post.searches, post.trunk[position - 1], post.trunk[position])
-            || landed(post.searches, post.trunk[position - 1], post.trunk[position]) by {
-            if pushed(pre.searches, pre.trunk[position - 1], pre.trunk[position]) {
+        assert forall|trunk_index: int| 1 <= trunk_index < post.trunk.len() && post.authors[trunk_index] == User::agent implies
+            pushed(post.searches, post.trunk[trunk_index - 1], post.trunk[trunk_index])
+            || landed(post.searches, post.trunk[trunk_index - 1], post.trunk[trunk_index]) by {
+            if pushed(pre.searches, pre.trunk[trunk_index - 1], pre.trunk[trunk_index]) {
                 let (tested_index, i) = choose|tested_index: int, i: int| 0 <= tested_index < pre.searches.len()
                     && selected(pre.searches[tested_index], i)
                     && pushable(pre.searches, tested_index, i)
-                    && pre.searches[tested_index].base == pre.trunk[position - 1]
-                    && at(pre.searches[tested_index], i).commit == pre.trunk[position];
+                    && pre.searches[tested_index].base == pre.trunk[trunk_index - 1]
+                    && at(pre.searches[tested_index], i).commit == pre.trunk[trunk_index];
                 assert(complete(pre.searches[tested_index]));
                 assert(tested_index != agent_process.search);
                 assert(post.searches[tested_index] == pre.searches[tested_index]);
@@ -667,11 +668,11 @@ tokenized_state_machine!{ bon {
                 assert(counterexample_index != agent_process.search);
                 assert(post.searches[counterexample_index] == pre.searches[counterexample_index]);
                 assert(pushable(post.searches, tested_index, i));
-                assert(pushed(post.searches, post.trunk[position - 1], post.trunk[position]));
+                assert(pushed(post.searches, post.trunk[trunk_index - 1], post.trunk[trunk_index]));
             } else {
                 let (counterexample_index, i) = choose|counterexample_index: int, i: int| lands(pre.searches, counterexample_index, i)
-                    && pre.searches[counterexample_index].base == pre.trunk[position - 1]
-                    && at(pre.searches[counterexample_index], i).commit == pre.trunk[position];
+                    && pre.searches[counterexample_index].base == pre.trunk[trunk_index - 1]
+                    && at(pre.searches[counterexample_index], i).commit == pre.trunk[trunk_index];
                 assert(complete(pre.searches[counterexample_index]));
                 assert(counterexample_index != agent_process.search);
                 assert(post.searches[counterexample_index] == pre.searches[counterexample_index]);
@@ -684,7 +685,7 @@ tokenized_state_machine!{ bon {
                     _ => {}
                 }
                 assert(lands(post.searches, counterexample_index, i));
-                assert(landed(post.searches, post.trunk[position - 1], post.trunk[position]));
+                assert(landed(post.searches, post.trunk[trunk_index - 1], post.trunk[trunk_index]));
             }
         }
     }
@@ -692,25 +693,25 @@ tokenized_state_machine!{ bon {
     #[inductive(push)]
     fn push_inductive(pre: Self, post: Self, tested_index: int, i: int, counterexample_index: int) {
         assert(pushable(post.searches, tested_index, i));
-        let head = post.trunk.len() - 1;
-        assert(post.trunk[head - 1] == pre.trunk.last());
-        assert(pushed(post.searches, post.trunk[head - 1], post.trunk[head]));
-        assert forall|position: int| 1 <= position < post.trunk.len() && post.authors[position] == User::agent implies
-            pushed(post.searches, post.trunk[position - 1], post.trunk[position])
-            || landed(post.searches, post.trunk[position - 1], post.trunk[position]) by {
-            if position < head { assert(post.trunk[position - 1] == pre.trunk[position - 1] && post.trunk[position] == pre.trunk[position] && post.authors[position] == pre.authors[position]); }
+        let head_index = post.trunk.len() - 1;
+        assert(post.trunk[head_index - 1] == pre.trunk.last());
+        assert(pushed(post.searches, post.trunk[head_index - 1], post.trunk[head_index]));
+        assert forall|trunk_index: int| 1 <= trunk_index < post.trunk.len() && post.authors[trunk_index] == User::agent implies
+            pushed(post.searches, post.trunk[trunk_index - 1], post.trunk[trunk_index])
+            || landed(post.searches, post.trunk[trunk_index - 1], post.trunk[trunk_index]) by {
+            if trunk_index < head_index { assert(post.trunk[trunk_index - 1] == pre.trunk[trunk_index - 1] && post.trunk[trunk_index] == pre.trunk[trunk_index] && post.authors[trunk_index] == pre.authors[trunk_index]); }
         }
     }
 
     #[inductive(land)]
     fn land_inductive(pre: Self, post: Self, counterexample_index: int, i: int) {
-        let head = post.trunk.len() - 1;
-        assert(post.trunk[head - 1] == pre.trunk.last());
-        assert(landed(post.searches, post.trunk[head - 1], post.trunk[head]));
-        assert forall|position: int| 1 <= position < post.trunk.len() && post.authors[position] == User::agent implies
-            pushed(post.searches, post.trunk[position - 1], post.trunk[position])
-            || landed(post.searches, post.trunk[position - 1], post.trunk[position]) by {
-            if position < head { assert(post.trunk[position - 1] == pre.trunk[position - 1] && post.trunk[position] == pre.trunk[position] && post.authors[position] == pre.authors[position]); }
+        let head_index = post.trunk.len() - 1;
+        assert(post.trunk[head_index - 1] == pre.trunk.last());
+        assert(landed(post.searches, post.trunk[head_index - 1], post.trunk[head_index]));
+        assert forall|trunk_index: int| 1 <= trunk_index < post.trunk.len() && post.authors[trunk_index] == User::agent implies
+            pushed(post.searches, post.trunk[trunk_index - 1], post.trunk[trunk_index])
+            || landed(post.searches, post.trunk[trunk_index - 1], post.trunk[trunk_index]) by {
+            if trunk_index < head_index { assert(post.trunk[trunk_index - 1] == pre.trunk[trunk_index - 1] && post.trunk[trunk_index] == pre.trunk[trunk_index] && post.authors[trunk_index] == pre.authors[trunk_index]); }
         }
     }
 }}
