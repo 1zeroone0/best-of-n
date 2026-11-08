@@ -101,7 +101,7 @@ fn search(
     let ghost before = t.searches.value();
     let tracked mut capability = t.instance.grant(kind@, n as nat, l as nat, observed,
         &t.checks, &t.tests, &t.trusted, &t.trunk, &mut t.searches, &t.limit, &t.spent, &mut t.reserved);
-    trusted::record_grant(m, n, &kind);
+    trusted::record_grant(m, &kind, n, l, Ghost(t.searches.value()));
     let started = trusted::clock();
     let spent_before = *spent;
     let mut results = trusted::run(m, &kind, a, &start, target);
@@ -130,7 +130,7 @@ fn search(
             t.trunk.value() == old(t).trunk.value(), t.authors.value() == old(t).authors.value(),
             t.limit.value() == old(t).limit.value(),
             capability.instance_id() == t.instance.id(),
-            k == before.len(), t.searches.value().len() == k + 1,
+            k == before.len(), k == index as int, t.searches.value().len() == k + 1,
             t.searches.value().take(k) == before,
             t.searches.value()[k] == s@,
             s.n == n, s.results.len() == i, i <= n, results.len() == n - i, s@.kind == kind@,
@@ -147,7 +147,7 @@ fn search(
         let (r, measured) = results.remove(0);
         // A harness that cannot be stopped mid-turn (codex) may overrun its limit;
         // it is charged at its limit and the overrun is in its facts.json. (TCB)
-        let generation = if measured > l { trusted::record(m, "wait: an agent process overran its limit"); l } else { measured };
+        let generation = if measured > l { trusted::record_over_limit(m); l } else { measured };
         match &r {
             Some(c) => { if !eq(&c.base, &s.base) { return Err("a candidate does not start from its base".into()); } }
             None => {}
@@ -179,7 +179,7 @@ fn search(
                 assert(spec::AgentProcess { search: k, index: j } != p);
             }
         }
-        trusted::record_wait(m);
+        trusted::record_wait(m, index, i, &s.results[i], generation, Ghost(t.searches.value()));
         // Restated here so the solver carries it across the trusted call to the invariant.
         proof {
             assert(forall|j: int| i + 1 <= j < n ==> #[trigger] capability.dom().contains(spec::AgentProcess { search: k, index: j })
@@ -243,7 +243,7 @@ pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
         = spec::bon::Instance::initialize(head@, paths(checks@), paths(tests@), paths(trusted@), limit as nat);
     let tracked mut t = Tokens { instance, checks: checks_t, tests: tests_t, trusted: trusted_t, trunk, authors, searches, limit: limit_t, spent: spent_t, reserved };
     let mut spent: u64 = 0;
-    trusted::record(&m, "initialize");
+    trusted::record_initialize(&m, &head, limit);
 
     let attempts = trusted::attempts(&m);
     let mut a: usize = 0;
@@ -282,7 +282,7 @@ pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
         }
         match selected(&s0) {
             None => {
-                trusted::record(&m, "blocked: fewer than two verified candidates, or they disagree");
+                trusted::record_blocked(&m, "fewer than two verified candidates, or they disagree");
                 index = index + 1;
             }
             Some(i) => {
@@ -301,17 +301,17 @@ pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
                 if not_found(&s1, &s0) {
                     let now = trusted::head(root)?;
                     if !eq(&now, &head) {
-                        trusted::record(&m, "blocked: trunk moved");
+                        trusted::record_blocked(&m, "trunk moved");
                         return Err("blocked: trunk moved during the search; run it again".into());
                     }
                     proof {
                         t.instance.push(index as int, i as int, index as int + 1, &mut t.trunk, &mut t.authors, &t.searches);
                     }
                     if let Err(e) = trusted::push(&m, &candidate(&s0, i).commit) {
-                        trusted::record(&m, &format!("blocked: {e}"));
+                        trusted::record_blocked(&m, &e);
                         return Err(e);
                     }
-                    trusted::record(&m, "push");
+                    trusted::record_push(&m, index, i, index + 1, Ghost(t.searches.value()));
                     return Ok(());
                 }
                 match landing(&s1, &s0) {
@@ -320,14 +320,14 @@ pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
                             t.instance.land(index as int + 1, j as int, &mut t.trunk, &mut t.authors, &t.searches);
                         }
                         if let Err(e) = trusted::land(&m, &s1, j, Some(&s0)) {
-                            trusted::record(&m, &format!("blocked: {e}"));
+                            trusted::record_blocked(&m, &e);
                             return Err(e);
                         }
-                        trusted::record(&m, "land");
+                        trusted::record_land(&m, index + 1, j, Ghost(t.searches.value()));
                         head = candidate(&s1, j).commit.clone();
                     }
                     None => {
-                        trusted::record(&m, "blocked: fewer than two verified tests, and none splits the candidates");
+                        trusted::record_blocked(&m, "fewer than two verified tests, and none splits the candidates");
                     }
                 }
                 index = index + 2;
@@ -364,7 +364,7 @@ pub fn counterexample(root: &str) -> (r: Result<bool, String>) {
         = spec::bon::Instance::initialize(head@, paths(checks@), paths(tests@), paths(trusted@), limit as nat);
     let tracked mut t = Tokens { instance, checks: checks_t, tests: tests_t, trusted: trusted_t, trunk, authors, searches, limit: limit_t, spent: spent_t, reserved };
     let mut spent: u64 = 0;
-    trusted::record(&m, "initialize");
+    trusted::record_initialize(&m, &head, limit);
     let s = search(&m, 0, 0, Kind::Counterexample { goal: None }, head.clone(), &checks, &tests, &trusted, l, limit, &mut spent,
                    None, Ghost(observed), Tracked(&mut t))?;
     match found_on_trunk(&s) {
@@ -375,11 +375,11 @@ pub fn counterexample(root: &str) -> (r: Result<bool, String>) {
                 t.instance.land(0, i as int, &mut t.trunk, &mut t.authors, &t.searches);
             }
             trusted::land(&m, &s, i, None)?;
-            trusted::record(&m, "land");
+            trusted::record_land(&m, 0, i, Ghost(t.searches.value()));
             Ok(true)
         }
         None => {
-            trusted::record(&m, "not found: fewer than two verified tests reject trunk");
+            trusted::record_not_found(&m, "fewer than two verified tests reject trunk");
             Ok(false)
         }
     }
@@ -407,7 +407,7 @@ pub fn queue(root: &str, transcripts: &Vec<Transcript>) -> (r: Result<Vec<(Vec<(
         = spec::bon::Instance::initialize(head@, paths(checks@), paths(tests@), paths(trusted@), limit as nat);
     let tracked mut t = Tokens { instance, checks: checks_t, tests: tests_t, trusted: trusted_t, trunk, authors, searches, limit: limit_t, spent: spent_t, reserved };
     let mut spent: u64 = 0;
-    trusted::record(&m, "initialize");
+    trusted::record_initialize(&m, &head, limit);
     let mut out: Vec<(Vec<(Cue, Intent)>, Vec<Cue>)> = Vec::new();
     let mut k: usize = 0;
     while k < transcripts.len()
@@ -434,7 +434,7 @@ pub fn queue(root: &str, transcripts: &Vec<Transcript>) -> (r: Result<Vec<(Vec<(
                 if j < k { assert(t.searches.value()[j] == before[j]); }
             }
         }
-        trusted::record(&m, "proposal");
+        trusted::record_proposal(&m);
         out.push((proposed(&s), contested(&s)));
         k += 1;
     }
