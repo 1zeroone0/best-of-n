@@ -10,14 +10,17 @@
 //!
 //! It emits every unindented `pub type`, `pub struct`, `pub enum` and
 //! `pub const` in those files, with their `///` lines, in file order. Text
-//! (`Vec<char>`) is a string; an alias named `Hash` is a decimal string, as the
-//! kernel's JSON writes hashes; an enum is an object with one key, its variant.
+//! (`Vec<char>`) is a string; a single-field tuple struct over an integer is an
+//! identity, not a quantity, and a decimal string; an enum is an object with one
+//! key, its variant.
 
 use std::path::Path;
 
 /// One declaration, as written in a `from` file.
 enum Item {
     Alias { name: String, ty: String },
+    /// A single-field tuple struct over an integer: an identity, written as a decimal string.
+    Identity { name: String },
     Struct { name: String, fields: Vec<Field> },
     Enum { name: String, variants: Vec<(String, Vec<Field>)> },
     Const { name: String, value: String },
@@ -85,7 +88,11 @@ fn declarations(text: &str) -> Vec<Declared> {
             out.push(Declared { doc: take(&mut doc), item: Item::Const { name, value: value.trim().trim_end_matches(';').trim().into() } });
         } else if let Some(rest) = l.strip_prefix("pub struct ") {
             let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
-            if let Some((body, _)) = braced(text, start) {
+            if let Some(inside) = rest[name.len()..].strip_prefix('(').and_then(|r| r.split_once(')')).map(|(i, _)| i.trim().trim_start_matches("pub ").trim()) {
+                if ["u8", "u16", "u32", "u64", "usize", "i8", "i16", "i32", "i64", "isize"].contains(&inside) {
+                    out.push(Declared { doc: take(&mut doc), item: Item::Identity { name } });
+                }
+            } else if let Some((body, _)) = braced(text, start) {
                 out.push(Declared { doc: take(&mut doc), item: Item::Struct { name, fields: fields(body) } });
             }
         } else if let Some(rest) = l.strip_prefix("pub enum ") {
@@ -137,7 +144,7 @@ fn typescript(items: &[Declared], from: &str) -> String {
     for d in items {
         out += &ts_doc(&d.doc, "");
         out += &match &d.item {
-            Item::Alias { name, .. } if name == "Hash" => "export type Hash = string;\n".to_string(),
+            Item::Identity { name } => format!("export type {name} = string;\n"),
             Item::Alias { name, ty } => format!("export type {name} = {};\n", ts(ty)),
             Item::Const { name, value } => format!("export const {name} = {value};\n"),
             Item::Struct { name, fields } => format!("export interface {name} {{ {} }}\n",
@@ -197,7 +204,7 @@ fn golang(items: &[Declared], from: &str, package: &str) -> String {
         out += "\n";
         out += &go_doc(&d.doc, "");
         out += &match &d.item {
-            Item::Alias { name, .. } if name == "Hash" => "type Hash = string\n".to_string(),
+            Item::Identity { name } => format!("type {name} = string\n"),
             Item::Alias { name, ty } => format!("type {name} = {}\n", go(ty)),
             Item::Const { name, value } => format!("const {name} = {value}\n"),
             Item::Struct { name, fields } => {
@@ -252,7 +259,7 @@ fn python(items: &[Declared], from: &str) -> String {
         out += "\n";
         out += &py_doc(&d.doc, "");
         out += &match &d.item {
-            Item::Alias { name, .. } if name == "Hash" => "Hash = str\n".to_string(),
+            Item::Identity { name } => format!("{name} = str\n"),
             Item::Alias { name, ty } => format!("{name} = {}\n", py(ty)),
             Item::Const { name, value } => format!("{name} = {value}\n"),
             Item::Struct { name, fields } => class(name, fields),
@@ -323,7 +330,7 @@ pub fn run(root: &str, check: bool) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    const KERNEL: &str = "verus! {\n/// A commit.\npub type Commit = Vec<char>;\npub type Hash = u64;\n\n/// What it is for.\n#[allow(x)]\npub enum Kind {\n    Code { goal: Commit },\n    Other { goal: Option<Commit>, out: Vec<Hash> },\n}\n\npub struct Thing {\n    /// Its commit.\n    pub commit: Commit,\n    pub pairs: Vec<(u64, bool)>,\n}\n\nimpl View for Thing {\n    pub fn not_this() {}\n}\npub const NONE: i32 = -1;\n}\n";
+    const KERNEL: &str = "verus! {\n/// A commit.\npub type Commit = Vec<char>;\npub struct Hash(pub u64);\n\n/// What it is for.\n#[allow(x)]\npub enum Kind {\n    Code { goal: Commit },\n    Other { goal: Option<Commit>, out: Vec<Hash> },\n}\n\npub struct Thing {\n    /// Its commit.\n    pub commit: Commit,\n    pub pairs: Vec<(u64, bool)>,\n}\n\nimpl View for Thing {\n    pub fn not_this() {}\n}\npub const NONE: i32 = -1;\n}\n";
 
     #[test]
     fn every_target_reads_the_same_declarations() {

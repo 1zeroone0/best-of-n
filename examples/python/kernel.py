@@ -18,8 +18,8 @@ Transcript = Path
 # A WebVTT cue, by its start time in milliseconds.
 Cue = int
 
-# A hash of an agree check's output. Programs read it as a decimal string,
-# since a JSON number loses u64 precision in a browser.
+# A hash of an agree check's output: an identity, not a quantity, so it is
+# its own type. Programs read it as a decimal string.
 Hash = str
 
 # A process running as agent that writes one candidate.

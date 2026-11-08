@@ -18,7 +18,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use vstd::prelude::*;
 
-use crate::gates::{Candidate, Commit, Cue, Intent, Kind, Path, Permission, Search};
+use crate::gates::{Candidate, Commit, Cue, Hash, Intent, Kind, Path, Permission, Search};
 use crate::spec;
 
 // ── bon.toml ────────────────────────────────────────────
@@ -927,7 +927,7 @@ fn record(m: &Manifest, line: &str) {
 
 /// The agree checks' outputs at a commit, hashed: a compaction search's goal.
 #[verifier::external_body]
-pub fn agree_outputs(m: &Manifest, commit: &Commit) -> (r: Result<Vec<u64>, String>) {
+pub fn agree_outputs(m: &Manifest, commit: &Commit) -> (r: Result<Vec<Hash>, String>) {
     let c: String = commit.iter().collect();
     let dir = scratch(&format!("goal/{}", repository_name(&m.root)));
     check_directory(&m.root, &c, &dir)?;
@@ -936,7 +936,7 @@ pub fn agree_outputs(m: &Manifest, commit: &Commit) -> (r: Result<Vec<u64>, Stri
     let _ = std::fs::create_dir_all(&log);
     let mut out = Vec::new();
     for (k, a) in m.config.checks.agree.iter().enumerate() {
-        out.push(hash(&run_check(&m.config, &dir, &build, a, &log.join(format!("goal-agree-{k}"))).1));
+        out.push(Hash(hash(&run_check(&m.config, &dir, &build, a, &log.join(format!("goal-agree-{k}"))).1)));
     }
     let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
     let _ = std::fs::remove_dir_all(&dir);
@@ -1008,7 +1008,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
         "candidate": candidate.as_ref().map(|c| serde_json::json!({
             "commit": text(&c.commit), "base": text(&c.base), "accepted": c.accepted, "proved": c.proved,
             "changed": c.changed.iter().map(text).collect::<Vec<_>>(), "diff": c.diff, "added": added, "removed": removed, "rank": c.rank,
-            "out": c.out, "accepts": c.accepts, "rejects_counterexamples": c.rejects_counterexamples,
+            "out": c.out.iter().map(|h| h.0).collect::<Vec<u64>>(), "accepts": c.accepts, "rejects_counterexamples": c.rejects_counterexamples,
             "intents": c.intents.iter().map(|(q, i)| (q, text(i))).collect::<Vec<_>>(),
         })),
     });
@@ -1092,7 +1092,7 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
             }
             if accepted && proved {
                 for (k, a) in config.checks.agree.iter().enumerate() {
-                    out.push(hash(&run_check(config, &cdir, &build, a, &trace.join(format!("agree-{k}"))).1));
+                    out.push(Hash(hash(&run_check(config, &cdir, &build, a, &trace.join(format!("agree-{k}"))).1)));
                 }
                 let which = if matches!(kind, Kind::Compaction { .. }) { "compaction" } else { "code" };
                 if let Some(r) = config.checks.rank.get(which) {

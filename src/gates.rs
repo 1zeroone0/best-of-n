@@ -29,9 +29,10 @@ pub type Transcript = Path;
 /// A WebVTT cue, by its start time in milliseconds.
 pub type Cue = u64;
 
-/// A hash of an agree check's output. Programs read it as a decimal string,
-/// since a JSON number loses u64 precision in a browser.
-pub type Hash = u64;
+/// A hash of an agree check's output: an identity, not a quantity, so it is
+/// its own type. Programs read it as a decimal string.
+#[derive(Clone, Copy, PartialEq, Eq, Structural)]
+pub struct Hash(pub u64);
 
 /// A process running as agent that writes one candidate.
 pub struct AgentProcess { pub search: usize, pub index: usize }
@@ -144,8 +145,8 @@ pub open spec fn paths(list: Seq<Path>) -> Set<spec::Path> {
 }
 
 /// Exec hashes as the spec's naturals, in order.
-pub open spec fn hashes(list: Seq<u64>) -> Seq<nat> {
-    list.map_values(|hash: u64| hash as nat)
+pub open spec fn hashes(list: Seq<Hash>) -> Seq<nat> {
+    list.map_values(|hash: Hash| hash.0 as nat)
 }
 
 /// The index of the first pair in pairs with key.
@@ -198,7 +199,7 @@ pub open spec fn kind_words(kind: Kind) -> Seq<u64> {
     match kind {
         Kind::Queue { goal } => seq![0u64] + text(goal@),
         Kind::Code { goal } => seq![1u64] + text(goal@),
-        Kind::Compaction { goal, out } => seq![2u64] + text(goal@) + seq![out.len() as u64] + out@,
+        Kind::Compaction { goal, out } => seq![2u64] + text(goal@) + seq![out.len() as u64] + out@.map_values(|hash: Hash| hash.0),
         Kind::Counterexample { goal } => match goal {
             Some(agent_process) => seq![3u64, 1u64, agent_process.search as u64, agent_process.index as u64],
             None => seq![3u64, 0u64],
@@ -213,7 +214,7 @@ pub open spec fn bit(value: bool) -> u64 { if value { 1u64 } else { 0u64 } }
 /// rank is its two's complement.
 pub open spec fn candidate_words(candidate: Candidate) -> Seq<u64> {
     text(candidate.commit@) + text(candidate.base@) + seq![bit(candidate.accepted), bit(candidate.proved)] + texts(candidate.changed@)
-        + seq![candidate.out.len() as u64] + candidate.out@
+        + seq![candidate.out.len() as u64] + candidate.out@.map_values(|hash: Hash| hash.0)
         + seq![candidate.intents.len() as u64] + candidate.intents@.map_values(|pair: (Cue, Intent)| seq![pair.0] + text(pair.1@)).flatten()
         + seq![candidate.accepts.len() as u64]
         + candidate.accepts@.map_values(|pair: (i64, bool)| seq![pair.0 as u64, bit(pair.1)]).flatten()
@@ -303,8 +304,8 @@ pub open spec fn strings(list: Seq<Vec<char>>) -> Seq<char> {
 }
 
 /// Hashes as a JSON array of decimal strings.
-pub open spec fn hash_strings(list: Seq<u64>) -> Seq<char> {
-    array(list.map_values(|hash: u64| string(decimal(hash as nat))))
+pub open spec fn hash_strings(list: Seq<Hash>) -> Seq<char> {
+    array(list.map_values(|hash: Hash| string(decimal(hash.0 as nat))))
 }
 
 /// A kind as {"<kind>":{fields}}.
