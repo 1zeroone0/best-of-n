@@ -16,6 +16,7 @@ pub struct Tokens {
     pub instance: spec::bon::Instance,
     pub checks: spec::bon::checks,
     pub tests: spec::bon::tests,
+    pub trusted: spec::bon::trusted,
     pub trunk: spec::bon::trunk,
     pub authors: spec::bon::authors,
     pub searches: spec::bon::searches,
@@ -28,6 +29,7 @@ impl Tokens {
     pub open spec fn wf(&self) -> bool {
         &&& self.checks.instance_id() == self.instance.id()
         &&& self.tests.instance_id() == self.instance.id()
+        &&& self.trusted.instance_id() == self.instance.id()
         &&& self.trunk.instance_id() == self.instance.id()
         &&& self.authors.instance_id() == self.instance.id()
         &&& self.searches.instance_id() == self.instance.id()
@@ -49,7 +51,7 @@ pub open spec fn returned(r: Option<Candidate>) -> Option<spec::Candidate> {
 // index is read only by the contract, which cargo erases.
 #[allow(unused_variables)]
 fn search(
-    m: &trusted::Manifest, index: usize, a: usize, kind: Kind, start: Commit, checks: &Vec<Path>, tests: &Vec<Path>,
+    m: &trusted::Manifest, index: usize, a: usize, kind: Kind, start: Commit, checks: &Vec<Path>, tests: &Vec<Path>, trusted: &Vec<Path>,
     l: u64, limit: u64, spent: &mut u64, target: Option<&Search>,
     Ghost(observed): Ghost<Map<Object, Permission>>, Tracked(t): Tracked<&mut Tokens>,
 ) -> (r: Result<Search, String>)
@@ -60,6 +62,7 @@ fn search(
         forall|k: int| 0 <= k < old(t).searches.value().len() ==> spec::complete(#[trigger] old(t).searches.value()[k]),
         old(t).checks.value() == paths(checks@),
         old(t).tests.value() == paths(tests@),
+        old(t).trusted.value() == paths(trusted@),
         old(t).limit.value() == limit as nat,
         old(t).spent.value() == *old(spent) as nat,
         old(t).reserved.value() == 0,
@@ -75,6 +78,7 @@ fn search(
         final(t).instance == old(t).instance,
         final(t).checks.value() == old(t).checks.value(),
         final(t).tests.value() == old(t).tests.value(),
+        final(t).trusted.value() == old(t).trusted.value(),
         final(t).trunk.value() == old(t).trunk.value(),
         final(t).authors.value() == old(t).authors.value(),
         final(t).limit.value() == old(t).limit.value(),
@@ -96,7 +100,7 @@ fn search(
     let ghost k = t.searches.value().len() as int;
     let ghost before = t.searches.value();
     let tracked mut capability = t.instance.grant(kind@, n as nat, l as nat, observed,
-        &t.checks, &t.tests, &t.trunk, &mut t.searches, &t.limit, &t.spent, &mut t.reserved);
+        &t.checks, &t.tests, &t.trusted, &t.trunk, &mut t.searches, &t.limit, &t.spent, &mut t.reserved);
     trusted::record_grant(m, n, &kind);
     let started = trusted::clock();
     let spent_before = *spent;
@@ -104,12 +108,13 @@ fn search(
     if results.len() != n {
         return Err("trusted code returned the wrong number of agent processes".into());
     }
-    let mut s = Search { kind, base: start, n, checks: checks.clone(), tests: tests.clone(), limit: l, results: Vec::new() };
+    let mut s = Search { kind, base: start, n, checks: checks.clone(), tests: tests.clone(), trusted: trusted.clone(), limit: l, results: Vec::new() };
     proof {
         assert(s.checks@.map_values(|p: Path| p@) =~= checks@.map_values(|p: Path| p@));
         assert(s.tests@.map_values(|p: Path| p@) =~= tests@.map_values(|p: Path| p@));
+        assert(s.trusted@.map_values(|p: Path| p@) =~= trusted@.map_values(|p: Path| p@));
         assert(s@.results =~= Map::empty());
-        assert(s@.authority == spec::authority(kind@, paths(checks@), paths(tests@)));
+        assert(s@.authority == spec::authority(kind@, paths(checks@), paths(tests@), paths(trusted@)));
         assert(t.searches.value()[k] == s@);
         let ps = spec::agent_processes(k, n as nat);
         assert forall|j: int| 0 <= j < n implies #[trigger] capability.dom().contains(spec::AgentProcess { search: k, index: j }) by {
@@ -121,7 +126,7 @@ fn search(
     while i < n
         invariant
             t.wf(), t.instance == old(t).instance,
-            t.checks.value() == old(t).checks.value(), t.tests.value() == old(t).tests.value(),
+            t.checks.value() == old(t).checks.value(), t.tests.value() == old(t).tests.value(), t.trusted.value() == old(t).trusted.value(),
             t.trunk.value() == old(t).trunk.value(), t.authors.value() == old(t).authors.value(),
             t.limit.value() == old(t).limit.value(),
             capability.instance_id() == t.instance.id(),
@@ -130,6 +135,7 @@ fn search(
             t.searches.value()[k] == s@,
             s.n == n, s.results.len() == i, i <= n, results.len() == n - i, s@.kind == kind@,
             s.base@ == start@, s.limit == l,
+            s@.authority == spec::authority(kind@, paths(checks@), paths(tests@), paths(trusted@)),
             forall|j: int| i <= j < n ==> #[trigger] capability.dom().contains(spec::AgentProcess { search: k, index: j })
                 && capability[spec::AgentProcess { search: k, index: j }] == (spec::Capability {
                     base: start@, authority: s@.authority, limit: l as nat }),
@@ -162,8 +168,8 @@ fn search(
         *spent = *spent + generation;
         proof {
             assert(s@.results =~= old_s.results.insert(i as int, returned(r)));
-            assert(s@.authority == spec::authority(s.kind@, paths(s.checks@), paths(s.tests@)));
-            assert(old_s.authority == spec::authority(s.kind@, paths(s.checks@), paths(s.tests@)));
+            assert(s@.authority == spec::authority(s.kind@, paths(s.checks@), paths(s.tests@), paths(s.trusted@)));
+            assert(old_s.authority == spec::authority(s.kind@, paths(s.checks@), paths(s.tests@), paths(s.trusted@)));
             assert(s@.authority == old_s.authority);
             assert(t.searches.value()[k] =~= s@);
             assert(t.searches.value().take(k) =~= before);
@@ -181,6 +187,11 @@ fn search(
                     base: start@, authority: s@.authority, limit: l as nat }));
         }
         i += 1;
+        proof {
+            assert forall|j: int| i <= j < n implies #[trigger] capability.dom().contains(spec::AgentProcess { search: k, index: j })
+                && capability[spec::AgentProcess { search: k, index: j }] == (spec::Capability {
+                    base: start@, authority: s@.authority, limit: l as nat }) by {}
+        }
     }
     proof {
         assert(s.results.len() == s.n);
@@ -215,6 +226,7 @@ pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
     trusted::on_trunk(&m)?;
     let checks = trusted::checks(&m);
     let tests = trusted::tests(&m);
+    let trusted = trusted::trusted(&m);
     let limit = trusted::limit(&m);
     let l = trusted::agent_process_limit(&m);
     let (pc, pt, pw, pr, pd) = trusted::observe(&m, &head)?;
@@ -226,10 +238,10 @@ pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
     if !compaction && accepted { return Err("trunk's checks accept it: there is no code to write".into()); }
     if compaction && !accepted { return Err("trunk's checks reject it: run bon code first".into()); }
     let ghost observed = observed(pc, pt, pw, pr, pd);
-    let tracked (Tracked(instance), Tracked(checks_t), Tracked(tests_t), Tracked(trunk), Tracked(authors),
+    let tracked (Tracked(instance), Tracked(checks_t), Tracked(tests_t), Tracked(trusted_t), Tracked(trunk), Tracked(authors),
                  Tracked(searches), Tracked(limit_t), Tracked(spent_t), Tracked(reserved), Tracked(capability))
-        = spec::bon::Instance::initialize(head@, paths(checks@), paths(tests@), limit as nat);
-    let tracked mut t = Tokens { instance, checks: checks_t, tests: tests_t, trunk, authors, searches, limit: limit_t, spent: spent_t, reserved };
+        = spec::bon::Instance::initialize(head@, paths(checks@), paths(tests@), paths(trusted@), limit as nat);
+    let tracked mut t = Tokens { instance, checks: checks_t, tests: tests_t, trusted: trusted_t, trunk, authors, searches, limit: limit_t, spent: spent_t, reserved };
     let mut spent: u64 = 0;
     trusted::record(&m, "initialize");
 
@@ -248,6 +260,7 @@ pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
             t.trunk.value().last() == head@,
             t.checks.value() == paths(checks@),
             t.tests.value() == paths(tests@),
+            t.trusted.value() == paths(trusted@),
             t.limit.value() == limit as nat,
             index <= 2 * a,
         decreases attempts - a,
@@ -259,7 +272,7 @@ pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
             Kind::Code { goal: head.clone() }
         };
         let ghost before = t.searches.value();
-        let s0 = search(&m, index, a, kind, head.clone(), &checks, &tests, l, limit, &mut spent, None,
+        let s0 = search(&m, index, a, kind, head.clone(), &checks, &tests, &trusted, l, limit, &mut spent, None,
                         Ghost(observed), Tracked(&mut t))?;
         proof {
             assert(t.searches.value()[index as int] == s0@);
@@ -276,7 +289,7 @@ pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
                 trusted::record_selected(&m, i);
                 let ghost before1 = t.searches.value();
                 let s1 = search(&m, index + 1, a, Kind::Counterexample { goal: Some(AgentProcess { search: index, index: i }) },
-                                head.clone(), &checks, &tests, l, limit, &mut spent, Some(&s0),
+                                head.clone(), &checks, &tests, &trusted, l, limit, &mut spent, Some(&s0),
                                 Ghost(observed), Tracked(&mut t))?;
                 proof {
                     assert(t.searches.value()[index as int] == s0@);
@@ -337,6 +350,7 @@ pub fn counterexample(root: &str) -> (r: Result<bool, String>) {
     trusted::on_trunk(&m)?;
     let checks = trusted::checks(&m);
     let tests = trusted::tests(&m);
+    let trusted = trusted::trusted(&m);
     let limit = trusted::limit(&m);
     let l = trusted::agent_process_limit(&m);
     let (pc, pt, pw, pr, pd) = trusted::observe(&m, &head)?;
@@ -345,13 +359,13 @@ pub fn counterexample(root: &str) -> (r: Result<bool, String>) {
     }
     if !trusted::trunk_accepted(&m, &head) { return Err("trunk's checks reject it: run bon code first".into()); }
     let ghost observed = observed(pc, pt, pw, pr, pd);
-    let tracked (Tracked(instance), Tracked(checks_t), Tracked(tests_t), Tracked(trunk), Tracked(authors),
+    let tracked (Tracked(instance), Tracked(checks_t), Tracked(tests_t), Tracked(trusted_t), Tracked(trunk), Tracked(authors),
                  Tracked(searches), Tracked(limit_t), Tracked(spent_t), Tracked(reserved), Tracked(capability))
-        = spec::bon::Instance::initialize(head@, paths(checks@), paths(tests@), limit as nat);
-    let tracked mut t = Tokens { instance, checks: checks_t, tests: tests_t, trunk, authors, searches, limit: limit_t, spent: spent_t, reserved };
+        = spec::bon::Instance::initialize(head@, paths(checks@), paths(tests@), paths(trusted@), limit as nat);
+    let tracked mut t = Tokens { instance, checks: checks_t, tests: tests_t, trusted: trusted_t, trunk, authors, searches, limit: limit_t, spent: spent_t, reserved };
     let mut spent: u64 = 0;
     trusted::record(&m, "initialize");
-    let s = search(&m, 0, 0, Kind::Counterexample { goal: None }, head.clone(), &checks, &tests, l, limit, &mut spent,
+    let s = search(&m, 0, 0, Kind::Counterexample { goal: None }, head.clone(), &checks, &tests, &trusted, l, limit, &mut spent,
                    None, Ghost(observed), Tracked(&mut t))?;
     match found_on_trunk(&s) {
         Some(i) => {
@@ -380,6 +394,7 @@ pub fn queue(root: &str, transcripts: &Vec<Transcript>) -> (r: Result<Vec<(Vec<(
     trusted::on_trunk(&m)?;
     let checks = trusted::checks(&m);
     let tests = trusted::tests(&m);
+    let trusted = trusted::trusted(&m);
     let limit = trusted::limit(&m);
     let l = trusted::agent_process_limit(&m);
     let (pc, pt, pw, pr, pd) = trusted::observe(&m, &head)?;
@@ -387,10 +402,10 @@ pub fn queue(root: &str, transcripts: &Vec<Transcript>) -> (r: Result<Vec<(Vec<(
         return Err("agent is not isolated: its permissions differ from the policy; run bon setup".into());
     }
     let ghost observed = observed(pc, pt, pw, pr, pd);
-    let tracked (Tracked(instance), Tracked(checks_t), Tracked(tests_t), Tracked(trunk), Tracked(authors),
+    let tracked (Tracked(instance), Tracked(checks_t), Tracked(tests_t), Tracked(trusted_t), Tracked(trunk), Tracked(authors),
                  Tracked(searches), Tracked(limit_t), Tracked(spent_t), Tracked(reserved), Tracked(capability))
-        = spec::bon::Instance::initialize(head@, paths(checks@), paths(tests@), limit as nat);
-    let tracked mut t = Tokens { instance, checks: checks_t, tests: tests_t, trunk, authors, searches, limit: limit_t, spent: spent_t, reserved };
+        = spec::bon::Instance::initialize(head@, paths(checks@), paths(tests@), paths(trusted@), limit as nat);
+    let tracked mut t = Tokens { instance, checks: checks_t, tests: tests_t, trusted: trusted_t, trunk, authors, searches, limit: limit_t, spent: spent_t, reserved };
     let mut spent: u64 = 0;
     trusted::record(&m, "initialize");
     let mut out: Vec<(Vec<(Cue, Intent)>, Vec<Cue>)> = Vec::new();
@@ -406,12 +421,13 @@ pub fn queue(root: &str, transcripts: &Vec<Transcript>) -> (r: Result<Vec<(Vec<(
             t.trunk.value() == Seq::<spec::Commit>::empty().push(head@),
             t.checks.value() == paths(checks@),
             t.tests.value() == paths(tests@),
+            t.trusted.value() == paths(trusted@),
             t.limit.value() == limit as nat,
             k <= transcripts.len(),
         decreases transcripts.len() - k,
     {
         let ghost before = t.searches.value();
-        let s = search(&m, k, 0, Kind::Queue { goal: transcripts[k].clone() }, head.clone(), &checks, &tests, l, limit, &mut spent,
+        let s = search(&m, k, 0, Kind::Queue { goal: transcripts[k].clone() }, head.clone(), &checks, &tests, &trusted, l, limit, &mut spent,
                        None, Ghost(observed), Tracked(&mut t))?;
         proof {
             assert forall|j: int| 0 <= j < t.searches.value().len() implies spec::complete(#[trigger] t.searches.value()[j]) by {

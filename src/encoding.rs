@@ -352,17 +352,17 @@ impl Wire for Candidate {
     fn read(w: &Vec<u64>) -> (r: Option<(Self, Vec<u64>)>) { match CandidateWire::read(w) { Some(((commit, (base, (accepted, (proved, (changed, (out, (intents, (accepts, (rejects_counterexamples, (rank, diff)))))))))), tail)) => Some((Self { commit, base, accepted, proved, changed, out, intents, accepts, rejects_counterexamples, rank, diff }, tail)), None => None } }
 }
 
-type SearchWire = (Kind, (Vec<char>, (usize, (Vec<Vec<char>>, (Vec<Vec<char>>, (u64, Vec<Option<Candidate>>))))));
+type SearchWire = (Kind, (Vec<char>, (usize, (Vec<Vec<char>>, (Vec<Vec<char>>, (Vec<Vec<char>>, (u64, Vec<Option<Candidate>>)))))));
 impl Wire for Search {
     type Model = <SearchWire as Wire>::Model;
-    spec fn model(&self) -> Self::Model { (self.kind.model(), (self.base.model(), (self.n.model(), (self.checks.model(), (self.tests.model(), (self.limit.model(), self.results.model())))))) }
+    spec fn model(&self) -> Self::Model { (self.kind.model(), (self.base.model(), (self.n.model(), (self.checks.model(), (self.tests.model(), (self.trusted.model(), (self.limit.model(), self.results.model()))))))) }
     spec fn valid_model(m: Self::Model) -> bool { SearchWire::valid_model(m) }
-    proof fn valid(&self) { self.kind.valid(); self.base.valid(); self.n.valid(); self.checks.valid(); self.tests.valid(); self.limit.valid(); self.results.valid(); }
+    proof fn valid(&self) { self.kind.valid(); self.base.valid(); self.n.valid(); self.checks.valid(); self.tests.valid(); self.trusted.valid(); self.limit.valid(); self.results.valid(); }
     spec fn words(m: Self::Model) -> Seq<u64> { SearchWire::words(m) }
     spec fn parse(w: Seq<u64>) -> Option<(Self::Model, Seq<u64>)> { SearchWire::parse(w) }
     proof fn roundtrip(m: Self::Model, tail: Seq<u64>) { SearchWire::roundtrip(m, tail); }
-    fn write(&self) -> (r: Vec<u64>) { let mut r = self.kind.write(); append(&mut r, &self.base.write()); append(&mut r, &self.n.write()); append(&mut r, &self.checks.write()); append(&mut r, &self.tests.write()); append(&mut r, &self.limit.write()); append(&mut r, &self.results.write()); r }
-    fn read(w: &Vec<u64>) -> (r: Option<(Self, Vec<u64>)>) { match SearchWire::read(w) { Some(((kind, (base, (n, (checks, (tests, (limit, results)))))), tail)) => Some((Self { kind, base, n, checks, tests, limit, results }, tail)), None => None } }
+    fn write(&self) -> (r: Vec<u64>) { let mut r = self.kind.write(); append(&mut r, &self.base.write()); append(&mut r, &self.n.write()); append(&mut r, &self.checks.write()); append(&mut r, &self.tests.write()); append(&mut r, &self.trusted.write()); append(&mut r, &self.limit.write()); append(&mut r, &self.results.write()); r }
+    fn read(w: &Vec<u64>) -> (r: Option<(Self, Vec<u64>)>) { match SearchWire::read(w) { Some(((kind, (base, (n, (checks, (tests, (trusted, (limit, results))))))), tail)) => Some((Self { kind, base, n, checks, tests, trusted, limit, results }, tail)), None => None } }
 }
 
 proof fn many_matches<T: Wire>(xs: Seq<T>, f: spec_fn(T) -> Seq<u64>)
@@ -436,7 +436,7 @@ proof fn result_correct(r: Option<Candidate>)
 proof fn search_correct(s: Search)
     ensures Search::words(s.model()) == encoded(s),
 {
-    kind_correct(s.kind); text_words(s.base); texts_words(s.checks); texts_words(s.tests);
+    kind_correct(s.kind); text_words(s.base); texts_words(s.checks); texts_words(s.tests); texts_words(s.trusted);
     assert forall|i: int| 0 <= i < s.results.len() implies <Option<Candidate> as Wire>::words(s.results@[i].model()) == result_words(s.results@[i]) by { result_correct(s.results@[i]); }
     many_matches::<Option<Candidate>>(s.results@, |r: Option<Candidate>| result_words(r));
 }
@@ -505,9 +505,9 @@ proof fn search_model(a: Search, b: Search)
     requires a.model() == b.model(), ensures a@ == b@,
 {
     assert(a.kind.model() == b.kind.model()); assert(a.base.model() == b.base.model());
-    assert(a.checks.model() == b.checks.model()); assert(a.tests.model() == b.tests.model()); assert(a.results.model() == b.results.model());
+    assert(a.checks.model() == b.checks.model()); assert(a.tests.model() == b.tests.model()); assert(a.trusted.model() == b.trusted.model()); assert(a.results.model() == b.results.model());
     assert(a.results.model().len() == a.results.len()); assert(b.results.model().len() == b.results.len());
-    kind_model(a.kind, b.kind); text_model(a.base); text_model(b.base); text_list_model(a.checks, b.checks); text_list_model(a.tests, b.tests);
+    kind_model(a.kind, b.kind); text_model(a.base); text_model(b.base); text_list_model(a.checks, b.checks); text_list_model(a.tests, b.tests); text_list_model(a.trusted, b.trusted);
     assert forall|i: int| 0 <= i < a.results.len() implies a@.results[i] == b@.results[i] by {
         assert(a.results.model()[i] == a.results@[i].model()); assert(b.results.model()[i] == b.results@[i].model());
         match (a.results@[i], b.results@[i]) {
@@ -759,12 +759,14 @@ let value3 = emit_array(&s.checks);
 proof { assert(s.checks@.map_values(|x: Vec<char>| x.json()) =~= s.checks@.map_values(|x: Vec<char>| string(x@))); }
 let value3b = emit_array(&s.tests);
 proof { assert(s.tests@.map_values(|x: Vec<char>| x.json()) =~= s.tests@.map_values(|x: Vec<char>| string(x@))); }
+let value3c = emit_array(&s.trusted);
+proof { assert(s.trusted@.map_values(|x: Vec<char>| x.json()) =~= s.trusted@.map_values(|x: Vec<char>| string(x@))); }
 let value4 = decimal(s.limit);
 let value5 = emit_array(&s.results);
 proof { assert(s.results@.map_values(|x: Option<Candidate>| x.json()) =~= s.results@.map_values(|r: Option<Candidate>| match r { Some(c) => candidate_json(c), None => seq!['n','u','l','l'] })); }
-let fields = vec![field("kind", &value0), field("base", &value1), field("n", &value2), field("checks", &value3), field("tests", &value3b), field("limit", &value4), field("results", &value5)];
+let fields = vec![field("kind", &value0), field("base", &value1), field("n", &value2), field("checks", &value3), field("tests", &value3b), field("trusted", &value3c), field("limit", &value4), field("results", &value5)];
 proof {
-assert(fields@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::field("kind"@, kind_json(s.kind)), crate::gates::field("base"@, string(s.base@)), crate::gates::field("n"@, crate::gates::decimal(s.n as nat)), crate::gates::field("checks"@, strings(s.checks@)), crate::gates::field("tests"@, strings(s.tests@)), crate::gates::field("limit"@, crate::gates::decimal(s.limit as nat)), crate::gates::field("results"@, crate::gates::array(s.results@.map_values(|r: Option<Candidate>| match r { Some(c) => candidate_json(c), None => seq!['n','u','l','l'] })))]); }
+assert(fields@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::field("kind"@, kind_json(s.kind)), crate::gates::field("base"@, string(s.base@)), crate::gates::field("n"@, crate::gates::decimal(s.n as nat)), crate::gates::field("checks"@, strings(s.checks@)), crate::gates::field("tests"@, strings(s.tests@)), crate::gates::field("trusted"@, strings(s.trusted@)), crate::gates::field("limit"@, crate::gates::decimal(s.limit as nat)), crate::gates::field("results"@, crate::gates::array(s.results@.map_values(|r: Option<Candidate>| match r { Some(c) => candidate_json(c), None => seq!['n','u','l','l'] })))]); }
 object(&fields) }
     proof fn injective(a: Search, b: Search) {
         search_correct(a); search_correct(b); a.valid(); b.valid();
@@ -783,7 +785,7 @@ mod tests {
     fn wire_rejects_damage_and_preserves_json_boundaries() {
         let s = Search {
             kind: Kind::Code { goal: "\0\"\\😀".chars().collect() },
-            base: vec![], n: 1, checks: vec![], tests: vec![], limit: u64::MAX,
+            base: vec![], n: 1, checks: vec![], tests: vec![], trusted: vec![], limit: u64::MAX,
             results: vec![Some(Candidate {
                 commit: vec![], base: vec![], accepted: true, proved: true, changed: vec![],
                 out: vec![u64::MAX], intents: vec![], accepts: vec![(i64::MIN, false)],

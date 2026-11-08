@@ -102,15 +102,15 @@ fn bon_path() -> (r: Vec<char>)
 }
 
 /// No search may change p, except a queue search the queue. (spec::protected)
-fn protected(checks: &Vec<Path>, p: &Path) -> (r: bool)
-    ensures r == spec::protected(paths(checks@), p@),
+fn protected(checks: &Vec<Path>, trusted: &Vec<Path>, p: &Path) -> (r: bool)
+    ensures r == spec::protected(paths(checks@), paths(trusted@), p@),
 {
-    is_prefix_of(&bon_path(), p) || under(checks, p)
+    is_prefix_of(&bon_path(), p) || under(checks, p) || under(trusted, p)
 }
 
 /// p is within the authority of a search of this kind.
-fn authority_contains(kind: &Kind, checks: &Vec<Path>, tests: &Vec<Path>, p: &Path) -> (r: bool)
-    ensures r == spec::authority(kind@, paths(checks@), paths(tests@)).contains(p@),
+fn authority_contains(kind: &Kind, checks: &Vec<Path>, tests: &Vec<Path>, trusted: &Vec<Path>, p: &Path) -> (r: bool)
+    ensures r == spec::authority(kind@, paths(checks@), paths(tests@), paths(trusted@)).contains(p@),
 {
     match kind {
         Kind::Queue { .. } => {
@@ -120,9 +120,9 @@ fn authority_contains(kind: &Kind, checks: &Vec<Path>, tests: &Vec<Path>, p: &Pa
             assert(q@ =~= spec::queue_path());
             eq(p, &q)
         }
-        Kind::Code { .. } => !protected(checks, p) && !under(tests, p),
-        Kind::Compaction { .. } => !protected(checks, p),
-        Kind::Counterexample { .. } => !protected(checks, p) && under(tests, p),
+        Kind::Code { .. } => !protected(checks, trusted, p) && !under(tests, p),
+        Kind::Compaction { .. } => !protected(checks, trusted, p),
+        Kind::Counterexample { .. } => !protected(checks, trusted, p) && under(tests, p),
     }
 }
 
@@ -141,13 +141,13 @@ pub fn verified(s: &Search, c: &Candidate) -> (r: bool)
             forall|j: int| 0 <= j < i ==> s@.authority.contains(#[trigger] c.changed@[j]@),
         decreases c.changed.len() - i,
     {
-        proof { assert(s@.authority == spec::authority(s.kind@, paths(s.checks@), paths(s.tests@))); }
-        if !authority_contains(&s.kind, &s.checks, &s.tests, &c.changed[i]) {
+        proof { assert(s@.authority == spec::authority(s.kind@, paths(s.checks@), paths(s.tests@), paths(s.trusted@))); }
+        if !authority_contains(&s.kind, &s.checks, &s.tests, &s.trusted, &c.changed[i]) {
             proof {
                 let p = c.changed@[i as int]@;
                 assert(c.changed@.map_values(|q: Path| q@)[i as int] == p);
                 assert(c@.changed.contains(p));
-                assert(s@.authority == spec::authority(s.kind@, paths(s.checks@), paths(s.tests@)));
+                assert(s@.authority == spec::authority(s.kind@, paths(s.checks@), paths(s.tests@), paths(s.trusted@)));
                 assert(!s@.authority.contains(p));
             }
             return false;
