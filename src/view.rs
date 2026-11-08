@@ -264,7 +264,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
             // A search that has not reported yet is running while its bon process is.
             let live = running && summary.is_null();
             // Its time: to its report, else to its last returned agent process, else (running) to now.
-            let last_wait = segment.iter().rev().find_map(|t| t.strip_prefix("wait ")?.parse::<u64>().ok());
+            let last_wait = segment.iter().rev().find_map(|t| t.strip_prefix("wait ")?.split_whitespace().next()?.parse::<u64>().ok());
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
             let seconds = summary["seconds"].as_f64()
                 .or_else(|| started.map(|s| (if live { now } else { last_wait.unwrap_or(s) }).saturating_sub(s) as f64));
@@ -314,9 +314,11 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
             // Kind is shown separately; goal is the kind's goal.
             let base_of = candidates.iter().find_map(|(_, c)| c["commit"].as_str().map(|x| git(root, &["rev-parse", &format!("{x}^")])))
                 .filter(|b| !b.is_empty()).unwrap_or_default();
-            let kind = summary["kind"].as_str().or_else(|| grant.get(3).copied()).unwrap_or("").to_string();
+            // A grant line: grant n time [agent_process_limit] kind goal…; traces before queue 12 lack the limit.
+            let at = if grant.get(3).is_some_and(|w| w.parse::<u64>().is_ok()) { 4 } else { 3 };
+            let kind = summary["kind"].as_str().or_else(|| grant.get(at).copied()).unwrap_or("").to_string();
             let blocked = segment.iter().find(|t| t.starts_with("blocked")).cloned();
-            let granted_goal = grant.get(4..).map(|g| g.join(" ")).unwrap_or_default();
+            let granted_goal = grant.get(at + 1..).map(|g| g.join(" ")).unwrap_or_default();
             let goal_text = summary["goal"].as_str().unwrap_or(&granted_goal);
             let goal = match kind.as_str() {
                 "queue" => json!({ "transcript": goal_text }),

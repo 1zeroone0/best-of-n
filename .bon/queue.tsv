@@ -1,5 +1,4 @@
 id	intent
-12	Each trace records every transition under its spec name.
 14	Each trace records, for every agent process, its harness, model, tokens, cost and time, and for every check its time and exit status, so that cost per verified candidate = (Σ_c (g(c) + k(c)) + r·t) / v, with r the rate in bon.toml and t the search's wall time.
 15	A push's cost is everything run to reach it: the generation and time cost of every search of every bon process of its kind since the last push of that kind.
 16	A blocked search reruns, as wide as bon.toml's width list says for that attempt, until the attempts or a limit run out; only that goes to engineer.

@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use vstd::prelude::*;
 
 use crate::gates::{Candidate, Commit, Cue, Intent, Kind, Path, Permission, Search};
+use crate::spec;
 
 // ── bon.toml ────────────────────────────────────────────
 
@@ -741,7 +742,7 @@ pub fn push(m: &Manifest, commit: &Commit) -> (r: Result<(), String>) {
     git(&m.root, &["push", "--quiet", r, &format!("{c}:refs/heads/{t}")])
         .map_err(|e| format!("blocked: {r}/{t} moved during the search, so the push was refused; run it again ({e})"))?;
     git(&m.root, &["merge", "--ff-only", "--quiet", &c])?;
-    record_push(m, &c);
+    record_cost(m, &c);
     Ok(())
 }
 
@@ -757,7 +758,7 @@ fn append(file: &std::path::Path, line: &serde_json::Value) {
 /// process ran to reach it (blocked attempts, reruns and counterexample
 /// searches included), from its searches.jsonl, appended to pushes.jsonl.
 #[verifier::external_body]
-pub fn record_push(m: &Manifest, commit: &str) {
+pub fn record_cost(m: &Manifest, commit: &str) {
     let d = trace_dir(&m.root);
     let searches: Vec<serde_json::Value> = std::fs::read_to_string(d.join("searches.jsonl")).unwrap_or_default()
         .lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
@@ -827,24 +828,89 @@ pub fn record_selected(m: &Manifest, i: usize) {
     record(m, &format!("selected {search} {i}"));
 }
 
-/// Record a wait: an agent process returned, and when, so a search's time shows as it runs.
+// ── the trace: each transition under its spec name, with its arguments ──
+//
+// A transition's recorder requires what the transition required, so Verus
+// checks that each caller records the arguments it fired. The other lines
+// (selected, blocked, not found, proposal, over limit) say what the bon
+// process concluded; a replay skips them.
+
+/// initialize: trunk's head as root, and the bon process's limit.
 #[verifier::external_body]
-pub fn record_wait(m: &Manifest) {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    record(m, &format!("wait {now}"));
+pub fn record_initialize(m: &Manifest, root: &Commit, limit: u64) {
+    let root: String = root.iter().collect();
+    record(m, &format!("initialize {root} {limit}"));
 }
 
-/// Record a grant: its width, when, its kind and goal, so a running search shows before it reports.
+/// grant: its width, when, each agent process's limit, its kind and goal. The
+/// last search is the one granted.
 #[verifier::external_body]
-pub fn record_grant(m: &Manifest, n: usize, kind: &Kind) {
+pub fn record_grant(m: &Manifest, kind: &Kind, n: usize, agent_process_limit: u64, Ghost(searches): Ghost<Seq<spec::Search>>)
+    requires
+        searches.len() > 0,
+        searches.last().kind == kind@,
+        searches.last().n == n as nat,
+        searches.last().limit == agent_process_limit as nat,
+{
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let (k, goal) = label(kind);
-    record(m, &format!("grant {n} {now} {k} {goal}"));
+    record(m, &format!("grant {n} {now} {agent_process_limit} {k} {goal}"));
 }
 
-/// Append one line to this command's trace.
+/// wait: when, the agent process, the commit it returned (or none), and its
+/// generation in microdollars. Its result is the one the search now holds.
 #[verifier::external_body]
-pub fn record(m: &Manifest, line: &str) {
+pub fn record_wait(m: &Manifest, search: usize, index: usize, result: &Option<Candidate>, generation: u64, Ghost(searches): Ghost<Seq<spec::Search>>)
+    requires
+        search < searches.len(),
+        searches[search as int].results.contains_key(index as int),
+        searches[search as int].results[index as int] == (match result { Some(c) => Some(c@), None => None }),
+{
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let commit = result.as_ref().map_or("none".to_string(), |c| c.commit.iter().collect());
+    record(m, &format!("wait {now} {search} {index} {commit} {generation}"));
+}
+
+/// push: the tested search's selected candidate i, cleared by the counterexample search.
+#[verifier::external_body]
+pub fn record_push(m: &Manifest, tested_index: usize, i: usize, counterexample_index: usize, Ghost(searches): Ghost<Seq<spec::Search>>)
+    requires
+        tested_index < searches.len(),
+        counterexample_index < searches.len(),
+        spec::selected(searches[tested_index as int], i as int),
+        searches[counterexample_index as int].kind == (spec::Kind::Counterexample { goal: Some(spec::AgentProcess { search: tested_index as int, index: i as int }) }),
+        spec::not_found(searches[counterexample_index as int], searches[tested_index as int]),
+{
+    record(m, &format!("push {tested_index} {i} {counterexample_index}"));
+}
+
+/// land: the counterexample search's test i.
+#[verifier::external_body]
+pub fn record_land(m: &Manifest, counterexample_index: usize, i: usize, Ghost(searches): Ghost<Seq<spec::Search>>)
+    requires spec::lands(searches, counterexample_index as int, i as int),
+{
+    record(m, &format!("land {counterexample_index} {i}"));
+}
+
+/// A search blocked, and why.
+#[verifier::external_body]
+pub fn record_blocked(m: &Manifest, reason: &str) { record(m, &format!("blocked: {reason}")); }
+
+/// A counterexample search on trunk found none, and why.
+#[verifier::external_body]
+pub fn record_not_found(m: &Manifest, reason: &str) { record(m, &format!("not found: {reason}")); }
+
+/// A queue search ended in a proposal.
+#[verifier::external_body]
+pub fn record_proposal(m: &Manifest) { record(m, "proposal"); }
+
+/// An agent process passed its limit and is charged at its limit.
+#[verifier::external_body]
+pub fn record_over_limit(m: &Manifest) { record(m, "over limit: an agent process passed its limit and is charged at it"); }
+
+/// Append one line to this command's trace.
+#[verifier::external]
+fn record(m: &Manifest, line: &str) {
     let d = trace_dir(&m.root);
     let _ = std::fs::create_dir_all(&d);
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(d.join("transitions")) {
