@@ -310,19 +310,21 @@ fn queue(root: &str) -> Result<(), String> {
         let mut text = git(r, &["show", "HEAD:.bon/queue.tsv"]).unwrap_or_else(|_| "id\tintent\n".into());
         if !text.ends_with('\n') { text.push('\n'); }
         let mut id = next_id(r);
-        for (_, intent) in &agreed {
+        let mut cues = Vec::new();
+        for (cue, intent) in &agreed {
             text.push_str(&format!("{id}\t{}\n", intent.iter().collect::<String>()));
+            cues.push((id, *cue));
             id += 1;
         }
-        let commit = proposal(r, &head, &text, &rel)?;
+        let commit = proposal(r, &head, &text, &rel, &cues)?;
         let name = p.file_stem().unwrap().to_string_lossy().to_string();
         let file = r.join(".bon/traces/proposals").join(format!("{name}.patch"));
         std::fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
-        std::fs::write(&file, git(r, &["diff", &head, &commit, "--", ".bon/queue.tsv"])? + "\n").map_err(|e| e.to_string())?;
+        std::fs::write(&file, git(r, &["format-patch", "--stdout", "-1", &commit])? + "\n").map_err(|e| e.to_string())?;
         println!("{} agreed, {} contested", agreed.len(), contested.len());
         for c in &contested { println!("  contested cue {}", timestamp(*c)); }
         println!("  review: cat .bon/traces/proposals/{name}.patch");
-        println!("  accept: git apply .bon/traces/proposals/{name}.patch && git commit -m 'queue: {rel}' -m 'Source: {rel}' -- .bon/queue.tsv");
+        println!("  accept: git am .bon/traces/proposals/{name}.patch");
     }
     Ok(())
 }
@@ -334,9 +336,10 @@ fn next_id(root: &Path) -> u64 {
         .max().map_or(1, |m| m + 1)
 }
 
-/// A commit on `head` whose queue is `text`, citing the transcript. No ref
-/// keeps it: its patch is the proposal.
-fn proposal(root: &Path, head: &str, text: &str, source: &str) -> Result<String, String> {
+/// A commit on `head` whose queue is `text`, citing the transcript and, for
+/// each new intent, the cue it came from. No ref keeps it: its patch is the
+/// proposal, and `git am` keeps its trailers.
+fn proposal(root: &Path, head: &str, text: &str, source: &str, cues: &[(u64, u64)]) -> Result<String, String> {
     let blob = {
         let mut c = Command::new("git").args(["hash-object", "-w", "--stdin"]).current_dir(root)
             .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().map_err(|e| e.to_string())?;
@@ -354,7 +357,8 @@ fn proposal(root: &Path, head: &str, text: &str, source: &str) -> Result<String,
     with(&["update-index", "--add", "--cacheinfo", &format!("100644,{blob},.bon/queue.tsv")])?;
     let tree = with(&["write-tree"])?;
     let _ = std::fs::remove_file(&index);
-    git(root, &["commit-tree", &tree, "-p", head, "-m", &format!("queue: {source}\n\nSource: {source}\n")])
+    let cited: String = cues.iter().map(|(id, cue)| format!("Cue: {id} {source}#{cue}\n")).collect();
+    git(root, &["commit-tree", &tree, "-p", head, "-m", &format!("queue: {source}\n\nSource: {source}\n{cited}")])
 }
 
 /// Milliseconds to a WebVTT timestamp.
@@ -612,6 +616,23 @@ fn sbom(root: &str, check: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_proposal_cites_each_intent_s_cue() {
+        let d = std::env::temp_dir().join(format!("bon-proposal-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(".bon")).unwrap();
+        let sh = |args: &[&str]| { let o = Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).current_dir(&d).output().unwrap(); assert!(o.status.success()); String::from_utf8_lossy(&o.stdout).trim().to_string() };
+        sh(&["init", "-q", "-b", "main"]);
+        std::fs::write(d.join(".bon/queue.tsv"), "id\tintent\n").unwrap();
+        sh(&["add", "."]);
+        sh(&["commit", "-q", "-m", "base"]);
+        let head = sh(&["rev-parse", "HEAD"]);
+        let c = proposal(&d, &head, "id\tintent\n7\tone\n8\ttwo\n", "transcripts/a.vtt", &[(7, 1200), (8, 64500)]).unwrap();
+        let trailers = git(&d, &["log", "-1", "--format=%(trailers)", &c]).unwrap();
+        assert_eq!(trailers.trim(), "Source: transcripts/a.vtt\nCue: 7 transcripts/a.vtt#1200\nCue: 8 transcripts/a.vtt#64500");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn a_skipped_proof_outside_trusted_code_is_found() {
