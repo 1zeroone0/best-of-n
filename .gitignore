@@ -3,3 +3,4 @@
 /.bon/traces/
 .DS_Store
 /examples/python/.venv/
+__pycache__/
