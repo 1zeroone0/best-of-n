@@ -130,9 +130,10 @@ pub struct Search {
 //
 // Names: a parameter is the word for what it is (`search`, `candidate`,
 // `path`), or for its role when two of one type meet (`tested`,
-// `counterexample`). Only a candidate's index is a letter: `i` (and `j`, a
-// second one), into `search.results`; see `at`. An index into `searches` is
-// named for its search: `search_index`, `tested_index`, `counterexample_index`.
+// `counterexample`, always in that order). Two letters remain: a candidate's
+// index, `i` (and `j`, a second one), into `search.results`, see `at`; and a
+// gate's return value, `r`. An index into `searches` is named for its search:
+// `search_index`, `tested_index`, `counterexample_index`.
 
 /// bon's directory in the repository: the manifest, the queue, the SBOM and
 /// the traces.
@@ -255,7 +256,7 @@ pub open spec fn member(tested: Search, j: int) -> bool {
 /// Counterexample: candidate, a test, splits the members of tested: it accepts
 /// one and rejects another, so one shows a behavior the spec forbids. A test
 /// with no result on a member counts as splitting.
-pub open spec fn splits(tested: Search, candidate: Candidate) -> bool {
+pub open spec fn splits(candidate: Candidate, tested: Search) -> bool {
     exists|j1: int, j2: int| member(tested, j1) && member(tested, j2)
         && !(candidate.accepts.contains_key(j1) && candidate.accepts.contains_key(j2)
              && candidate.accepts[j1] == candidate.accepts[j2])
@@ -263,7 +264,7 @@ pub open spec fn splits(tested: Search, candidate: Candidate) -> bool {
 
 /// Counterexample: some verified test of counterexample splits tested.
 pub open spec fn found(counterexample: Search, tested: Search) -> bool {
-    complete(counterexample) && exists|i: int| verified_at(counterexample, i) && splits(tested, at(counterexample, i))
+    complete(counterexample) && exists|i: int| verified_at(counterexample, i) && splits(at(counterexample, i), tested)
 }
 
 /// Counterexample: every agent process of counterexample returned, at least two
@@ -273,7 +274,7 @@ pub open spec fn found(counterexample: Search, tested: Search) -> bool {
 pub open spec fn not_found(counterexample: Search, tested: Search) -> bool {
     complete(counterexample)
     && (exists|i: int, j: int| i != j && verified_at(counterexample, i) && verified_at(counterexample, j))
-    && forall|i: int| verified_at(counterexample, i) ==> !splits(tested, at(counterexample, i))
+    && forall|i: int| verified_at(counterexample, i) ==> !splits(at(counterexample, i), tested)
 }
 
 /// Counterexample on trunk: counterexample's verified test i rejects trunk's head.
@@ -291,16 +292,16 @@ pub open spec fn found_on_trunk(counterexample: Search, i: int) -> bool {
 }
 
 /// Counterexample: counterexample's verified test i splits tested.
-pub open spec fn splits_at(tested: Search, counterexample: Search, i: int) -> bool {
-    verified_at(counterexample, i) && splits(tested, at(counterexample, i))
+pub open spec fn splits_at(counterexample: Search, tested: Search, i: int) -> bool {
+    verified_at(counterexample, i) && splits(at(counterexample, i), tested)
 }
 
 /// Counterexample on a selected candidate: counterexample's verified test i
 /// splits tested, the search it tested, and of the tests that do, it is the
 /// highest rank.
-pub open spec fn lands_on(tested: Search, counterexample: Search, i: int) -> bool {
-    complete(counterexample) && complete(tested) && splits_at(tested, counterexample, i)
-    && forall|j: int| j != i && splits_at(tested, counterexample, j) ==> beats(at(counterexample, i), i, at(counterexample, j), j)
+pub open spec fn lands_on(counterexample: Search, tested: Search, i: int) -> bool {
+    complete(counterexample) && complete(tested) && splits_at(counterexample, tested, i)
+    && forall|j: int| j != i && splits_at(counterexample, tested, j) ==> beats(at(counterexample, i), i, at(counterexample, j), j)
 }
 
 /// Counterexample: test i of the counterexample search lands on trunk. On
@@ -312,7 +313,7 @@ pub open spec fn lands(searches: Seq<Search>, counterexample_index: int, i: int)
         Kind::Counterexample { goal: None } => found_on_trunk(searches[counterexample_index], i),
         Kind::Counterexample { goal: Some(agent_process) } =>
             0 <= agent_process.search < searches.len()
-            && lands_on(searches[agent_process.search], searches[counterexample_index], i),
+            && lands_on(searches[counterexample_index], searches[agent_process.search], i),
         _ => false,
     }
 }
@@ -357,12 +358,6 @@ pub open spec fn proposed(search: Search, cue: Cue, intent: Intent) -> bool {
     && exists|i: int| cites(search, i, cue) && at(search, i).intents[cue] == intent
         && forall|j: int| cites(search, j, cue) ==>
             intent.len() < at(search, j).intents[cue].len() || (intent.len() == at(search, j).intents[cue].len() && i <= j)
-}
-
-/// Where a search's candidates start: always trunk's head. A counterexample's
-/// test is written from the spec, never from candidate code.
-pub open spec fn start(kind: Kind, searches: Seq<Search>, head: Commit) -> Commit {
-    head
 }
 
 /// The agent processes of the search at search_index: one per index.
@@ -429,6 +424,8 @@ tokenized_state_machine!{ bon {
 
     /// Open a search and grant one capability per agent process, reserving each
     /// one's limit. One search runs at a time; its agent processes run in parallel.
+    /// Every search starts from trunk's head: a counterexample's test is written
+    /// from the spec, never from candidate code.
     transition!{ grant(kind: Kind, n: nat, agent_process_limit: nat, observed: Map<Object, Permission>) {
         require isolated(observed);
         require forall|search_index: int| 0 <= search_index < pre.searches.len() ==> complete(#[trigger] pre.searches[search_index]);
@@ -440,7 +437,7 @@ tokenized_state_machine!{ bon {
             && selected(pre.searches[agent_process.search], agent_process.index)
             && pre.searches[agent_process.search].base == pre.trunk.last();
         let search_index = pre.searches.len() as int;
-        let base = start(kind, pre.searches, pre.trunk.last());
+        let base = pre.trunk.last();
         let attenuated = authority(kind, pre.checks, pre.tests);
         update searches = pre.searches.push(Search { kind, base, n, authority: attenuated, limit: agent_process_limit, results: Map::empty() });
         update reserved = pre.reserved + agent_process_limit * n;

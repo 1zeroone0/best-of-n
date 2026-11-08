@@ -56,7 +56,7 @@ impl View for Kind {
             Kind::Code { goal } => spec::Kind::Code { goal: goal@ },
             Kind::Compaction { goal, out } => spec::Kind::Compaction { goal: goal@, out: hashes(out@) },
             Kind::Counterexample { goal } => spec::Kind::Counterexample {
-                goal: match goal { Some(p) => Some(p@), None => None } },
+                goal: match goal { Some(agent_process) => Some(agent_process@), None => None } },
         }
     }
 }
@@ -90,8 +90,8 @@ impl View for Candidate {
             proved: self.proved,
             changed: paths(self.changed@),
             out: hashes(self.out@),
-            intents: first_by_key(self.intents@.map_values(|e: (Cue, Intent)| (e.0 as nat, e.1@))),
-            accepts: first_by_key(self.accepts@.map_values(|e: (i64, bool)| (e.0 as int, e.1))),
+            intents: first_by_key(self.intents@.map_values(|pair: (Cue, Intent)| (pair.0 as nat, pair.1@))),
+            accepts: first_by_key(self.accepts@.map_values(|pair: (i64, bool)| (pair.0 as int, pair.1))),
             rejects_counterexamples: self.rejects_counterexamples,
             rank: self.rank as int,
             diff: self.diff as nat,
@@ -124,7 +124,7 @@ impl View for Search {
             limit: self.limit as nat,
             results: Map::new(
                 Set::range(0int, self.results.len() as int),
-                |i: int| match self.results@[i] { Some(c) => Some(c@), None => None },
+                |i: int| match self.results@[i] { Some(candidate) => Some(candidate@), None => None },
             ),
         }
     }
@@ -133,23 +133,24 @@ impl View for Search {
 // ── conversions ─────────────────────────────────────────
 
 /// Exec paths as the spec's set of paths.
-pub open spec fn paths(s: Seq<Path>) -> Set<spec::Path> {
-    s.map_values(|p: Path| p@).to_set()
+pub open spec fn paths(exec: Seq<Path>) -> Set<spec::Path> {
+    exec.map_values(|path: Path| path@).to_set()
 }
 
 /// Exec hashes as the spec's naturals, in order.
-pub open spec fn hashes(s: Seq<u64>) -> Seq<nat> {
-    s.map_values(|h: u64| h as nat)
+pub open spec fn hashes(exec: Seq<u64>) -> Seq<nat> {
+    exec.map_values(|hash: u64| hash as nat)
 }
 
-/// The index of the first pair in s with key k.
-pub open spec fn first<K, V>(s: Seq<(K, V)>, k: K) -> int {
-    choose|i: int| 0 <= i < s.len() && s[i].0 == k && forall|j: int| 0 <= j < i ==> s[j].0 != k
+/// The index of the first pair in pairs with key.
+pub open spec fn first<K, V>(pairs: Seq<(K, V)>, key: K) -> int {
+    choose|index: int| 0 <= index < pairs.len() && pairs[index].0 == key
+        && forall|earlier: int| 0 <= earlier < index ==> pairs[earlier].0 != key
 }
 
-/// The map from each key in s to the value of its first pair.
-pub open spec fn first_by_key<K, V>(s: Seq<(K, V)>) -> Map<K, V> {
-    Map::new(s.map_values(|e: (K, V)| e.0).to_set(), |k: K| s[first(s, k)].1)
+/// The map from each key in pairs to the value of its first pair.
+pub open spec fn first_by_key<K, V>(pairs: Seq<(K, V)>) -> Map<K, V> {
+    Map::new(pairs.map_values(|pair: (K, V)| pair.0).to_set(), |key: K| pairs[first(pairs, key)].1)
 }
 
 /// agent's permissions on each file, as trusted code observed them.
@@ -176,52 +177,52 @@ pub assume_specification[ core::char::from_u32 ](i: u32) -> (r: Option<char>)
         i < 0xD800 || (0xE000 <= i && i <= 0x10FFFF) ==> r is Some;
 
 /// Text: its length, then each char.
-pub open spec fn text(t: Seq<char>) -> Seq<u64> {
-    seq![t.len() as u64] + t.map_values(|c: char| c as u32 as u64)
+pub open spec fn text(chars: Seq<char>) -> Seq<u64> {
+    seq![chars.len() as u64] + chars.map_values(|character: char| character as u32 as u64)
 }
 
 /// A list of texts: its length, then each text.
-pub open spec fn texts(ts: Seq<Vec<char>>) -> Seq<u64> {
-    seq![ts.len() as u64] + ts.map_values(|t: Vec<char>| text(t@)).flatten()
+pub open spec fn texts(list: Seq<Vec<char>>) -> Seq<u64> {
+    seq![list.len() as u64] + list.map_values(|chars: Vec<char>| text(chars@)).flatten()
 }
 
 /// A kind: a tag (0 queue, 1 code, 2 compaction, 3 counterexample), then its
 /// fields; a counterexample's goal is 0 for trunk, or 1 and the agent process.
-pub open spec fn kind_words(k: Kind) -> Seq<u64> {
-    match k {
+pub open spec fn kind_words(kind: Kind) -> Seq<u64> {
+    match kind {
         Kind::Queue { goal } => seq![0u64] + text(goal@),
         Kind::Code { goal } => seq![1u64] + text(goal@),
         Kind::Compaction { goal, out } => seq![2u64] + text(goal@) + seq![out.len() as u64] + out@,
         Kind::Counterexample { goal } => match goal {
-            Some(p) => seq![3u64, 1u64, p.search as u64, p.index as u64],
+            Some(agent_process) => seq![3u64, 1u64, agent_process.search as u64, agent_process.index as u64],
             None => seq![3u64, 0u64],
         },
     }
 }
 
 /// A bool as a word: 1 for true, 0 for false.
-pub open spec fn bit(b: bool) -> u64 { if b { 1u64 } else { 0u64 } }
+pub open spec fn bit(value: bool) -> u64 { if value { 1u64 } else { 0u64 } }
 
 /// A candidate, field by field in declaration order; a bool is 0 or 1, and
 /// rank is its two's complement.
-pub open spec fn candidate_words(c: Candidate) -> Seq<u64> {
-    text(c.commit@) + text(c.base@) + seq![bit(c.accepted), bit(c.proved)] + texts(c.changed@)
-        + seq![c.out.len() as u64] + c.out@
-        + seq![c.intents.len() as u64] + c.intents@.map_values(|e: (Cue, Intent)| seq![e.0] + text(e.1@)).flatten()
-        + seq![c.accepts.len() as u64]
-        + c.accepts@.map_values(|e: (i64, bool)| seq![e.0 as u64, bit(e.1)]).flatten()
-        + seq![bit(c.rejects_counterexamples), c.rank as u64, c.diff]
+pub open spec fn candidate_words(candidate: Candidate) -> Seq<u64> {
+    text(candidate.commit@) + text(candidate.base@) + seq![bit(candidate.accepted), bit(candidate.proved)] + texts(candidate.changed@)
+        + seq![candidate.out.len() as u64] + candidate.out@
+        + seq![candidate.intents.len() as u64] + candidate.intents@.map_values(|pair: (Cue, Intent)| seq![pair.0] + text(pair.1@)).flatten()
+        + seq![candidate.accepts.len() as u64]
+        + candidate.accepts@.map_values(|pair: (i64, bool)| seq![pair.0 as u64, bit(pair.1)]).flatten()
+        + seq![bit(candidate.rejects_counterexamples), candidate.rank as u64, candidate.diff]
 }
 
 /// A result: 0 for none, or 1 and the candidate.
-pub open spec fn result_words(r: Option<Candidate>) -> Seq<u64> {
-    match r { Some(c) => seq![1u64] + candidate_words(c), None => seq![0u64] }
+pub open spec fn result_words(result: Option<Candidate>) -> Seq<u64> {
+    match result { Some(candidate) => seq![1u64] + candidate_words(candidate), None => seq![0u64] }
 }
 
 /// A search, field by field in declaration order.
-pub open spec fn encoded(s: Search) -> Seq<u64> {
-    kind_words(s.kind) + text(s.base@) + seq![s.n as u64] + texts(s.checks@) + texts(s.tests@) + seq![s.limit]
-        + seq![s.results.len() as u64] + s.results@.map_values(|r: Option<Candidate>| result_words(r)).flatten()
+pub open spec fn encoded(search: Search) -> Seq<u64> {
+    kind_words(search.kind) + text(search.base@) + seq![search.n as u64] + texts(search.checks@) + texts(search.tests@) + seq![search.limit]
+        + seq![search.results.len() as u64] + search.results@.map_values(|result: Option<Candidate>| result_words(result)).flatten()
 }
 
 // ── emission ────────────────────────────────────────────
@@ -229,34 +230,34 @@ pub open spec fn encoded(s: Search) -> Seq<u64> {
 // What programs read: a search as JSON text, in the spec's names. Hashes are
 // strings, since a JSON number loses u64 precision in a browser.
 
-/// n in decimal.
-pub open spec fn decimal(n: nat) -> Seq<char>
-    decreases n,
+/// number in decimal.
+pub open spec fn decimal(number: nat) -> Seq<char>
+    decreases number,
 {
-    let d = seq![(('0' as u32) + (n % 10) as u32) as char];
-    if n < 10 { d } else { decimal(n / 10) + d }
+    let last = seq![(('0' as u32) + (number % 10) as u32) as char];
+    if number < 10 { last } else { decimal(number / 10) + last }
 }
 
-/// i in decimal, with a leading - when negative.
-pub open spec fn signed(i: int) -> Seq<char> {
-    if i < 0 { seq!['-'] + decimal((-i) as nat) } else { decimal(i as nat) }
+/// number in decimal, with a leading - when negative.
+pub open spec fn signed(number: int) -> Seq<char> {
+    if number < 0 { seq!['-'] + decimal((-number) as nat) } else { decimal(number as nat) }
 }
 
 /// A hex digit.
-pub open spec fn hex(d: nat) -> char {
-    if d < 10 { (('0' as u32) + d as u32) as char } else { (('a' as u32) + (d - 10) as u32) as char }
+pub open spec fn hex(digit: nat) -> char {
+    if digit < 10 { (('0' as u32) + digit as u32) as char } else { (('a' as u32) + (digit - 10) as u32) as char }
 }
 
 /// One char inside a JSON string: " and \ escaped, control chars as \u00XX.
-pub open spec fn escaped(c: char) -> Seq<char> {
-    if c == '"' || c == '\\' { seq!['\\', c] }
-    else if (c as u32) < 0x20 { seq!['\\', 'u', '0', '0', hex((c as u32 / 16) as nat), hex((c as u32 % 16) as nat)] }
-    else { seq![c] }
+pub open spec fn escaped(character: char) -> Seq<char> {
+    if character == '"' || character == '\\' { seq!['\\', character] }
+    else if (character as u32) < 0x20 { seq!['\\', 'u', '0', '0', hex((character as u32 / 16) as nat), hex((character as u32 % 16) as nat)] }
+    else { seq![character] }
 }
 
 /// Text as a JSON string.
-pub open spec fn string(t: Seq<char>) -> Seq<char> {
-    seq!['"'] + t.map_values(|c: char| escaped(c)).flatten() + seq!['"']
+pub open spec fn string(chars: Seq<char>) -> Seq<char> {
+    seq!['"'] + chars.map_values(|character: char| escaped(character)).flatten() + seq!['"']
 }
 
 /// Items joined with commas, in brackets.
@@ -286,62 +287,62 @@ pub open spec fn object(fields: Seq<Seq<char>>) -> Seq<char> {
 }
 
 /// A bool as JSON: true or false.
-pub open spec fn boolean(b: bool) -> Seq<char> {
-    if b { seq!['t', 'r', 'u', 'e'] } else { seq!['f', 'a', 'l', 's', 'e'] }
+pub open spec fn boolean(value: bool) -> Seq<char> {
+    if value { seq!['t', 'r', 'u', 'e'] } else { seq!['f', 'a', 'l', 's', 'e'] }
 }
 
 /// Texts as a JSON array of strings.
-pub open spec fn strings(ts: Seq<Vec<char>>) -> Seq<char> {
-    array(ts.map_values(|t: Vec<char>| string(t@)))
+pub open spec fn strings(list: Seq<Vec<char>>) -> Seq<char> {
+    array(list.map_values(|chars: Vec<char>| string(chars@)))
 }
 
 /// Hashes as a JSON array of decimal strings.
-pub open spec fn hash_strings(hs: Seq<u64>) -> Seq<char> {
-    array(hs.map_values(|h: u64| string(decimal(h as nat))))
+pub open spec fn hash_strings(list: Seq<u64>) -> Seq<char> {
+    array(list.map_values(|hash: u64| string(decimal(hash as nat))))
 }
 
 /// A kind as {"<kind>":{fields}}.
-pub open spec fn kind_json(k: Kind) -> Seq<char> {
-    match k {
+pub open spec fn kind_json(kind: Kind) -> Seq<char> {
+    match kind {
         Kind::Queue { goal } => object(seq![field("queue"@, object(seq![field("goal"@, string(goal@))]))]),
         Kind::Code { goal } => object(seq![field("code"@, object(seq![field("goal"@, string(goal@))]))]),
         Kind::Compaction { goal, out } => object(seq![field("compaction"@, object(seq![
             field("goal"@, string(goal@)), field("out"@, hash_strings(out@))]))]),
         Kind::Counterexample { goal } => object(seq![field("counterexample"@, object(seq![field("goal"@, match goal {
-            Some(p) => object(seq![field("search"@, decimal(p.search as nat)), field("index"@, decimal(p.index as nat))]),
+            Some(agent_process) => object(seq![field("search"@, decimal(agent_process.search as nat)), field("index"@, decimal(agent_process.index as nat))]),
             None => seq!['n', 'u', 'l', 'l'],
         })]))]),
     }
 }
 
 /// A candidate in the spec's names.
-pub open spec fn candidate_json(c: Candidate) -> Seq<char> {
+pub open spec fn candidate_json(candidate: Candidate) -> Seq<char> {
     object(seq![
-        field("commit"@, string(c.commit@)),
-        field("base"@, string(c.base@)),
-        field("accepted"@, boolean(c.accepted)),
-        field("proved"@, boolean(c.proved)),
-        field("changed"@, strings(c.changed@)),
-        field("out"@, hash_strings(c.out@)),
-        field("intents"@, array(c.intents@.map_values(|e: (Cue, Intent)| array(seq![decimal(e.0 as nat), string(e.1@)])))),
-        field("accepts"@, array(c.accepts@.map_values(|e: (i64, bool)| array(seq![signed(e.0 as int), boolean(e.1)])))),
-        field("rejects_counterexamples"@, boolean(c.rejects_counterexamples)),
-        field("rank"@, signed(c.rank as int)),
-        field("diff"@, decimal(c.diff as nat)),
+        field("commit"@, string(candidate.commit@)),
+        field("base"@, string(candidate.base@)),
+        field("accepted"@, boolean(candidate.accepted)),
+        field("proved"@, boolean(candidate.proved)),
+        field("changed"@, strings(candidate.changed@)),
+        field("out"@, hash_strings(candidate.out@)),
+        field("intents"@, array(candidate.intents@.map_values(|pair: (Cue, Intent)| array(seq![decimal(pair.0 as nat), string(pair.1@)])))),
+        field("accepts"@, array(candidate.accepts@.map_values(|pair: (i64, bool)| array(seq![signed(pair.0 as int), boolean(pair.1)])))),
+        field("rejects_counterexamples"@, boolean(candidate.rejects_counterexamples)),
+        field("rank"@, signed(candidate.rank as int)),
+        field("diff"@, decimal(candidate.diff as nat)),
     ])
 }
 
 /// A search in the spec's names; a result with no candidate is null.
-pub open spec fn json(s: Search) -> Seq<char> {
+pub open spec fn json(search: Search) -> Seq<char> {
     object(seq![
-        field("kind"@, kind_json(s.kind)),
-        field("base"@, string(s.base@)),
-        field("n"@, decimal(s.n as nat)),
-        field("checks"@, strings(s.checks@)),
-        field("tests"@, strings(s.tests@)),
-        field("limit"@, decimal(s.limit as nat)),
-        field("results"@, array(s.results@.map_values(|r: Option<Candidate>| match r {
-            Some(c) => candidate_json(c), None => seq!['n', 'u', 'l', 'l'] }))),
+        field("kind"@, kind_json(search.kind)),
+        field("base"@, string(search.base@)),
+        field("n"@, decimal(search.n as nat)),
+        field("checks"@, strings(search.checks@)),
+        field("tests"@, strings(search.tests@)),
+        field("limit"@, decimal(search.limit as nat)),
+        field("results"@, array(search.results@.map_values(|result: Option<Candidate>| match result {
+            Some(candidate) => candidate_json(candidate), None => seq!['n', 'u', 'l', 'l'] }))),
     ])
 }
 
@@ -349,19 +350,19 @@ pub open spec fn json(s: Search) -> Seq<char> {
 /// what programs read.
 pub trait Encoding {
     /// A search as words.
-    fn encode(s: &Search) -> (r: Vec<u64>)
-        ensures r@ == encoded(*s);
+    fn encode(search: &Search) -> (r: Vec<u64>)
+        ensures r@ == encoded(*search);
 
     /// Words back to a search: exactly the one they encode, with a result for
     /// each agent process; None for anything else.
-    fn decode(w: &Vec<u64>) -> (r: Option<Search>)
+    fn decode(words: &Vec<u64>) -> (r: Option<Search>)
         ensures
-            r matches Some(s) ==> encoded(s) == w@ && s.results.len() == s.n,
-            (exists|s: Search| #[trigger] encoded(s) == w@ && s.results.len() == s.n) ==> r is Some;
+            r matches Some(search) ==> encoded(search) == words@ && search.results.len() == search.n,
+            (exists|search: Search| #[trigger] encoded(search) == words@ && search.results.len() == search.n) ==> r is Some;
 
     /// A search as JSON, in the spec's names.
-    fn emit(s: &Search) -> (r: Vec<char>)
-        ensures r@ == json(*s);
+    fn emit(search: &Search) -> (r: Vec<char>)
+        ensures r@ == json(*search);
 
     /// Two searches with the same words are the same search to the spec.
     proof fn injective(a: Search, b: Search)
@@ -380,49 +381,51 @@ pub trait Gates {
 
     /// Accepted, proved, every changed path within the authority, and for a
     /// compaction, every counterexample still rejected.
-    fn verified(s: &Search, c: &Candidate) -> (r: bool)
-        ensures r == spec::verified(s@, c@);
+    fn verified(search: &Search, candidate: &Candidate) -> (r: bool)
+        ensures r == spec::verified(search@, candidate@);
 
     /// The selected candidate, if the search has one.
-    fn selected(s: &Search) -> (r: Option<usize>)
-        requires s.results.len() == s.n,
+    fn selected(search: &Search) -> (r: Option<usize>)
+        requires search.results.len() == search.n,
         ensures
-            r matches Some(i) ==> spec::selected(s@, i as int),
-            r is None ==> forall|i: int| !spec::selected(s@, i);
+            r matches Some(i) ==> spec::selected(search@, i as int),
+            r is None ==> forall|i: int| !spec::selected(search@, i);
 
-    /// No verified test of x splits t.
-    fn not_found(x: &Search, t: &Search) -> (r: bool)
-        requires x.results.len() == x.n, t.results.len() == t.n,
-        ensures r == spec::not_found(x@, t@);
+    /// No verified test of counterexample splits tested.
+    fn not_found(counterexample: &Search, tested: &Search) -> (r: bool)
+        requires counterexample.results.len() == counterexample.n, tested.results.len() == tested.n,
+        ensures r == spec::not_found(counterexample@, tested@);
 
-    /// The test that lands on trunk, if x found a counterexample on trunk.
-    fn found_on_trunk(x: &Search) -> (r: Option<usize>)
-        requires x.results.len() == x.n,
+    /// The test that lands on trunk, if counterexample found one on trunk.
+    fn found_on_trunk(counterexample: &Search) -> (r: Option<usize>)
+        requires counterexample.results.len() == counterexample.n,
         ensures
-            r matches Some(i) ==> spec::found_on_trunk(x@, i as int),
-            r is None ==> forall|i: int| !spec::found_on_trunk(x@, i);
+            r matches Some(i) ==> spec::found_on_trunk(counterexample@, i as int),
+            r is None ==> forall|i: int| !spec::found_on_trunk(counterexample@, i);
 
-    /// The test that lands on trunk, if x's tests split t, the search it tested.
-    fn landing(x: &Search, t: &Search) -> (r: Option<usize>)
-        requires x.results.len() == x.n, t.results.len() == t.n,
+    /// The test that lands on trunk, if counterexample's tests split tested.
+    fn lands_on(counterexample: &Search, tested: &Search) -> (r: Option<usize>)
+        requires counterexample.results.len() == counterexample.n, tested.results.len() == tested.n,
         ensures
-            r matches Some(i) ==> spec::lands_on(t@, x@, i as int),
-            r is None ==> forall|i: int| !spec::lands_on(t@, x@, i);
+            r matches Some(i) ==> spec::lands_on(counterexample@, tested@, i as int),
+            r is None ==> forall|i: int| !spec::lands_on(counterexample@, tested@, i);
 
-    /// The proposal: each agreed cue with its proposed wording, once.
-    fn proposed(s: &Search) -> (r: Vec<(Cue, Intent)>)
-        requires s.results.len() == s.n,
+    /// The proposal: each agreed cue with its proposed wording, once, in cue order.
+    fn proposed(search: &Search) -> (r: Vec<(Cue, Intent)>)
+        requires search.results.len() == search.n,
         ensures
-            forall|k: int| 0 <= k < r.len() ==> spec::proposed(s@, r[k].0 as nat, r[k].1@),
-            forall|q: Cue, w: Seq<char>| spec::proposed(s@, q as nat, w) ==>
-                exists|k: int| 0 <= k < r.len() && r[k].0 == q;
+            forall|entry: int| 0 <= entry < r.len() ==> spec::proposed(search@, r[entry].0 as nat, r[entry].1@),
+            forall|cue: Cue, intent: Seq<char>| spec::proposed(search@, cue as nat, intent) ==>
+                exists|entry: int| 0 <= entry < r.len() && r[entry].0 == cue,
+            forall|earlier: int, later: int| 0 <= earlier < later < r.len() ==> r[earlier].0 < r[later].0;
 
-    /// The cues only one verified candidate cites, once each.
-    fn contested(s: &Search) -> (r: Vec<Cue>)
-        requires s.results.len() == s.n,
+    /// The cues only one verified candidate cites, once each, in cue order.
+    fn contested(search: &Search) -> (r: Vec<Cue>)
+        requires search.results.len() == search.n,
         ensures
-            forall|k: int| 0 <= k < r.len() ==> spec::contested(s@, r[k] as nat),
-            forall|q: Cue| spec::contested(s@, q as nat) ==> r@.contains(q);
+            forall|entry: int| 0 <= entry < r.len() ==> spec::contested(search@, r[entry] as nat),
+            forall|cue: Cue| spec::contested(search@, cue as nat) ==> r@.contains(cue),
+            forall|earlier: int, later: int| 0 <= earlier < later < r.len() ==> r[earlier] < r[later];
 }
 
 } // verus!
