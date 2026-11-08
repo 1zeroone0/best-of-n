@@ -38,6 +38,10 @@ pub struct Config {
     pub rate: f64,
     #[serde(default)]
     pub transcripts: Option<String>,
+    /// The private git remote that holds this repository's traces: they hold
+    /// prompts, arguments and outputs, so never the repository's own remote.
+    #[serde(default)]
+    pub traces: Option<String>,
     /// PATH for agent processes and checks, from the host file. Nothing is inherited.
     #[serde(skip)]
     pub path: Vec<String>,

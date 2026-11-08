@@ -43,6 +43,7 @@ fn main() {
     // only they clean up; bon run inside a check (help, sbom) never touches it.
     if SEARCHES.contains(&command) {
         best_of_n::trusted::cleanup(&["/usr/bin".into(), "/bin".into()]);
+        if let Err(e) = persist(Path::new(&root)) { eprintln!("bon: traces not persisted: {e}"); }
     }
     if let Err(e) = result { fail(&e) }
 }
@@ -77,6 +78,33 @@ fn dispatch(root: &str, args: &[String]) -> Result<(), String> {
         Some(a) if a.starts_with("--") => status(&root, args),
         Some(other) => Err(format!("unknown command {other}\n{USAGE}")),
     }
+}
+
+/// The traces are their own git repository, apart from this one's (they hold
+/// prompts, arguments and outputs): commit what this command added, and push to
+/// the private remote the manifest names in `traces`, if it names one.
+fn persist(root: &Path) -> Result<(), String> {
+    let d = root.join(".bon/traces");
+    if !d.is_dir() { return Ok(()); }
+    let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(root.join(".bon/bon.toml")).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let remote = manifest.get("traces").and_then(|v| v.as_str());
+    if remote.is_some_and(|r| git(root, &["remote", "get-url", "origin"]).is_ok_and(|o| o == r)) {
+        return Err("traces names this repository's own remote; it must be a private one of its own".into());
+    }
+    if !d.join(".git").exists() {
+        git(&d, &["init", "-q", "-b", "main"])?;
+        std::fs::write(d.join(".gitignore"), "running\n").map_err(|e| e.to_string())?;
+    }
+    if let Some(r) = remote {
+        if git(&d, &["remote", "get-url", "origin"]).is_ok() { git(&d, &["remote", "set-url", "origin", r])?; }
+        else { git(&d, &["remote", "add", "origin", r])?; }
+    }
+    git(&d, &["add", "-A"])?;
+    if git(&d, &["diff", "--cached", "--quiet"]).is_ok() { return Ok(()); }
+    git(&d, &["-c", "user.name=bon", "-c", "user.email=bon@localhost", "commit", "-q", "-m", &format!("bon process {}", std::process::id())])?;
+    if remote.is_some() { git(&d, &["push", "-q", "origin", "main"])?; }
+    Ok(())
 }
 
 /// Mark this repository as having a bon command running, for bon background.
@@ -619,6 +647,32 @@ fn sbom(root: &str, check: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn traces_reach_their_own_private_remote_and_never_the_code_s() {
+        let d = std::env::temp_dir().join(format!("bon-traces-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (work, private, public) = (d.join("work"), d.join("traces.git"), d.join("public.git"));
+        std::fs::create_dir_all(work.join(".bon/traces/123")).unwrap();
+        for r in [&private, &public] { git(&d, &["init", "-q", "--bare", "-b", "main", r.to_str().unwrap()]).unwrap(); }
+        git(&work, &["init", "-q", "-b", "main"]).unwrap();
+        git(&work, &["remote", "add", "origin", public.to_str().unwrap()]).unwrap();
+        std::fs::write(work.join(".bon/traces/123/transitions"), "initialize\n").unwrap();
+        std::fs::write(work.join(".bon/traces/running"), "123").unwrap();
+        // Naming the code's own remote is refused, and nothing is committed.
+        std::fs::write(work.join(".bon/bon.toml"), format!("traces = {:?}\n", public.to_str().unwrap())).unwrap();
+        assert!(persist(&work).unwrap_err().contains("private"));
+        assert!(!work.join(".bon/traces/.git").exists());
+        // A private remote of its own gets the traces, and not the running marker.
+        std::fs::write(work.join(".bon/bon.toml"), format!("traces = {:?}\n", private.to_str().unwrap())).unwrap();
+        persist(&work).unwrap();
+        let files = git(&private, &["ls-tree", "-r", "--name-only", "main"]).unwrap();
+        assert_eq!(files, ".gitignore\n123/transitions");
+        // Nothing new: no commit.
+        persist(&work).unwrap();
+        assert_eq!(git(&private, &["rev-list", "--count", "main"]).unwrap(), "1");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn a_proposal_cites_each_intent_s_cue() {
