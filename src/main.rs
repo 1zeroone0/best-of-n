@@ -441,6 +441,41 @@ path = ["/Users/agent/.local/bin", "/Users/agent/.cargo/bin", "/opt/homebrew/bin
 "#;
 
 /// The repository's dependencies, trusted code, tools and harness services.
+/// Each place a Rust file outside `declared` (the trusted files and the checks)
+/// skips a proof: `#[verifier::external…]`, `assume(` or `admit(`, as path:line.
+fn holes(root: &Path, declared: &[String]) -> Vec<String> {
+    fn walk(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for e in entries.flatten() {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().to_string();
+            if p.is_dir() {
+                if !name.starts_with('.') && name != "target" && name != "node_modules" { walk(&p, root, out); }
+            } else if name.ends_with(".rs") {
+                out.push(p.strip_prefix(root).unwrap_or(&p).to_path_buf());
+            }
+        }
+    }
+    let skips = |l: &str| {
+        let call = |w: &str| l.match_indices(w).any(|(i, _)| !l[..i].ends_with(|c: char| c.is_alphanumeric() || c == '_'));
+        l.contains("#[verifier::external") || call("assume(") || call("admit(")
+    };
+    let mut files = Vec::new();
+    walk(root, root, &mut files);
+    files.sort();
+    let mut found = Vec::new();
+    for f in files {
+        let rel = f.to_string_lossy().to_string();
+        if declared.iter().any(|d| rel == *d || rel.starts_with(&format!("{}/", d.trim_end_matches('/')))) { continue; }
+        let Ok(text) = std::fs::read_to_string(root.join(&f)) else { continue };
+        for (n, l) in text.lines().enumerate() {
+            let l = l.trim();
+            if !l.starts_with("//") && skips(l) { found.push(format!("{rel}:{}", n + 1)); }
+        }
+    }
+    found
+}
+
 fn sbom(root: &str, check: bool) -> Result<(), String> {
     let r = Path::new(root);
     let read = |p: &str| std::fs::read_to_string(r.join(p)).map_err(|e| format!("{p}: {e}"));
@@ -538,6 +573,14 @@ fn sbom(root: &str, check: bool) -> Result<(), String> {
         }
     }
     properties.push(serde_json::json!({ "name": "bon:trusted-functions", "value": trusted.join(",") }));
+    // Outside trusted code and the checks, nothing may skip a proof.
+    let declared: Vec<String> = config.and_then(|v| v.get("trusted")).and_then(|v| v.as_array()).into_iter().flatten()
+        .chain(manifest.get("checks").and_then(|v| v.get("paths")).and_then(|v| v.as_array()).into_iter().flatten())
+        .filter_map(|v| v.as_str().map(String::from)).collect();
+    let found = holes(r, &declared);
+    if !found.is_empty() {
+        return Err(format!("a proof is skipped outside trusted code and the checks: {}; prove it, or declare the file trusted in [sbom]", found.join(", ")));
+    }
     let harnesses: Vec<&str> = manifest.get("harness").and_then(|v| v.as_array()).into_iter().flatten()
         .chain(manifest.get("counterexample").and_then(|v| v.get("harness")).and_then(|v| v.as_array()).into_iter().flatten())
         .filter_map(|v| v.get("name").and_then(|v| v.as_str())).collect();
@@ -564,4 +607,22 @@ fn sbom(root: &str, check: bool) -> Result<(), String> {
         println!("wrote {}", best_of_n::trusted::SBOM);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_skipped_proof_outside_trusted_code_is_found() {
+        let d = std::env::temp_dir().join(format!("bon-holes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("src/exec.rs"), "fn a() {}\n#[verifier::external_body]\nfn b() {}\nproof fn c() { assume(false); }\n// admit() in a comment\nfn assume_x() {}\n").unwrap();
+        std::fs::write(d.join("src/trusted.rs"), "#[verifier::external_body]\nfn t() {}\n").unwrap();
+        std::fs::write(d.join("src/spec.rs"), "proof fn s() { admit(); }\n").unwrap();
+        let declared = vec!["src/trusted.rs".to_string(), "src/spec.rs".to_string()];
+        assert_eq!(holes(&d, &declared), vec!["src/exec.rs:2", "src/exec.rs:4"]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
