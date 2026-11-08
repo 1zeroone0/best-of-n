@@ -6,6 +6,8 @@ use std::process::Command;
 
 use best_of_n::process;
 
+mod projection;
+mod tui;
 mod types;
 mod view;
 
@@ -57,6 +59,21 @@ fn dispatch(root: &str, args: &[String]) -> Result<(), String> {
         Some("counterexample") => counterexample(&root),
         Some("background") if args.get(1).map(String::as_str) == Some("--plist") => { plist(&root); Ok(()) }
         Some("background") => background(&root),
+        Some("view") if args.iter().any(|a| a == "--frame") => {
+            // bon view --frame WxH [--tab N] [--light]: one frame of the terminal view, as HTML.
+            let size = args.iter().position(|a| a == "--frame").and_then(|i| args.get(i + 1)).cloned().unwrap_or("120x32".into());
+            let (w, h) = size.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))).ok_or("--frame WxH")?;
+            let tab = args.iter().position(|a| a == "--tab").and_then(|i| args.get(i + 1)).and_then(|t| t.parse::<usize>().ok()).unwrap_or(4);
+            print!("{}", tui::frame(&root, w, h, tab.saturating_sub(1), args.iter().any(|a| a == "--light"))?);
+            Ok(())
+        }
+        Some("view") if args.iter().any(|a| a == "--typed") => {
+            let p = projection::read(std::path::Path::new(&root), &view::Filter::args(args)?)?;
+            println!("{} bon processes, {} goals, {} searches, {} agent processes, {} spec items, {} queue lines", p.processes.len(), p.groups.len(),
+                p.processes.iter().map(|b| b.searches.len()).sum::<usize>(), p.processes.iter().flat_map(|b| &b.searches).map(|s| s.candidates.len()).sum::<usize>(),
+                p.spec.as_ref().map_or(0, |s| s.items.len()), p.queue.as_ref().map_or(0, |q| q.len()));
+            Ok(())
+        }
         Some("view") if args.iter().any(|a| a == "--state") => {
             println!("{}", serde_json::to_string_pretty(&view::state(std::path::Path::new(&root), &view::Filter::args(args)?)).unwrap_or_default());
             Ok(())
@@ -74,6 +91,7 @@ fn dispatch(root: &str, args: &[String]) -> Result<(), String> {
         Some("sbom") => sbom(&root, args.get(1).map(String::as_str) == Some("--check")),
         Some("types") => types::run(&root, args.get(1).map(String::as_str) == Some("--check")),
         Some("help" | "-h" | "--help") => { println!("{USAGE}"); Ok(()) }
+        None if tui::wanted() => tui::run(&root, view::Filter::args(args)?),
         None => status(&root, args),
         Some(a) if a.starts_with("--") => status(&root, args),
         Some(other) => Err(format!("unknown command {other}\n{USAGE}")),

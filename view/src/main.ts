@@ -6,53 +6,9 @@
 // Color is one scale, red to violet: red is early, unstable, or needs you;
 // violet is settled. A search's steps run the same scale in order.
 
-interface Candidate {
-    index: number; harness?: string; model?: string; generation?: number; commit?: string;
-    accepted: boolean; verified: boolean; rank?: number; diff?: number; added?: number; removed?: number; flags?: string[]; logs?: string[];
-}
-interface Params { goal: { trunk?: string; candidate?: string; transcript?: string }; base: string; n?: number; limit?: number | null; authority: string }
-interface Search {
-    params: Params; generation?: number | null; time_cost?: number | null; rate?: number | null; background?: boolean;
-    search: number; kind: string; goal?: string; width?: number; started?: number;
-    returned: number; accepted: number; verified: number; selected?: number | null; recorded_selected?: number | null;
-    kernel: 'derived' | 'unreadable' | 'none'; blocked?: string | null; cost?: number; seconds?: number; time?: number; running?: boolean;
-    candidates: Candidate[];
-}
-interface About { goal: string; from: string; subject: string }
-interface Process {
-    pid: number; running: boolean; kind: string; goal: string; title: string; about: About; outcome: string; sentence: string;
-    cost: number; generation: number; time_cost: number; push?: { cost?: number; searches?: number; commit?: string } | null; limit?: number | null;
-    time: number; transitions: string[]; searches: Search[];
-}
-interface Group {
-    kind: string; title: string; about: About; outcome: string; sentence: string; cost: number; generation: number; time_cost: number;
-    push?: { cost?: number; to_selection?: number; counterexample?: number; commit?: string | null; processes?: number } | null; time: number; running: boolean; processes: Process[];
-}
-interface SpecItem { kind: string; name: string; doc?: string; reads?: string[]; updates?: string[]; requires?: string[] }
-interface SpecField { name: string; type: string; sharding?: string; doc?: string }
-interface SysNode { id: string; layer: 'spec' | 'gates' | 'implementation' | 'target' | 'process' | 'entry' | 'program'; group: string; name: string; file: string; line?: number; end?: number; doc?: string; changed?: boolean;
-    guards?: string[]; adds?: string[]; removes?: string[]; uses?: string[]; trusted?: string[]; proof?: boolean }
-interface System { nodes: SysNode[]; edges: [string, string, 'ensures' | 'implements' | 'calls' | 'transition' | 'types'][]; trusted: { name: string; line: number; doc?: string; changed?: boolean }[]; counts: { predicates: number; private: number; trusted: number } }
-interface State {
-    configured: boolean;
-    repo: { name?: string; head?: string; trunk?: string; remote?: string; remote_head?: string; remote_time?: number | null; subject?: string; last_push?: { commit?: string; time?: number } | null; since_push?: { commits: number; authors: string[] } | null; pushed?: boolean; now: number };
-    totals: { cost: number; generation: number; time_cost: number; pushed: number; not_pushed: number; in_flight: number; rate?: number | null; per_verified_candidate?: number | null; per_push?: number | null; pushes: number; verified: number; candidates: number };
-    processes: Process[];
-    groups: Group[];
-    queue: { id: number; intent: string }[] | null;
-    filter: { since?: number | null; until?: number | null; find?: string | null };
-    bounds: { earliest?: number | null; latest?: number | null };
-    spec?: { path?: string; fields?: SpecField[]; items?: SpecItem[] } | null;
-    sbom?: { source: string; document: Sbom } | null;
-    system?: System | null;
-}
-interface SbomComponent { type: string; name: string; version: string; group?: string; purl?: string }
-interface Sbom {
-    metadata?: { component?: { name: string; version: string }; properties?: { name: string; value: string }[] };
-    components?: SbomComponent[];
-    services?: { name: string; endpoints?: string[]; group?: string }[];
-}
-
+// The projection's types, emitted from src/projection.rs by bon types.
+import type { Projection as State, GoalTrace as Group, BonProcess as Process, SearchTrace as Search, Facts as Candidate,
+    About, SpecItem, SpecField, SpecNode as SysNode, SpecGraph as System, Sbom, Component as SbomComponent } from './kernel';
 import type { Search as KernelSearch } from './kernel';
 import { NONE, NOT_A_SEARCH } from './kernel';
 const app = document.querySelector<HTMLDivElement>('#app')!;
@@ -88,15 +44,15 @@ document.documentElement.dataset.theme = theme;
 // ── formatting ──
 const e = (v: unknown): string => String(v ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]!));
 const money = (v?: number | null): string => v == null || !Number.isFinite(v) ? '—' : '$' + v.toFixed(2);
-const short = (v?: string): string => v ? v.slice(0, 7) : '';
+const short = (v?: string | null): string => v ? v.slice(0, 7) : '';
 const day = (t: number): string => new Date(t * 1000).toISOString().slice(0, 10);
 const cap = (t: string): string => t.charAt(0).toUpperCase() + t.slice(1);
-function ago(t?: number): string {
+function ago(t?: number | null): string {
     if (!t || !data) return '';
     const d = Math.max(0, data.repo.now - t);
     return d < 60 ? 'just now' : d < 3600 ? `${Math.floor(d / 60)}m ago` : d < 86400 ? `${Math.floor(d / 3600)}h ago` : `${Math.floor(d / 86400)}d ago`;
 }
-const minutes = (s?: number): string => s == null ? '' : s < 90 ? `${Math.round(s)}s` : `${Math.round(s / 60)} min`;
+const minutes = (s?: number | null): string => s == null ? '' : s < 90 ? `${Math.round(s)}s` : `${Math.round(s / 60)} min`;
 
 // ── the color scale ──
 type Tone = 'red' | 'orange' | 'yellow' | 'green' | 'blue' | 'indigo' | 'violet' | 'neutral';
@@ -125,7 +81,7 @@ const note = (key: string, label: string): string => `<span class="word" tabinde
 const word = (name: string, label = name): string => `<span class="word" tabindex="0" data-word="${e(name)}">${e(label)}</span>`;
 const chip = (label: string, tone: Tone = 'neutral', specWord?: string): string =>
     `<span class="chip ${tone}">${specWord ? word(specWord, label) : e(label)}</span>`;
-const mono = (t: string, title = ''): string => `<code class="hash" ${title ? `title="${e(title)}"` : ''}>${e(t)}</code>`;
+const mono = (t: string, title: string | null = ''): string => `<code class="hash" ${title ? `title="${e(title)}"` : ''}>${e(t)}</code>`;
 /** A labelled value: the label above, small; the value below. */
 const field = (label: string, value: string, tone: Tone = 'neutral'): string =>
     `<div class="field ${tone}"><span class="label">${label}</span><span class="value">${value}</span></div>`;
@@ -306,7 +262,7 @@ function controls(s: State): string {
 
 // ── live ──
 /** Elapsed time that ticks on the page between polls: a running search's, from its grant. */
-const since = (started: number, seconds?: number): string => `<span data-since="${started}">${minutes(seconds ?? 0)}</span>`;
+const since = (started: number, seconds?: number | null): string => `<span data-since="${started}">${minutes(seconds ?? 0)}</span>`;
 /** Rows, bon processes and searches that were running when first seen open on their own, once. */
 const autoOpened = new Set<string>();
 
@@ -545,7 +501,7 @@ function touched(sys: System, pick: { r: Search } | undefined): { by: Touch; oth
     return { by, other: [...other].sort(), pending };
 }
 /** Where an item is written: the file, its lines marked, from the working tree. */
-const srcUrl = (file: string, line?: number, end?: number): string =>
+const srcUrl = (file: string, line?: number | null, end?: number | null): string =>
     `/source?path=${encodeURIComponent(file)}${line && line > 1 ? `&from=${line}&to=${end ?? line}#L${line}` : ''}`;
 function systemSection(s: State): string {
     const sys = s.system;
@@ -589,7 +545,7 @@ function drawSystem(): void {
     const at = new Map<string, DOMRect>();
     for (const el of grid.querySelectorAll<HTMLElement>('[data-node]')) at.set(el.dataset.node!, el.getBoundingClientRect());
     const order = { spec: 0, gates: 1, implementation: 2, target: 3, process: 4, entry: 5, program: 6 } as const;
-    const layer = new Map(sys.nodes.map(n => [n.id, order[n.layer]]));
+    const layer = new Map(sys.nodes.map(n => [n.id, order[n.layer as keyof typeof order]]));
     svg.innerHTML = sys.edges.map(([from, to, kind]) => {
         const a = at.get(from), b = at.get(to);
         if (!a || !b || layer.get(from) === layer.get(to)) return '';

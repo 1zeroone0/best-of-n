@@ -50,7 +50,7 @@ fn fields(body: &str) -> Vec<Field> {
         if line.is_empty() || line.starts_with("//") || line.starts_with("#[") { continue; }
         for f in split(line) {
             let Some((name, ty)) = f.trim_start_matches("pub ").split_once(':') else { continue };
-            out.push(Field { name: name.trim().to_string(), ty: ty.trim().to_string(), doc: std::mem::take(&mut doc) });
+            out.push(Field { name: name.trim().trim_start_matches("r#").to_string(), ty: ty.trim().to_string(), doc: std::mem::take(&mut doc) });
         }
     }
     out
@@ -128,11 +128,11 @@ fn camel(s: &str) -> String {
 
 fn ts(ty: &str) -> String {
     let ty = ty.trim();
-    if ty == "Vec<char>" { return "string".into(); }
+    if ty == "Vec<char>" || ty == "String" { return "string".into(); }
     if let Some(t) = inner(ty, "Vec") { return format!("Array<{}>", ts(t)); }
     if let Some(t) = inner(ty, "Option") { return format!("{} | null", ts(t)); }
     if let Some(ts_) = tuple(ty) { return format!("[{}]", ts_.iter().map(|t| ts(t)).collect::<Vec<_>>().join(", ")); }
-    match ty { "bool" => "boolean".into(), "u8" | "u16" | "u32" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64" | "isize" => "number".into(), _ => ty.into() }
+    match ty { "bool" => "boolean".into(), "u8" | "u16" | "u32" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64" | "isize" | "f32" | "f64" => "number".into(), _ => ty.into() }
 }
 
 fn ts_doc(doc: &[String], indent: &str) -> String {
@@ -160,14 +160,14 @@ fn typescript(items: &[Declared], from: &str) -> String {
 
 fn go(ty: &str) -> String {
     let ty = ty.trim();
-    if ty == "Vec<char>" { return "string".into(); }
+    if ty == "Vec<char>" || ty == "String" { return "string".into(); }
     if let Some(t) = inner(ty, "Vec") { return format!("[]{}", go(t)); }
     if let Some(t) = inner(ty, "Option") { return format!("*{}", go(t)); }
     if let Some(ts_) = tuple(ty) { return format!("Tuple{}[{}]", ts_.len(), ts_.iter().map(|t| go(t)).collect::<Vec<_>>().join(", ")); }
     match ty {
         "bool" => "bool".into(), "u8" => "uint8".into(), "u16" => "uint16".into(), "u32" => "uint32".into(),
         "u64" | "usize" => "uint64".into(), "i8" => "int8".into(), "i16" => "int16".into(), "i32" => "int32".into(),
-        "i64" | "isize" => "int64".into(), _ => ty.into(),
+        "i64" | "isize" => "int64".into(), "f32" => "float32".into(), "f64" => "float64".into(), _ => ty.into(),
     }
 }
 
@@ -199,7 +199,8 @@ fn go_fields(fields: &[Field]) -> String {
 
 fn golang(items: &[Declared], from: &str, package: &str) -> String {
     let mut out = format!("// Code generated from {from} by bon types. DO NOT EDIT.\n\npackage {package}\n\nimport \"encoding/json\"\n");
-    let mut tuples = false;
+    let mut arities: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+    let mut note = |fields: &[Field]| for f in fields { let mut t = f.ty.as_str(); while let Some(i) = t.find('(') { let rest = &t[i..]; if let Some(ts_) = tuple(rest.split_inclusive(')').next().unwrap_or("")) { arities.insert(ts_.len()); } t = &t[i + 1..]; } };
     for d in items {
         out += "\n";
         out += &go_doc(&d.doc, "");
@@ -208,14 +209,14 @@ fn golang(items: &[Declared], from: &str, package: &str) -> String {
             Item::Alias { name, ty } => format!("type {name} = {}\n", go(ty)),
             Item::Const { name, value } => format!("const {name} = {value}\n"),
             Item::Struct { name, fields } => {
-                tuples |= fields.iter().any(|f| f.ty.contains('('));
+                note(fields);
                 format!("type {name} struct {{\n{}}}\n", go_fields(fields))
             }
             Item::Enum { name, variants } => {
                 let mut bodies = String::new();
                 let mut lines = Vec::new();
                 for (tag, fs) in variants {
-                    tuples |= fs.iter().any(|f| f.ty.contains('('));
+                    note(fs);
                     lines.push((Vec::new(), tag.clone(), format!("*{name}{tag}"), format!("`json:\"{},omitempty\"`", tag.to_lowercase())));
                     bodies += &format!("\ntype {name}{tag} struct {{\n{}}}\n", go_fields(fs));
                 }
@@ -223,14 +224,16 @@ fn golang(items: &[Declared], from: &str, package: &str) -> String {
             }
         };
     }
-    if tuples {
-        out += "\n// Tuple2 is a pair, written in JSON as a two-element array.\ntype Tuple2[A, B any] struct {\n\tFirst  A\n\tSecond B\n}\n\n\
-func (t *Tuple2[A, B]) UnmarshalJSON(b []byte) error {\n\tvar raw [2]json.RawMessage\n\tif err := json.Unmarshal(b, &raw); err != nil {\n\t\treturn err\n\t}\n\
-\tif err := json.Unmarshal(raw[0], &t.First); err != nil {\n\t\treturn err\n\t}\n\treturn json.Unmarshal(raw[1], &t.Second)\n}\n\n\
-func (t Tuple2[A, B]) MarshalJSON() ([]byte, error) { return json.Marshal([2]any{t.First, t.Second}) }\n";
-    } else {
-        out += "\nvar _ = json.Marshal\n";
+    for n in &arities {
+        let names: Vec<String> = (0..*n).map(|i| format!("T{i}")).collect();
+        let fields: Vec<String> = (0..*n).map(|i| format!("\tF{i} T{i}")).collect();
+        let reads: String = (0..*n).map(|i| format!("\tif err := json.Unmarshal(raw[{i}], &t.F{i}); err != nil {{\n\t\treturn err\n\t}}\n")).collect();
+        out += &format!("\n// Tuple{n} is written in JSON as a {n}-element array.\ntype Tuple{n}[{} any] struct {{\n{}\n}}\n\n\
+func (t *Tuple{n}[{}]) UnmarshalJSON(b []byte) error {{\n\tvar raw [{n}]json.RawMessage\n\tif err := json.Unmarshal(b, &raw); err != nil {{\n\t\treturn err\n\t}}\n{reads}\treturn nil\n}}\n\n\
+func (t Tuple{n}[{}]) MarshalJSON() ([]byte, error) {{\n\treturn json.Marshal([{n}]any{{{}}})\n}}\n",
+            names.join(", "), fields.join("\n"), names.join(", "), names.join(", "), (0..*n).map(|i| format!("t.F{i}")).collect::<Vec<_>>().join(", "));
     }
+    if arities.is_empty() { out += "\nvar _ = json.Marshal\n"; }
     out
 }
 
@@ -238,11 +241,11 @@ func (t Tuple2[A, B]) MarshalJSON() ([]byte, error) { return json.Marshal([2]any
 
 fn py(ty: &str) -> String {
     let ty = ty.trim();
-    if ty == "Vec<char>" { return "str".into(); }
+    if ty == "Vec<char>" || ty == "String" { return "str".into(); }
     if let Some(t) = inner(ty, "Vec") { return format!("list[{}]", py(t)); }
     if let Some(t) = inner(ty, "Option") { return format!("{} | None", py(t)); }
     if let Some(ts_) = tuple(ty) { return format!("tuple[{}]", ts_.iter().map(|t| py(t)).collect::<Vec<_>>().join(", ")); }
-    match ty { "bool" => "bool".into(), "u8" | "u16" | "u32" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64" | "isize" => "int".into(), _ => ty.into() }
+    match ty { "bool" => "bool".into(), "u8" | "u16" | "u32" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64" | "isize" => "int".into(), "f32" | "f64" => "float".into(), _ => ty.into() }
 }
 
 fn py_doc(doc: &[String], indent: &str) -> String {
@@ -252,6 +255,10 @@ fn py_doc(doc: &[String], indent: &str) -> String {
 fn python(items: &[Declared], from: &str) -> String {
     let mut out = format!("# Generated from {from} by bon types. Do not edit.\nfrom __future__ import annotations\n\nfrom typing import TypedDict\n");
     let class = |name: &str, fields: &[Field]| -> String {
+        const KEYWORDS: [&str; 6] = ["from", "import", "class", "def", "pass", "global"];
+        if fields.iter().any(|f| KEYWORDS.contains(&f.name.as_str())) {
+            return format!("{name} = TypedDict(\"{name}\", {{{}}})\n", fields.iter().map(|f| format!("\"{}\": {}", f.name, py(&f.ty))).collect::<Vec<_>>().join(", "));
+        }
         let body: String = fields.iter().map(|f| format!("{}    {}: {}\n", py_doc(&f.doc, "    "), f.name, py(&f.ty))).collect();
         format!("class {name}(TypedDict):\n{}", if body.is_empty() { "    pass\n".into() } else { body })
     };

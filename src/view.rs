@@ -269,6 +269,8 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
             let seconds = summary["seconds"].as_f64()
                 .or_else(|| started.map(|s| (if live { now } else { last_wait.unwrap_or(s) }).saturating_sub(s) as f64));
             let kernel = read_words(&rdir.join("search.words")).as_ref().and_then(|w| Kernel::decode(w));
+            // A counterexample's test is verified without `proved` (spec: verified).
+            let counterexample = summary["kind"].as_str().map_or_else(|| grant.iter().any(|w| *w == "counterexample"), |k| k == "counterexample");
             let mut candidates: Vec<(usize, Value)> = std::fs::read_dir(&rdir).into_iter().flatten().flatten().filter_map(|e| {
                 let i = e.file_name().to_string_lossy().parse::<usize>().ok()?;
                 let facts: Value = serde_json::from_str(&std::fs::read_to_string(e.path().join("facts.json")).ok()?).ok()?;
@@ -281,7 +283,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
                 let accepted = c["accepted"].as_bool().unwrap_or(false);
                 let verified = match &kernel {
                     Some(k) => k.results.get(i).and_then(|r| r.as_ref()).is_some_and(|x| Kernel::verified(k, x)),
-                    None => accepted && c["proved"].as_bool().unwrap_or(false),
+                    None => accepted && (counterexample || c["proved"].as_bool().unwrap_or(false)),
                 };
                 Some((i, json!({
                     "index": i, "harness": facts["harness"], "model": facts["model"],

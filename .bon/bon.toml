@@ -34,10 +34,10 @@ tests = ["tests/"]
 
 [sbom]
 name = "best-of-n"
-trusted = ["src/trusted.rs", "src/main.rs", "src/view.rs", "src/wasm.rs", "src/types.rs"]
+trusted = ["src/trusted.rs", "src/main.rs", "src/view.rs", "src/wasm.rs", "src/types.rs", "src/projection.rs", "src/tui.rs"]
 tools = { rustc = "rustc --version", verus = "verus --version", git = "git --version", sudo = "printf 'macOS '; sw_vers -buildVersion", tar = "tar --version", claude = "claude --version", codex = "codex --version" }
 
 [programs]
 # The types programs are built on: bon types emits them from these files, and checks them.
-from = ["src/gates.rs", "src/wasm.rs"]
+from = ["src/gates.rs", "src/wasm.rs", "src/projection.rs"]
 types = { typescript = "view/src/kernel.ts", go = "examples/go/kernel/kernel.go", python = "examples/python/kernel.py" }
