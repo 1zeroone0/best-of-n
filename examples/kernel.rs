@@ -26,7 +26,7 @@ fn main() {
     ];
     for kind in kinds {
         let s = Search {
-            kind, base: t("b0"), n: 3, checks: vec![t("src/spec.rs")], tests: vec![t("tests/counterexample.rs")], limit: 9,
+            kind, base: t("b0"), n: 3, checks: vec![t("src/spec.rs")], tests: vec![t("tests/counterexample.rs")], trusted: vec![t("src/trusted.rs")], limit: 9,
             results: vec![Some(candidate("x1", 7, 1)), None, Some(candidate("y2", 7, -2))],
         };
         let words = Kernel::encode(&s);

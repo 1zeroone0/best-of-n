@@ -149,20 +149,21 @@ pub open spec fn under(paths: Set<Path>, path: Path) -> bool {
 }
 
 /// No search may change path, except a queue search the queue: bon's directory,
-/// or a path under a check (the spec, the proofs, engineer's tests).
-pub open spec fn protected(checks: Set<Path>, path: Path) -> bool {
-    bon_path().is_prefix_of(path) || under(checks, path)
+/// a path under a check (the spec, the proofs, engineer's tests), or trusted
+/// code (the files the manifest's SBOM declares trusted), which nothing proves.
+pub open spec fn protected(checks: Set<Path>, trusted: Set<Path>, path: Path) -> bool {
+    bon_path().is_prefix_of(path) || under(checks, path) || under(trusted, path)
 }
 
 /// Attenuation at grant: what a capability for this kind may change. `tests`
 /// holds the counterexamples' tests on trunk: code may not change them,
 /// compaction may, and a counterexample writes only there.
-pub open spec fn authority(kind: Kind, checks: Set<Path>, tests: Set<Path>) -> ISet<Path> {
+pub open spec fn authority(kind: Kind, checks: Set<Path>, tests: Set<Path>, trusted: Set<Path>) -> ISet<Path> {
     match kind {
         Kind::Queue { .. } => ISet::new(|path: Path| path == queue_path()),
-        Kind::Code { .. } => ISet::new(|path: Path| !protected(checks, path) && !under(tests, path)),
-        Kind::Compaction { .. } => ISet::new(|path: Path| !protected(checks, path)),
-        Kind::Counterexample { .. } => ISet::new(|path: Path| !protected(checks, path) && under(tests, path)),
+        Kind::Code { .. } => ISet::new(|path: Path| !protected(checks, trusted, path) && !under(tests, path)),
+        Kind::Compaction { .. } => ISet::new(|path: Path| !protected(checks, trusted, path)),
+        Kind::Counterexample { .. } => ISet::new(|path: Path| !protected(checks, trusted, path) && under(tests, path)),
     }
 }
 
@@ -384,6 +385,8 @@ tokenized_state_machine!{ bon {
         #[sharding(variable)] pub checks: Set<Path>,
         /// The paths holding the counterexamples' tests at trunk's head.
         #[sharding(variable)] pub tests: Set<Path>,
+        /// The trusted code the manifest declares at trunk's head.
+        #[sharding(variable)] pub trusted: Set<Path>,
         /// Trunk's history; last() is the head.
         #[sharding(variable)] pub trunk: Seq<Commit>,
         /// The git author of each trunk commit, in step with trunk.
@@ -402,9 +405,10 @@ tokenized_state_machine!{ bon {
 
     // ── init ────────────────────────────────────────────
 
-    init!{ initialize(root: Commit, checks: Set<Path>, tests: Set<Path>, limit: nat) {
+    init!{ initialize(root: Commit, checks: Set<Path>, tests: Set<Path>, trusted: Set<Path>, limit: nat) {
         init checks = checks;
         init tests = tests;
+        init trusted = trusted;
         init trunk = Seq::empty().push(root);
         init authors = Seq::empty().push(User::engineer);
         init searches = Seq::empty();
@@ -417,9 +421,10 @@ tokenized_state_machine!{ bon {
     // ── transitions ─────────────────────────────────────
 
     /// engineer committed to trunk, e.g. the queue, the spec or the checks.
-    transition!{ advance(commit: Commit, checks: Set<Path>, tests: Set<Path>) {
+    transition!{ advance(commit: Commit, checks: Set<Path>, tests: Set<Path>, trusted: Set<Path>) {
         update checks = checks;
         update tests = tests;
+        update trusted = trusted;
         update trunk = pre.trunk.push(commit);
         update authors = pre.authors.push(User::engineer);
     }}
@@ -440,7 +445,7 @@ tokenized_state_machine!{ bon {
             && pre.searches[agent_process.search].base == pre.trunk.last();
         let search_index = pre.searches.len() as int;
         let base = pre.trunk.last();
-        let attenuated = authority(kind, pre.checks, pre.tests);
+        let attenuated = authority(kind, pre.checks, pre.tests, pre.trusted);
         update searches = pre.searches.push(Search { kind, base, n, authority: attenuated, limit: agent_process_limit, results: Map::empty() });
         update reserved = pre.reserved + agent_process_limit * n;
         add capability += (granted(search_index, n, base, attenuated, agent_process_limit));
@@ -554,10 +559,10 @@ tokenized_state_machine!{ bon {
     // ── proofs ──────────────────────────────────────────
 
     #[inductive(initialize)]
-    fn initialize_inductive(post: Self, root: Commit, checks: Set<Path>, tests: Set<Path>, limit: nat) {}
+    fn initialize_inductive(post: Self, root: Commit, checks: Set<Path>, tests: Set<Path>, trusted: Set<Path>, limit: nat) {}
 
     #[inductive(advance)]
-    fn advance_inductive(pre: Self, post: Self, commit: Commit, checks: Set<Path>, tests: Set<Path>) {}
+    fn advance_inductive(pre: Self, post: Self, commit: Commit, checks: Set<Path>, tests: Set<Path>, trusted: Set<Path>) {}
 
     #[inductive(grant)]
     fn grant_inductive(pre: Self, post: Self, kind: Kind, n: nat, agent_process_limit: nat, observed: Map<Object, Permission>) {

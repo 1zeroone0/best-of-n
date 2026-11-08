@@ -44,7 +44,7 @@ pub struct Config {
     pub checks: Checks,
     pub harness: Vec<Harness>,
     pub counterexample: Counterexample,
-    /// What `bon sbom` lists beyond the lockfiles; read by it alone.
+    /// What `bon sbom` lists beyond the lockfiles; its `trusted` list is also every search's trusted code.
     #[serde(default)]
     pub sbom: Option<toml::Value>,
     /// Prices by canonical model, from the host file.
@@ -557,6 +557,13 @@ pub fn checks(m: &Manifest) -> Vec<Path> { m.config.checks.paths.iter().map(|p| 
 /// The paths holding the counterexamples' tests.
 #[verifier::external_body]
 pub fn tests(m: &Manifest) -> Vec<Path> { m.config.counterexample.tests.iter().map(|p| p.chars().collect()).collect() }
+
+/// The trusted code the manifest's SBOM declares: no search may change it.
+#[verifier::external_body]
+pub fn trusted(m: &Manifest) -> Vec<Path> {
+    m.config.sbom.as_ref().and_then(|s| s.get("trusted")).and_then(|t| t.as_array())
+        .map(|a| a.iter().filter_map(|p| p.as_str()).map(|p| p.chars().collect()).collect()).unwrap_or_default()
+}
 
 /// The harnesses a search of this kind draws from.
 #[verifier::external]
@@ -1306,7 +1313,7 @@ mod tests {
     fn rejecting_trunk(base: &str, test: &str) -> Search {
         let text = |s: &str| s.chars().collect::<Vec<char>>();
         Search {
-            kind: Kind::Counterexample { goal: None }, base: text(base), n: 1, checks: vec![], tests: vec![text("tests/")], limit: 1,
+            kind: Kind::Counterexample { goal: None }, base: text(base), n: 1, checks: vec![], tests: vec![text("tests/")], trusted: vec![], limit: 1,
             results: vec![Some(Candidate {
                 commit: text(test), base: text(base), accepted: true, proved: false, changed: vec![text("tests/c_1.sh")],
                 out: vec![], intents: vec![], accepts: vec![(-1, false)], rejects_counterexamples: false, rank: 0, diff: 1,
@@ -1363,7 +1370,7 @@ mod tests {
             intents: vec![], accepts: vec![], rejects_counterexamples: false, rank: 0, diff: 1,
         };
         let tested = Search {
-            kind: Kind::Code { goal: text("head") }, base: text("head"), n: 2, checks: vec![], tests: vec![], limit: 1,
+            kind: Kind::Code { goal: text("head") }, base: text("head"), n: 2, checks: vec![], tests: vec![], trusted: vec![], limit: 1,
             results: vec![Some(candidate("first")), Some(candidate("selected"))],
         };
         let on = |goal| Kind::Counterexample { goal };

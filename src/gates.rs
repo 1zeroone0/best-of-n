@@ -109,6 +109,8 @@ pub struct Search {
     pub checks: Vec<Path>,
     /// The paths holding the counterexamples' tests.
     pub tests: Vec<Path>,
+    /// The trusted code the manifest's SBOM declares; no search may change it.
+    pub trusted: Vec<Path>,
     pub limit: u64,
     pub results: Vec<Option<Candidate>>,
 }
@@ -120,7 +122,7 @@ impl View for Search {
             kind: self.kind@,
             base: self.base@,
             n: self.n as nat,
-            authority: spec::authority(self.kind@, paths(self.checks@), paths(self.tests@)),
+            authority: spec::authority(self.kind@, paths(self.checks@), paths(self.tests@), paths(self.trusted@)),
             limit: self.limit as nat,
             results: Map::new(
                 Set::range(0int, self.results.len() as int),
@@ -221,7 +223,7 @@ pub open spec fn result_words(result: Option<Candidate>) -> Seq<u64> {
 
 /// A search, field by field in declaration order.
 pub open spec fn encoded(search: Search) -> Seq<u64> {
-    kind_words(search.kind) + text(search.base@) + seq![search.n as u64] + texts(search.checks@) + texts(search.tests@) + seq![search.limit]
+    kind_words(search.kind) + text(search.base@) + seq![search.n as u64] + texts(search.checks@) + texts(search.tests@) + texts(search.trusted@) + seq![search.limit]
         + seq![search.results.len() as u64] + search.results@.map_values(|result: Option<Candidate>| result_words(result)).flatten()
 }
 
@@ -340,6 +342,7 @@ pub open spec fn json(search: Search) -> Seq<char> {
         field("n"@, decimal(search.n as nat)),
         field("checks"@, strings(search.checks@)),
         field("tests"@, strings(search.tests@)),
+        field("trusted"@, strings(search.trusted@)),
         field("limit"@, decimal(search.limit as nat)),
         field("results"@, array(search.results@.map_values(|result: Option<Candidate>| match result {
             Some(candidate) => candidate_json(candidate), None => seq!['n', 'u', 'l', 'l'] }))),
