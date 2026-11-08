@@ -62,6 +62,22 @@ impl Wire for u64 {
     }
 }
 
+impl Wire for Hash {
+    type Model = Hash;
+    spec fn model(&self) -> Hash { *self }
+    spec fn valid_model(m: Hash) -> bool { true }
+    proof fn valid(&self) {}
+    spec fn words(m: Hash) -> Seq<u64> { seq![m.0] }
+    spec fn parse(w: Seq<u64>) -> Option<(Hash, Seq<u64>)> {
+        if w.len() == 0 { None } else { Some((Hash(w[0]), w.skip(1))) }
+    }
+    proof fn roundtrip(m: Hash, tail: Seq<u64>) {}
+    fn write(&self) -> (r: Vec<u64>) { vec![self.0] }
+    fn read(w: &Vec<u64>) -> (r: Option<(Self, Vec<u64>)>) {
+        if w.len() == 0 { None } else { Some((Hash(w[0]), suffix(w, 1))) }
+    }
+}
+
 impl<A: Wire, B: Wire> Wire for (A, B) {
     type Model = (A::Model, B::Model);
     spec fn model(&self) -> Self::Model { (self.0.model(), self.1.model()) }
@@ -264,7 +280,7 @@ impl<T: Wire> Wire for Option<T> {
 #[allow(inconsistent_fields)]
 enum KindModel {
     Queue { goal: Seq<char> }, Code { goal: Seq<char> },
-    Compaction { goal: Seq<char>, out: Seq<u64> },
+    Compaction { goal: Seq<char>, out: Seq<Hash> },
     Counterexample { goal: Option<(usize, usize)> },
 }
 
@@ -292,7 +308,7 @@ impl Wire for Kind {
     spec fn valid_model(m: Self::Model) -> bool { match m {
         KindModel::Queue { goal } => <Vec<char> as Wire>::valid_model(goal),
         KindModel::Code { goal } => <Vec<char> as Wire>::valid_model(goal),
-        KindModel::Compaction { goal, out } => <(Vec<char>, Vec<u64>) as Wire>::valid_model((goal, out)),
+        KindModel::Compaction { goal, out } => <(Vec<char>, Vec<Hash>) as Wire>::valid_model((goal, out)),
         KindModel::Counterexample { goal } => <Option<AgentProcess> as Wire>::valid_model(goal),
     } }
     proof fn valid(&self) { match self {
@@ -304,13 +320,13 @@ impl Wire for Kind {
     spec fn words(m: Self::Model) -> Seq<u64> { match m {
         KindModel::Queue { goal } => seq![0u64] + <Vec<char> as Wire>::words(goal),
         KindModel::Code { goal } => seq![1u64] + <Vec<char> as Wire>::words(goal),
-        KindModel::Compaction { goal, out } => seq![2u64] + <(Vec<char>, Vec<u64>) as Wire>::words((goal, out)),
+        KindModel::Compaction { goal, out } => seq![2u64] + <(Vec<char>, Vec<Hash>) as Wire>::words((goal, out)),
         KindModel::Counterexample { goal } => seq![3u64] + <Option<AgentProcess> as Wire>::words(goal),
     } }
     spec fn parse(w: Seq<u64>) -> Option<(Self::Model, Seq<u64>)> { if w.len() == 0 { None } else { match w[0] {
         0 => match <Vec<char> as Wire>::parse(w.skip(1)) { Some((goal, tail)) => Some((KindModel::Queue { goal }, tail)), None => None },
         1 => match <Vec<char> as Wire>::parse(w.skip(1)) { Some((goal, tail)) => Some((KindModel::Code { goal }, tail)), None => None },
-        2 => match <(Vec<char>, Vec<u64>) as Wire>::parse(w.skip(1)) { Some(((goal, out), tail)) => Some((KindModel::Compaction { goal, out }, tail)), None => None },
+        2 => match <(Vec<char>, Vec<Hash>) as Wire>::parse(w.skip(1)) { Some(((goal, out), tail)) => Some((KindModel::Compaction { goal, out }, tail)), None => None },
         3 => match <Option<AgentProcess> as Wire>::parse(w.skip(1)) { Some((goal, tail)) => Some((KindModel::Counterexample { goal }, tail)), None => None },
         _ => None,
     } } }
@@ -319,7 +335,7 @@ impl Wire for Kind {
         match m {
         KindModel::Queue { goal } => { <Vec<char> as Wire>::roundtrip(goal, tail); },
         KindModel::Code { goal } => { <Vec<char> as Wire>::roundtrip(goal, tail); },
-        KindModel::Compaction { goal, out } => { <(Vec<char>, Vec<u64>) as Wire>::roundtrip((goal, out), tail); },
+        KindModel::Compaction { goal, out } => { <(Vec<char>, Vec<Hash>) as Wire>::roundtrip((goal, out), tail); },
         KindModel::Counterexample { goal } => { <Option<AgentProcess> as Wire>::roundtrip(goal, tail); },
     } }
     fn write(&self) -> (r: Vec<u64>) { match self {
@@ -331,13 +347,13 @@ impl Wire for Kind {
     fn read(w: &Vec<u64>) -> (r: Option<(Self, Vec<u64>)>) { if w.len() == 0 { return None; } let t = suffix(w, 1); match w[0] {
         0 => match <Vec<char> as Wire>::read(&t) { Some((goal, tail)) => Some((Kind::Queue { goal }, tail)), None => None },
         1 => match <Vec<char> as Wire>::read(&t) { Some((goal, tail)) => Some((Kind::Code { goal }, tail)), None => None },
-        2 => match <(Vec<char>, Vec<u64>) as Wire>::read(&t) { Some(((goal, out), tail)) => Some((Kind::Compaction { goal, out }, tail)), None => None },
+        2 => match <(Vec<char>, Vec<Hash>) as Wire>::read(&t) { Some(((goal, out), tail)) => Some((Kind::Compaction { goal, out }, tail)), None => None },
         3 => match <Option<AgentProcess> as Wire>::read(&t) { Some((goal, tail)) => Some((Kind::Counterexample { goal }, tail)), None => None },
         _ => None,
     } }
 }
 
-type CandidateWire = (Vec<char>, (Vec<char>, (bool, (bool, (Vec<Vec<char>>, (Vec<u64>, (Vec<(u64,Vec<char>)>, (Vec<(i64,bool)>, (bool, (i64, u64))))))))));
+type CandidateWire = (Vec<char>, (Vec<char>, (bool, (bool, (Vec<Vec<char>>, (Vec<Hash>, (Vec<(u64,Vec<char>)>, (Vec<(i64,bool)>, (bool, (i64, u64))))))))));
 impl Wire for Candidate {
     type Model = <CandidateWire as Wire>::Model;
     spec fn model(&self) -> Self::Model { (self.commit.model(), (self.base.model(), (self.accepted.model(), (self.proved.model(), (self.changed.model(), (self.out.model(), (self.intents.model(), (self.accepts.model(), (self.rejects_counterexamples.model(), (self.rank.model(), self.diff.model())))))))))) }
@@ -394,11 +410,12 @@ proof fn text_words(t: Vec<char>)
     singletons(ws);
     assert(t@.map_values(|c: char| seq![c as u32 as u64]) =~= ws.map_values(|x: u64| seq![x]));
 }
-proof fn hashes_words(h: Vec<u64>)
-    ensures <Vec<u64> as Wire>::words(h.model()) == seq![h.len() as u64] + h@,
+proof fn hashes_words(h: Vec<Hash>)
+    ensures <Vec<Hash> as Wire>::words(h.model()) == seq![h.len() as u64] + h@.map_values(|hash: Hash| hash.0),
 {
-    many_matches::<u64>(h@, |x: u64| seq![x]); singletons(h@);
+    many_matches::<Hash>(h@, |x: Hash| seq![x.0]); singletons(h@.map_values(|hash: Hash| hash.0));
     assert(h.model() =~= h@);
+    assert(h@.map_values(|x: Hash| seq![x.0]) =~= h@.map_values(|hash: Hash| hash.0).map_values(|x: u64| seq![x]));
 }
 proof fn texts_words(ts: Vec<Vec<char>>)
     ensures <Vec<Vec<char>> as Wire>::words(ts.model()) == texts(ts@),
@@ -635,6 +652,10 @@ impl Json for u64 {
     spec fn json(&self) -> Seq<char> { string(crate::gates::decimal(*self as nat)) }
     fn emit(&self) -> (r: Vec<char>) { decimal(*self).emit() }
 }
+impl Json for Hash {
+    spec fn json(&self) -> Seq<char> { string(crate::gates::decimal(self.0 as nat)) }
+    fn emit(&self) -> (r: Vec<char>) { decimal(self.0).emit() }
+}
 impl Json for (u64, Vec<char>) {
     spec fn json(&self) -> Seq<char> { crate::gates::array(seq![crate::gates::decimal(self.0 as nat), string(self.1@)]) }
     fn emit(&self) -> (r: Vec<char>) { { let items = vec![decimal(self.0), self.1.emit()]; proof { assert(items@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::decimal(self.0 as nat), string(self.1@)]); } array(&items) } }
@@ -657,7 +678,7 @@ proof {
 }
 let value4 = emit_array(&self.out);
 proof {
-    assert(self.out@.map_values(|x: u64| x.json()) =~= self.out@.map_values(|h: u64| string(crate::gates::decimal(h as nat))));
+    assert(self.out@.map_values(|x: Hash| x.json()) =~= self.out@.map_values(|h: Hash| string(crate::gates::decimal(h.0 as nat))));
     assert(value4@ == hash_strings(self.out@));
 }
 let value5 = emit_array(&self.intents);
@@ -704,7 +725,7 @@ object(&fields) },
         Kind::Compaction { goal, out } => { let value0 = { let value0 = goal.emit();
 let value1 = emit_array(out);
 proof {
-    assert(out@.map_values(|x: u64| x.json()) =~= out@.map_values(|h: u64| string(crate::gates::decimal(h as nat))));
+    assert(out@.map_values(|x: Hash| x.json()) =~= out@.map_values(|h: Hash| string(crate::gates::decimal(h.0 as nat))));
     assert(value1@ == hash_strings(out@));
 }
 let fields = vec![field("goal", &value0), field("out", &value1)];
@@ -788,7 +809,7 @@ mod tests {
             base: vec![], n: 1, checks: vec![], tests: vec![], trusted: vec![], limit: u64::MAX,
             results: vec![Some(Candidate {
                 commit: vec![], base: vec![], accepted: true, proved: true, changed: vec![],
-                out: vec![u64::MAX], intents: vec![], accepts: vec![(i64::MIN, false)],
+                out: vec![Hash(u64::MAX)], intents: vec![], accepts: vec![(i64::MIN, false)],
                 rejects_counterexamples: false, rank: i64::MIN, diff: u64::MAX,
             })],
         };

@@ -192,16 +192,24 @@ pub fn verified_each(s: &Search) -> (v: Vec<bool>)
 }
 
 /// The two outputs are the eq, as the spec sees them.
-fn eq_out(a: &Vec<u64>, b: &Vec<u64>) -> (r: bool)
+fn eq_out(a: &Vec<Hash>, b: &Vec<Hash>) -> (r: bool)
     ensures r == (hashes(a@) == hashes(b@)),
 {
-    let r = a == b;
-    proof {
-        assert(a@ =~= hashes(a@).map_values(|h: nat| h as u64));
-        assert(b@ =~= hashes(b@).map_values(|h: nat| h as u64));
-        if r { assert(hashes(a@) =~= hashes(b@)); }
+    if a.len() != b.len() { return false; }
+    let mut i = 0;
+    while i < a.len()
+        invariant a.len() == b.len(), 0 <= i <= a.len(),
+            forall|j: int| 0 <= j < i ==> a@[j].0 == b@[j].0,
+        decreases a.len() - i,
+    {
+        if a[i].0 != b[i].0 {
+            assert(hashes(a@)[i as int] != hashes(b@)[i as int]);
+            return false;
+        }
+        i += 1;
     }
-    r
+    assert(hashes(a@) =~= hashes(b@));
+    true
 }
 
 /// The verified candidate at index i of a complete search.
@@ -261,7 +269,7 @@ pub fn selected(s: &Search) -> (r: Option<usize>)
     };
     // Every verified candidate prints the reference: the first verified
     // candidate's output for code, the goal's for compaction.
-    let reference: &Vec<u64> = match &s.kind {
+    let reference: &Vec<Hash> = match &s.kind {
         Kind::Compaction { out, .. } => out,
         _ => { let c = candidate(s, f); &c.out },
     };
