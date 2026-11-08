@@ -202,6 +202,7 @@ pub open spec fn verified(search: Search, candidate: Candidate) -> bool {
     && (search.kind is Compaction ==> candidate.rejects_counterexamples)
 }
 
+/// Index i of search has a candidate, and it is verified.
 pub open spec fn verified_at(search: Search, i: int) -> bool {
     0 <= i < search.n && search.results.contains_key(i) && search.results[i] is Some && verified(search, at(search, i))
 }

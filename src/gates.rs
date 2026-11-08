@@ -132,10 +132,12 @@ impl View for Search {
 
 // ── conversions ─────────────────────────────────────────
 
+/// Exec paths as the spec's set of paths.
 pub open spec fn paths(s: Seq<Path>) -> Set<spec::Path> {
     s.map_values(|p: Path| p@).to_set()
 }
 
+/// Exec hashes as the spec's naturals, in order.
 pub open spec fn hashes(s: Seq<u64>) -> Seq<nat> {
     s.map_values(|h: u64| h as nat)
 }
@@ -197,6 +199,7 @@ pub open spec fn kind_words(k: Kind) -> Seq<u64> {
     }
 }
 
+/// A bool as a word: 1 for true, 0 for false.
 pub open spec fn bit(b: bool) -> u64 { if b { 1u64 } else { 0u64 } }
 
 /// A candidate, field by field in declaration order; a bool is 0 or 1, and
@@ -282,14 +285,17 @@ pub open spec fn object(fields: Seq<Seq<char>>) -> Seq<char> {
     seq!['{'] + joined(fields) + seq!['}']
 }
 
+/// A bool as JSON: true or false.
 pub open spec fn boolean(b: bool) -> Seq<char> {
     if b { seq!['t', 'r', 'u', 'e'] } else { seq!['f', 'a', 'l', 's', 'e'] }
 }
 
+/// Texts as a JSON array of strings.
 pub open spec fn strings(ts: Seq<Vec<char>>) -> Seq<char> {
     array(ts.map_values(|t: Vec<char>| string(t@)))
 }
 
+/// Hashes as a JSON array of decimal strings.
 pub open spec fn hash_strings(hs: Seq<u64>) -> Seq<char> {
     array(hs.map_values(|h: u64| string(decimal(h as nat))))
 }
