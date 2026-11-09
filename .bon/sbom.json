@@ -99,9 +99,9 @@
     },
     {
       "name": "best-of-n",
-      "purl": "pkg:cargo/best-of-n@0.3.0",
+      "purl": "pkg:cargo/best-of-n@0.4.0",
       "type": "library",
-      "version": "0.3.0"
+      "version": "0.4.0"
     },
     {
       "hashes": [
@@ -2524,7 +2524,7 @@
     "properties": [
       {
         "name": "bon:version",
-        "value": "0.3.0"
+        "value": "0.4.0"
       },
       {
         "name": "bon:trusted-file",
