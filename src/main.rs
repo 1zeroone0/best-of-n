@@ -695,10 +695,6 @@ fn holes(root: &Path, declared: &[String]) -> Vec<String> {
             }
         }
     }
-    let skips = |l: &str| {
-        let call = |w: &str| l.match_indices(w).any(|(i, _)| !l[..i].ends_with(|c: char| c.is_alphanumeric() || c == '_'));
-        l.contains("#[verifier::external") || call("assume(") || call("admit(")
-    };
     let mut files = Vec::new();
     walk(root, root, &mut files);
     files.sort();
@@ -707,12 +703,89 @@ fn holes(root: &Path, declared: &[String]) -> Vec<String> {
         let rel = f.to_string_lossy().to_string();
         if declared.iter().any(|d| rel == *d || rel.starts_with(&format!("{}/", d.trim_end_matches('/')))) { continue; }
         let Ok(text) = std::fs::read_to_string(root.join(&f)) else { continue };
-        for (n, l) in text.lines().enumerate() {
-            let l = l.trim();
-            if !l.starts_with("//") && skips(l) { found.push(format!("{rel}:{}", n + 1)); }
-        }
+        for n in skips(&text) { found.push(format!("{rel}:{n}")); }
     }
     found
+}
+
+/// The lines of Rust source `text` that skip a proof, read by tokens: a call of
+/// `assume` or `admit`, an `assume_specification`, or a `verifier::external…`
+/// or `verifier(external…)` attribute. Comments and literals are not code.
+fn skips(text: &str) -> Vec<usize> {
+    // Tokens: identifiers and single punctuation, each with its line.
+    let c: Vec<char> = text.chars().collect();
+    let ident = |ch: char| ch.is_alphanumeric() || ch == '_';
+    let mut tokens: Vec<(String, usize)> = Vec::new();
+    let (mut i, mut line) = (0, 1);
+    // Skips past the closing `"` of a string whose body starts at `j`; raw
+    // strings (`hashes` is Some) have no escapes.
+    let string_end = |mut j: usize, hashes: Option<usize>, line: &mut usize| -> usize {
+        while j < c.len() {
+            match (c[j], hashes) {
+                ('\n', _) => { *line += 1; j += 1; }
+                ('\\', None) => { if c.get(j + 1) == Some(&'\n') { *line += 1; } j += 2; }
+                ('"', None) => return j + 1,
+                ('"', Some(h)) if c[j + 1..].iter().take(h).filter(|&&x| x == '#').count() == h => return j + 1 + h,
+                _ => j += 1,
+            }
+        }
+        j
+    };
+    while i < c.len() {
+        let ch = c[i];
+        let next = c.get(i + 1).copied();
+        if ch == '\n' { line += 1; i += 1; }
+        else if ch.is_whitespace() { i += 1; }
+        else if ch == '/' && next == Some('/') { while i < c.len() && c[i] != '\n' { i += 1; } }
+        else if ch == '/' && next == Some('*') {
+            let mut depth = 0;
+            while i < c.len() {
+                if c[i] == '/' && c.get(i + 1) == Some(&'*') { depth += 1; i += 2; }
+                else if c[i] == '*' && c.get(i + 1) == Some(&'/') { depth -= 1; i += 2; if depth == 0 { break; } }
+                else { if c[i] == '\n' { line += 1; } i += 1; }
+            }
+        }
+        else if ch == '"' { i = string_end(i + 1, None, &mut line); }
+        else if ch == '\'' {
+            // A char literal, or a lifetime (no closing quote right after one char).
+            if next == Some('\\') { i += 3; while i < c.len() && c[i] != '\'' { i += 1; } i += 1; }
+            else if c.get(i + 2) == Some(&'\'') { i += 3; }
+            else { i += 1; }
+        }
+        else if ident(ch) {
+            let start = i;
+            while i < c.len() && ident(c[i]) { i += 1; }
+            let word: String = c[start..i].iter().collect();
+            // String prefixes: b"…", r"…", r#"…"#, br#"…"#, c"…", b'…'.
+            let raw = matches!(word.as_str(), "r" | "br" | "cr");
+            let hashes = c[i..].iter().take_while(|&&x| x == '#').count();
+            if raw && c.get(i + hashes) == Some(&'"') { i = string_end(i + hashes + 1, Some(hashes), &mut line); }
+            else if matches!(word.as_str(), "b" | "c") && c.get(i) == Some(&'"') { i = string_end(i + 1, None, &mut line); }
+            else if word == "b" && c.get(i) == Some(&'\'') {
+                i += 1;
+                if c.get(i) == Some(&'\\') { i += 1; }
+                while i < c.len() && c[i] != '\'' { i += 1; }
+                i += 1;
+            }
+            else { tokens.push((word, line)); }
+        }
+        else { tokens.push((ch.to_string(), line)); i += 1; }
+    }
+    let t = |k: usize| tokens.get(k).map_or("", |(s, _)| s.as_str());
+    let mut lines = Vec::new();
+    for (k, (word, n)) in tokens.iter().enumerate() {
+        let call = matches!(word.as_str(), "assume" | "admit") && t(k + 1) == "(" && (k == 0 || t(k - 1) != "fn");
+        let specification = word == "assume_specification";
+        // #[verifier::external…] or #[verifier(external…)], also as an inner #![…].
+        let attribute = word == "#" && {
+            let a = if t(k + 1) == "!" { k + 2 } else { k + 1 };
+            t(a) == "[" && t(a + 1) == "verifier"
+                && ((t(a + 2) == ":" && t(a + 3) == ":" && t(a + 4).starts_with("external"))
+                    || (t(a + 2) == "(" && t(a + 3).starts_with("external")))
+        };
+        if (call || specification || attribute) && lines.last() != Some(n) { lines.push(*n); }
+    }
+    lines
 }
 
 fn sbom(root: &str, check: bool) -> Result<(), String> {
@@ -981,5 +1054,26 @@ mod tests {
         let declared = vec!["src/trusted.rs".to_string(), "src/spec.rs".to_string()];
         assert_eq!(holes(&d, &declared), vec!["src/exec.rs:2", "src/exec.rs:4"]);
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_skipped_proof_is_found_by_tokens_in_every_spelling() {
+        assert_eq!(skips("proof fn a() { assume (false); }"), [1]);
+        assert_eq!(skips("proof fn a() {\n    assume\n        (false);\n}"), [2]);
+        assert_eq!(skips("fn a() {}\n#[verifier(external_body)]\nfn b() {}"), [2]);
+        assert_eq!(skips("#![verifier::external]\n"), [1]);
+        assert_eq!(skips("pub assume_specification<T> [ f ] (x: T);"), [1]);
+        assert_eq!(skips("proof fn a() { admit\t(); }"), [1]);
+    }
+
+    #[test]
+    fn comments_and_literals_skip_no_proof() {
+        assert!(skips("// assume(false);\nfn a() {}").is_empty());
+        assert!(skips("/* admit(); /* nested */ assume(x) */ fn a() {}").is_empty());
+        assert!(skips("/// #[verifier::external_body]\nfn a() {}").is_empty());
+        assert!(skips(r##"fn a() { let s = "assume(false)"; let r = r#"admit()"#; let b = b"assume("; }"##).is_empty());
+        assert!(skips("fn a<'x>(c: char) -> bool { c == '\"' || c == '\\'' } fn assume_x() {} fn assume(b: bool) {}").is_empty());
+        // Lines count across what is skipped.
+        assert_eq!(skips("/* a\nb */ \"c\nd\"\n'\\n' assume(false);"), [4]);
     }
 }
