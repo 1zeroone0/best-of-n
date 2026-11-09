@@ -42,10 +42,15 @@ fn main() {
         Err(e) => fail(&format!("not in a git repository: {e}")),
     };
     let command = args.first().map(String::as_str).unwrap_or("");
-    // In bon's own repository the installed bon decides with the gates it was built from.
-    if git(Path::new(&root), &["show", "HEAD:Cargo.toml"]).is_ok_and(|t| t.contains("name = \"best-of-n\""))
-        && git(Path::new(&root), &["show", "HEAD:src/gates.rs"]).is_ok_and(|g| stale(&g)) {
-        eprintln!("bon: this bon was built from other gates than trunk's; reinstall: cargo install --path . --locked");
+    // In bon's own repository the installed bon decides with the kernel it was
+    // built from; trunk is what the last fetch or push left in the remote's ref.
+    let (remote, branch) = best_of_n::trusted::remote_trunk(Path::new(&root));
+    let at_trunk = |p: &str| git(Path::new(&root), &["show", &format!("refs/remotes/{remote}/{branch}:{p}")]).ok();
+    if at_trunk("Cargo.toml").is_some_and(|t| t.contains("name = \"best-of-n\"")) {
+        let differ = stale(at_trunk);
+        if !differ.is_empty() {
+            eprintln!("bon: this bon was built from another kernel than trunk's ({}); reinstall: cargo install --path . --locked", differ.join(", "));
+        }
     }
     // Before a search: every harness it may run is logged in as agent, or the command that fixes it.
     if SEARCHES.contains(&command) {
@@ -230,8 +235,20 @@ fn check(root: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether trunk's gates differ from the ones this bon was built from.
-fn stale(trunk_gates: &str) -> bool { trunk_gates.trim_end() != include_str!("gates.rs").trim_end() }
+/// The kernel this bon was built from: the spec, the gates and their implementation.
+const KERNEL: [(&str, &str); 5] = [
+    ("src/spec.rs", include_str!("spec.rs")),
+    ("src/gates.rs", include_str!("gates.rs")),
+    ("src/exec.rs", include_str!("exec.rs")),
+    ("src/encoding.rs", include_str!("encoding.rs")),
+    ("src/process.rs", include_str!("process.rs")),
+];
+
+/// The kernel's files whose trunk version (read by `trunk`, None if missing)
+/// differs from the one this bon was built from.
+fn stale(trunk: impl Fn(&str) -> Option<String>) -> Vec<&'static str> {
+    KERNEL.iter().filter(|(p, built)| trunk(p).is_none_or(|t| t.trim_end() != built.trim_end())).map(|(p, _)| *p).collect()
+}
 
 /// .bon/cost.toml: the totals at the top of bon's view, always these keys in
 /// this order. Generation stands on its own beside the total, which engineer's
@@ -992,9 +1009,12 @@ mod tests {
     }
 
     #[test]
-    fn bon_notices_its_own_gates_are_stale() {
-        assert!(!stale(include_str!("gates.rs")));
-        assert!(stale("pub trait Gates {}"));
+    fn bon_notices_its_own_kernel_is_stale() {
+        let built = |p: &str| KERNEL.iter().find(|(k, _)| *k == p).map(|(_, t)| t.to_string());
+        assert!(stale(built).is_empty());
+        assert_eq!(stale(|p| if p == "src/exec.rs" { Some("fn f() {}".into()) } else { built(p) }), ["src/exec.rs"]);
+        assert_eq!(stale(|p| if p == "src/spec.rs" { None } else { built(p) }), ["src/spec.rs"]);
+        assert_eq!(stale(|_| None).len(), 5);
     }
 
     #[test]

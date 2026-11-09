@@ -801,7 +801,7 @@ pub fn land(m: &Manifest, x: &Search, i: usize, t: Option<&Search>) -> (r: Resul
 /// The remote and trunk the manifest names (default origin and main), read
 /// from the commit checked out: names only, so any branch will do.
 #[verifier::external]
-fn remote_trunk(root: &std::path::Path) -> (String, String) {
+pub fn remote_trunk(root: &std::path::Path) -> (String, String) {
     let manifest: Option<toml::Value> = git(root, &["show", &format!("HEAD:{BON}/bon.toml")]).ok().and_then(|t| toml::from_str(&t).ok());
     let key = |k: &str, d: &str| manifest.as_ref().and_then(|m| m.get(k)).and_then(|v| v.as_str()).unwrap_or(d).to_string();
     (key("remote", "origin"), key("trunk", "main"))
