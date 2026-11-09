@@ -95,6 +95,8 @@ class Projection(TypedDict):
     groups: list[GoalTrace]
     # What is wanted and not yet in the spec.
     queue: list[QueueLine] | None
+    # Queue proposals waiting for engineer: patches bon queue wrote.
+    proposals: list[Proposal]
     filter: Filter
     bounds: Bounds
     spec: SpecOutline | None
@@ -243,6 +245,22 @@ class Facts(TypedDict):
     flags: list[str]
     logs: list[str]
     changed: list[str]
+    # A hash of each agree check's output: candidates with the same agree.
+    out: list[int]
+
+# A queue proposal: a patch adding intents, each with the cue it came from.
+class Proposal(TypedDict):
+    name: str
+    path: str
+    source: str
+    intents: list[ProposedIntent]
+    # Cues only one candidate cited, shown apart from the proposal.
+    contested: list[str]
+
+class ProposedIntent(TypedDict):
+    id: int | None
+    intent: str
+    cue: str | None
 
 # One line of the queue.
 class QueueLine(TypedDict):
@@ -308,10 +326,14 @@ class SpecNode(TypedDict):
     uses: list[str]
     trusted: list[str]
     proof: bool
+    # A gate's contract, each clause as written.
+    requires: list[str]
+    ensures: list[str]
 
 # A function in trusted code the bon process calls.
 class TrustedFunction(TypedDict):
     name: str
+    file: str
     line: int
     doc: str | None
     changed: bool

@@ -25,7 +25,8 @@ const USAGE: &str = "usage:
                           create user agent and group bon, and let <user> (default: you) run commands as agent;
                           run it as an administrator
   bon sbom [--check]      write .bon/sbom.json, or fail if it differs from this machine
-  bon types [--check]     write the types programs are built on, or fail if one is stale";
+  bon types [--check]     write the types programs are built on, or fail if one is stale
+  bon spec [NAME]         the spec's vocabulary and how it reaches the code, or one item";
 
 /// The commands that grant capabilities.
 const SEARCHES: [&str; 5] = ["code", "compaction", "counterexample", "queue", "background"];
@@ -64,7 +65,8 @@ fn dispatch(root: &str, args: &[String]) -> Result<(), String> {
             let size = args.iter().position(|a| a == "--frame").and_then(|i| args.get(i + 1)).cloned().unwrap_or("120x32".into());
             let (w, h) = size.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))).ok_or("--frame WxH")?;
             let tab = args.iter().position(|a| a == "--tab").and_then(|i| args.get(i + 1)).and_then(|t| t.parse::<usize>().ok()).unwrap_or(4);
-            print!("{}", tui::frame(&root, w, h, tab.saturating_sub(1), args.iter().any(|a| a == "--light"))?);
+            let focus = args.iter().position(|a| a == "--focus").and_then(|i| args.get(i + 1)).and_then(|t| t.parse::<usize>().ok()).unwrap_or(0);
+            print!("{}", tui::frame(&root, w, h, tab.saturating_sub(1), focus, args.iter().any(|a| a == "--light"))?);
             Ok(())
         }
         Some("view") if args.iter().any(|a| a == "--typed") => {
@@ -90,6 +92,7 @@ fn dispatch(root: &str, args: &[String]) -> Result<(), String> {
         }
         Some("sbom") => sbom(&root, args.get(1).map(String::as_str) == Some("--check")),
         Some("types") => types::run(&root, args.get(1).map(String::as_str) == Some("--check")),
+        Some("spec") => { print!("{}", tui::spec_text(&root, args.get(1).map(String::as_str), 100)?); Ok(()) }
         Some("help" | "-h" | "--help") => { println!("{USAGE}"); Ok(()) }
         None if tui::wanted() => tui::run(&root, view::Filter::args(args)?),
         None => status(&root, args),
@@ -365,7 +368,7 @@ fn queue(root: &str) -> Result<(), String> {
             cues.push((id, *cue));
             id += 1;
         }
-        let commit = proposal(r, &head, &text, &rel, &cues)?;
+        let commit = proposal(r, &head, &text, &rel, &cues, &contested)?;
         let name = p.file_stem().unwrap().to_string_lossy().to_string();
         let file = r.join(".bon/traces/proposals").join(format!("{name}.patch"));
         std::fs::create_dir_all(file.parent().unwrap()).map_err(|e| e.to_string())?;
@@ -388,7 +391,7 @@ fn next_id(root: &Path) -> u64 {
 /// A commit on `head` whose queue is `text`, citing the transcript and, for
 /// each new intent, the cue it came from. No ref keeps it: its patch is the
 /// proposal, and `git am` keeps its trailers.
-fn proposal(root: &Path, head: &str, text: &str, source: &str, cues: &[(u64, u64)]) -> Result<String, String> {
+fn proposal(root: &Path, head: &str, text: &str, source: &str, cues: &[(u64, u64)], contested: &[u64]) -> Result<String, String> {
     let blob = {
         let mut c = Command::new("git").args(["hash-object", "-w", "--stdin"]).current_dir(root)
             .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().map_err(|e| e.to_string())?;
@@ -406,7 +409,7 @@ fn proposal(root: &Path, head: &str, text: &str, source: &str, cues: &[(u64, u64
     with(&["update-index", "--add", "--cacheinfo", &format!("100644,{blob},.bon/queue.tsv")])?;
     let tree = with(&["write-tree"])?;
     let _ = std::fs::remove_file(&index);
-    let cited: String = cues.iter().map(|(id, cue)| format!("Cue: {id} {source}#{cue}\n")).collect();
+    let cited: String = cues.iter().map(|(id, cue)| format!("Cue: {id} {source}#{cue}\n")).chain(contested.iter().map(|c| format!("Contested: {source}#{c}\n"))).collect();
     git(root, &["commit-tree", &tree, "-p", head, "-m", &format!("queue: {source}\n\nSource: {source}\n{cited}")])
 }
 
@@ -706,9 +709,9 @@ mod tests {
         sh(&["add", "."]);
         sh(&["commit", "-q", "-m", "base"]);
         let head = sh(&["rev-parse", "HEAD"]);
-        let c = proposal(&d, &head, "id\tintent\n7\tone\n8\ttwo\n", "transcripts/a.vtt", &[(7, 1200), (8, 64500)]).unwrap();
+        let c = proposal(&d, &head, "id\tintent\n7\tone\n8\ttwo\n", "transcripts/a.vtt", &[(7, 1200), (8, 64500)], &[90000]).unwrap();
         let trailers = git(&d, &["log", "-1", "--format=%(trailers)", &c]).unwrap();
-        assert_eq!(trailers.trim(), "Source: transcripts/a.vtt\nCue: 7 transcripts/a.vtt#1200\nCue: 8 transcripts/a.vtt#64500");
+        assert_eq!(trailers.trim(), "Source: transcripts/a.vtt\nCue: 7 transcripts/a.vtt#1200\nCue: 8 transcripts/a.vtt#64500\nContested: transcripts/a.vtt#90000");
         let _ = std::fs::remove_dir_all(&d);
     }
 

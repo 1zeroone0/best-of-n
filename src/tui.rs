@@ -116,11 +116,36 @@ fn fit(s: &str, w: usize) -> String {
 enum Tab { Project, Spec, Queue, Traces }
 const TABS: [Tab; 4] = [Tab::Project, Tab::Spec, Tab::Queue, Tab::Traces];
 
-/// One row of a list: what it shows, and whether it can be focused.
-struct Row { line: Line<'static>, focusable: bool }
+/// What a focusable row stands for, so its detail is found by key, not by position.
+#[derive(Clone, PartialEq)]
+enum Key { Goal(usize), Queue(usize), Proposal(usize), Item(usize), Grid, Trusted(usize), Sbom(&'static str) }
+
+/// One row of a list: what it shows, and the item it stands for, if it can be focused.
+struct Row { line: Line<'static>, key: Option<Key> }
+impl Row {
+    fn text(line: Line<'static>) -> Row { Row { line, key: None } }
+    fn focusable(&self) -> bool { self.key.is_some() }
+}
+
+/// What covers the body: a list of logs, one log, or two outputs side by side.
+enum Overlay {
+    None,
+    Logs { items: Vec<(String, std::path::PathBuf)>, sel: usize },
+    Text { title: String, lines: Vec<String>, top: usize },
+    Compare { titles: (String, String), left: Vec<String>, right: Vec<String>, top: usize },
+}
+
+/// The time ranges r cycles through, as the page offers them.
+const RANGES: [(&str, i64); 4] = [("all time", 0), ("24 hours", 86400), ("7 days", 7 * 86400), ("30 days", 30 * 86400)];
 
 struct App {
     p: Projection,
+    root: std::path::PathBuf,
+    overlay: Overlay,
+    /// Text being typed after /, for find.
+    input: Option<String>,
+    range: usize,
+    filter: std::sync::Arc<std::sync::Mutex<view::Filter>>,
     error: Option<String>,
     tab: Tab,
     /// Focused row and first visible row, per tab.
@@ -140,7 +165,8 @@ struct App {
 impl App {
     fn new() -> App {
         let dark = std::env::var("BON_THEME").map_or(true, |t| t != "light");
-        App { p: Projection::default(), error: None, tab: Tab::Traces, focus: [0; 4], top: [0; 4], detail_top: 0, detail_open: false,
+        App { p: Projection::default(), root: ".".into(), overlay: Overlay::None, input: None, range: 0, filter: Default::default(),
+              error: None, tab: Tab::Traces, focus: [0; 4], top: [0; 4], detail_top: 0, detail_open: false,
               keys: false, palette: if dark { DARK } else { LIGHT }, dark, off: local_offset(), loaded: None }
     }
     fn ti(&self) -> usize { TABS.iter().position(|t| *t == self.tab).unwrap_or(0) }
@@ -171,7 +197,7 @@ fn steps(g: &GoalTrace, tight: bool) -> String {
         if let Some(i) = m.selected { out.push(format!("#{i}")); }
     }
     if let Some(ce) = last.searches.iter().rev().find(|s| s.kind == "counterexample") {
-        out.push(match g.outcome.as_str() { "found" => "found".into(), _ if ce.verified >= 2 => "none found".into(), _ => format!("{} tests", ce.verified) });
+        out.push(match g.outcome.as_str() { "found" => "found".into(), _ if ce.verified >= 2 => "none found".into(), _ => format!("{} of 2 tests", ce.verified) });
     }
     if let Some(c) = g.push.as_ref().and_then(|p| p.commit.as_deref()) { out.push(short(c)); }
     if tight {
@@ -187,16 +213,16 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
     let p = &app.p;
     let w = width as usize;
     let mut out = Vec::new();
-    let header = |t: &str| Row { line: Line::from(Span::styled(format!(" {t}"), pal.faint().add_modifier(Modifier::BOLD))), focusable: false };
+    let header = |t: &str| Row::text(Line::from(Span::styled(format!(" {t}"), pal.faint().add_modifier(Modifier::BOLD))));
     match app.tab {
         Tab::Traces => {
             let today = day(p.repo.now, app.off);
             let mut last_day = None;
             let mut groups: Vec<&GoalTrace> = p.groups.iter().collect();
             groups.sort_by_key(|g| (!g.running, -g.time));
-            for g in groups {
+            for (gi, g) in groups.into_iter().enumerate() {
                 let d = if g.running { today } else { day(g.time, app.off) };
-                if last_day != Some(d) { if last_day.is_some() { out.push(Row { line: Line::default(), focusable: false }); } out.push(header(&day_label(d, today))); last_day = Some(d); }
+                if last_day != Some(d) { if last_day.is_some() { out.push(Row::text(Line::default())); } out.push(header(&day_label(d, today))); last_day = Some(d); }
                 let tone = pal.tone(outcome_tone(&g.outcome));
                 let cost = money(g.push.as_ref().and_then(|p| p.cost).or(Some(g.cost)));
                 let label = if g.outcome == "not found" { "none found".to_string() } else { g.outcome.clone() };
@@ -218,40 +244,106 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
                 ]);
                 if with_steps { spans.push(Span::styled(fit(&steps(g, !who_col), rest), pal.muted())); }
                 spans.push(Span::styled(format!("{:>8}", cost), pal.ink()));
-                out.push(Row { line: Line::from(spans), focusable: true });
+                out.push(Row { line: Line::from(spans), key: Some(Key::Goal(gi)) });
             }
-            if p.groups.is_empty() { out.push(Row { line: Line::from(Span::styled(" No bon process yet.", pal.muted())), focusable: false }); }
+            if p.groups.is_empty() { out.push(Row::text(Line::from(Span::styled(" No bon process yet.", pal.muted())))); }
         }
         Tab::Queue => {
-            for q in p.queue.iter().flatten() {
-                out.push(Row { line: Line::from(vec![Span::styled(format!(" {:>3}  ", q.id), pal.faint()), Span::styled(fit(&q.intent, w.saturating_sub(7)), pal.ink())]), focusable: true });
+            if !p.proposals.is_empty() {
+                out.push(header(&format!("proposed  {}", p.proposals.len())));
+                for (pi, pr) in p.proposals.iter().enumerate() {
+                    out.push(Row { line: Line::from(vec![Span::styled("  ● ", pal.tone(Tone::Yellow)), Span::styled(fit(&pr.source, w.saturating_sub(24)), pal.ink()),
+                        Span::styled(format!("  {} new{}", pr.intents.len(), if pr.contested.is_empty() { String::new() } else { format!(", {} contested", pr.contested.len()) }), pal.muted())]), key: Some(Key::Proposal(pi)) });
+                }
+                out.push(Row::text(Line::default()));
+                out.push(header(&format!("queued  {}", p.queue.as_ref().map_or(0, |q| q.len()))));
             }
-            if p.queue.as_ref().is_none_or(|q| q.is_empty()) { out.push(Row { line: Line::from(Span::styled(" Nothing queued: every intent is in the spec.", pal.muted())), focusable: false }); }
+            for (qi, q) in p.queue.iter().flatten().enumerate() {
+                out.push(Row { line: Line::from(vec![Span::styled(format!(" {:>3}  ", q.id), pal.faint()), Span::styled(fit(&q.intent, w.saturating_sub(7)), pal.ink())]), key: Some(Key::Queue(qi)) });
+            }
+            if p.queue.as_ref().is_none_or(|q| q.is_empty()) { out.push(Row::text(Line::from(Span::styled(" Nothing queued: every intent is in the spec.", pal.muted())))); }
         }
         Tab::Spec => {
-            let Some(spec) = &p.spec else { out.push(Row { line: Line::from(Span::styled(" No spec found.", pal.muted())), focusable: false }); return out };
+            let Some(spec) = &p.spec else { out.push(Row::text(Line::from(Span::styled(" No spec found.", pal.muted())))); return out };
+            let g = p.system.clone().unwrap_or_default();
             let nw = spec.items.iter().map(|i| i.name.chars().count()).chain(spec.fields.iter().map(|f| f.name.chars().count())).max().unwrap_or(10).min(24) + 2;
-            for (kind, title) in [("type", "types"), ("init", "init"), ("transition", "transitions"), ("predicate", "predicates"), ("property", "properties"), ("invariant", "invariants")] {
-                let items: Vec<_> = spec.items.iter().filter(|i| i.kind == kind).collect();
-                if items.is_empty() { continue; }
-                if !out.is_empty() { out.push(Row { line: Line::default(), focusable: false }); }
-                out.push(header(&format!("{title}  {}", items.len())));
-                for i in items {
-                    let doc = i.doc.clone().unwrap_or_default();
-                    out.push(Row { line: Line::from(vec![Span::styled(format!("   {}", fit(&i.name, nw)), pal.ink()), Span::styled(fit(&doc, w.saturating_sub(nw + 4)), pal.muted())]), focusable: true });
-                }
-            }
+            let item = |i: usize, rest: Vec<Span<'static>>| { let mut v = vec![Span::styled(format!("   {}", fit(&spec.items[i].name, nw)), pal.ink())]; v.extend(rest); Row { line: Line::from(v), key: Some(Key::Item(i)) } };
+            let doc_of = |i: usize, room: usize| Span::styled(fit(&spec.items[i].doc.clone().unwrap_or_default(), room), pal.muted());
+            let of = |kind: &str| spec.items.iter().enumerate().filter(|(_, x)| x.kind == kind).map(|(i, _)| i).collect::<Vec<_>>();
+            let room = w.saturating_sub(nw + 4);
+            let summary = format!(" {} · {} types · {} predicates · {} transitions · {} invariants{}", spec.path, of("type").len(), of("predicate").len(), of("transition").len() + of("init").len(), of("invariant").len(),
+                { let d = g.nodes.iter().filter(|n| n.changed).count(); if d > 0 { format!(" · {d} differ from trunk") } else { String::new() } });
+            out.push(Row::text(Line::from(Span::styled(fit(&summary, w), pal.muted()))));
+            out.push(Row::text(Line::default()));
+
+            out.push(header(&format!("vocabulary  {}", of("type").len())));
+            for i in of("type") { out.push(item(i, vec![doc_of(i, room)])); }
+
+            out.push(Row::text(Line::default()));
+            let ts: Vec<usize> = of("init").into_iter().chain(of("transition")).collect();
+            out.push(header(&format!("state machine  {} fields · {} transitions", spec.fields.len(), ts.len())));
             if !spec.fields.is_empty() {
-                out.push(Row { line: Line::default(), focusable: false });
-                out.push(header(&format!("state  {}", spec.fields.len())));
-                for f in &spec.fields {
-                    out.push(Row { line: Line::from(vec![Span::styled(format!("   {}", fit(&f.name, nw)), pal.ink()), Span::styled(fit(&f.r#type, w.saturating_sub(nw + 4)), pal.muted())]), focusable: true });
+                let names = spec.fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join(" · ");
+                out.push(Row { line: Line::from(vec![Span::styled(format!("   {}", fit("fields", nw)), pal.ink()), Span::styled(fit(&names, room), pal.muted())]), key: Some(Key::Grid) });
+            }
+            for i in ts { out.push(item(i, vec![doc_of(i, room)])); }
+
+            out.push(Row::text(Line::default()));
+            out.push(header("spec → code"));
+            // For a predicate a gate decides, which layers reach it: gate · implementation · target · program.
+            let layers = |name: &str| -> Option<[Option<String>; 4]> {
+                let gate = format!("gate:{name}");
+                if !g.edges.iter().any(|e| e.0 == gate && e.1 == format!("spec:{name}")) { return None; }
+                let kernel = format!("kernel:{name}");
+                let imp = g.edges.iter().any(|e| e.0 == kernel && e.1 == gate);
+                let target = g.edges.iter().find(|e| e.1 == kernel && e.0.starts_with("target:")).and_then(|e| g.nodes.iter().find(|n| n.id == e.0)).map(|n| n.group.clone());
+                let program = g.edges.iter().find(|e| e.0.starts_with("program:") && g.edges.iter().any(|t| t.0 == e.1 && t.1 == kernel && e.1.starts_with("target:"))).and_then(|e| g.nodes.iter().find(|n| n.id == e.0))
+                    .map(|n| std::path::Path::new(&n.file).file_name().map_or(n.file.clone(), |f| f.to_string_lossy().to_string()));
+                Some([Some("gate".into()), imp.then(|| "impl".into()), target, program])
+            };
+            let mut decided: Vec<usize> = of("predicate").into_iter().filter(|i| layers(&spec.items[*i].name).is_some()).collect();
+            decided.sort_by_key(|i| spec.items[*i].name.clone());
+            for i in &decided {
+                let ls = layers(&spec.items[*i].name).unwrap();
+                let cells: Vec<Span<'static>> = ls.iter().zip([5usize, 5, 7, 10]).map(|(c, cw)| match c {
+                    Some(x) => Span::styled(fit(x, cw), pal.ink()),
+                    None => Span::styled(fit("·", cw), pal.faint()),
+                }).collect();
+                let mut row = vec![];
+                if w >= nw + 4 + 27 { row.extend(cells); } else { row.push(Span::styled(ls.iter().map(|c| if c.is_some() { '●' } else { '·' }).collect::<String>(), pal.ink())); }
+                out.push(item(*i, row));
+            }
+            let rest: Vec<usize> = of("predicate").into_iter().filter(|i| !decided.contains(i)).collect();
+            if !rest.is_empty() {
+                out.push(Row::text(Line::from(Span::styled(format!("   {} more predicates, defined in the spec", rest.len()), pal.faint()))));
+                for i in rest { out.push(item(i, vec![doc_of(i, room)])); }
+            }
+
+            let rules: Vec<usize> = of("invariant").into_iter().chain(of("property")).collect();
+            if !rules.is_empty() {
+                out.push(Row::text(Line::default()));
+                out.push(header(&format!("invariants and properties  {}", rules.len())));
+                for i in rules { out.push(item(i, vec![doc_of(i, room)])); }
+            }
+
+            out.push(Row::text(Line::default()));
+            out.push(header("rests on"));
+            for (ti, t) in g.trusted.iter().enumerate() {
+                out.push(Row { line: Line::from(vec![Span::styled("  ┆", pal.faint()), Span::styled(format!("{}", fit(&t.name, nw)), pal.ink()), Span::styled(fit(&format!("{}:{}  {}", t.file, t.line, t.doc.clone().unwrap_or_default()), room), pal.muted())]), key: Some(Key::Trusted(ti)) });
+            }
+            if let Some(sb) = &p.sbom {
+                let comps = &sb.document.components;
+                let tools: Vec<String> = comps.iter().filter(|c| c.group.as_deref() == Some("tcb")).map(|c| c.name.clone()).collect();
+                let crates = comps.iter().filter(|c| c.r#type == "library").count();
+                let services: Vec<String> = sb.document.services.iter().map(|s| s.name.clone()).collect();
+                for (k, label, v) in [("tools", "tools", tools.join(" · ")), ("services", "services", services.join(" · ")), ("crates", "crates", format!("{crates}"))] {
+                    out.push(Row { line: Line::from(vec![Span::styled(format!("   {}", fit(label, nw)), pal.ink()), Span::styled(fit(&v, room), pal.muted())]), key: Some(Key::Sbom(k)) });
                 }
             }
         }
         Tab::Project => {
             let t = &p.totals;
-            let line = |label: &str, value: Vec<Span<'static>>| { let mut v = vec![Span::styled(format!(" {} ", fit(label, 16)), pal.muted())]; v.extend(value); Row { line: Line::from(v), focusable: false } };
+            let line = |label: &str, value: Vec<Span<'static>>| { let mut v = vec![Span::styled(format!(" {} ", fit(label, 16)), pal.muted())]; v.extend(value); Row::text(Line::from(v)) };
             out.push(header("cost"));
             out.push(line("total", vec![Span::styled(money(Some(t.cost)), pal.strong()), Span::styled("  =  ", pal.faint()), Span::styled(money(Some(t.generation)), pal.ink()), Span::styled(" generation  +  ", pal.muted()), Span::styled(money(Some(t.time_cost)), pal.ink()), Span::styled(format!(" time{}", t.rate.map_or(String::new(), |r| format!(" at ${r:.0}/h"))), pal.muted())]));
             out.push(line("per verified", vec![Span::styled(money(t.per_verified_candidate), pal.ink()), Span::styled("   per push  ", pal.muted()), Span::styled(money(t.per_push), pal.ink())]));
@@ -261,7 +353,7 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
             out.push(line("", vec![Span::styled(format!("{} reached a push  {:.0}%", money(Some(t.pushed)), share(t.pushed) * 100.0), pal.tone(Tone::Violet))]));
             out.push(line("", vec![Span::styled(format!("{} did not  {:.0}%", money(Some(t.not_pushed)), share(t.not_pushed) * 100.0), pal.tone(Tone::Red))]));
             if t.in_flight > 0.0 { out.push(line("", vec![Span::styled(format!("{} in flight  {:.0}%", money(Some(t.in_flight)), share(t.in_flight) * 100.0), pal.tone(Tone::Orange))])); }
-            out.push(Row { line: Line::default(), focusable: false });
+            out.push(Row::text(Line::default()));
             out.push(header("results"));
             let cands: Vec<&Facts> = p.processes.iter().flat_map(|b| &b.searches).flat_map(|s| &s.candidates).collect();
             let (v, a, r) = (cands.iter().filter(|c| c.verified).count(), cands.iter().filter(|c| c.accepted && !c.verified).count(), cands.iter().filter(|c| !c.accepted).count());
@@ -269,7 +361,7 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
             let mut kinds: Vec<(String, usize)> = Vec::new();
             for g in p.groups.iter().filter(|g| g.outcome == "pushed") { match kinds.iter_mut().find(|(k, _)| *k == g.kind) { Some(e) => e.1 += 1, None => kinds.push((g.kind.clone(), 1)) } }
             out.push(line("pushes", vec![Span::styled(format!("{}", t.pushes), pal.strong()), Span::styled(format!("   {}", kinds.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(" · ")), pal.muted())]));
-            out.push(Row { line: Line::default(), focusable: false });
+            out.push(Row::text(Line::default()));
             out.push(header("trunk"));
             let repo = &p.repo;
             out.push(line("head", vec![Span::styled(short(repo.remote_head.as_deref().or(repo.head.as_deref()).unwrap_or("")), pal.ink()), Span::styled(format!("  {}", repo.subject.clone().unwrap_or_default()), pal.muted())]));
@@ -282,15 +374,34 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
 
 // ── detail ──────────────────────────────────────────────
 
-/// The focused row's item, in the order rows() lists them.
-fn focused_group(app: &App) -> Option<&GoalTrace> {
-    let mut groups: Vec<&GoalTrace> = app.p.groups.iter().collect();
+/// The focused row's key.
+fn focused(app: &App) -> Option<Key> { rows(app, 200).into_iter().nth(app.focus[app.ti()]).and_then(|r| r.key) }
+
+/// The goals in the order Traces lists them.
+fn sorted_groups(p: &Projection) -> Vec<&GoalTrace> {
+    let mut groups: Vec<&GoalTrace> = p.groups.iter().collect();
     groups.sort_by_key(|g| (!g.running, -g.time));
-    let n = rows(app, 200).iter().take(app.focus[app.ti()] + 1).filter(|r| r.focusable).count();
-    groups.get(n.checked_sub(1)?).copied()
+    groups
 }
 
-fn nth_focusable(app: &App) -> usize { rows(app, 200).iter().take(app.focus[app.ti()] + 1).filter(|r| r.focusable).count().saturating_sub(1) }
+/// Each edge into (`up`) or out of an item, followed `depth` steps: its call graph, as indented lines.
+fn chain(g: &projection::SpecGraph, id: &str, up: bool, depth: usize, indent: usize, seen: &mut Vec<String>, pal: Palette, out: &mut Vec<Line<'static>>) {
+    if depth == 0 { return; }
+    for e in g.edges.iter().filter(|e| if up { e.1 == id } else { e.0 == id }) {
+        let other = if up { &e.0 } else { &e.1 };
+        if seen.contains(other) { continue; }
+        seen.push(other.clone());
+        let (name, at) = g.nodes.iter().find(|n| n.id == *other).map_or((other.clone(), String::new()), |n| (n.name.clone(), if n.name == n.file { String::new() } else { format!("{}:{}", n.file, n.line.unwrap_or(0)) }));
+        let trusted = g.nodes.iter().find(|n| n.id == *other).map_or(false, |n| n.layer == "entry" || n.layer == "target");
+        out.push(Line::from(vec![
+            Span::styled(format!("{}{} ", " ".repeat(indent), if trusted { "┆" } else { "│" }), pal.faint()),
+            Span::styled(format!("{} ", fit(&e.2, 11)), pal.muted()),
+            Span::styled(format!("{name}  "), pal.ink()),
+            Span::styled(at, pal.faint()),
+        ]));
+        chain(g, other, up, depth - 1, indent + 2, seen, pal, out);
+    }
+}
 
 fn detail(app: &App, width: u16) -> Text<'static> {
     let pal = app.palette;
@@ -300,7 +411,8 @@ fn detail(app: &App, width: u16) -> Text<'static> {
     let kv = |k: &str, v: Vec<Span<'static>>| { let mut x = vec![Span::styled(format!("{} ", fit(k, 12)), pal.muted())]; x.extend(v); Line::from(x) };
     match app.tab {
         Tab::Traces => {
-            let Some(g) = focused_group(app) else { return Text::default() };
+            let Some(Key::Goal(gi)) = focused(app) else { return Text::default() };
+            let Some(g) = sorted_groups(&app.p).get(gi).copied() else { return Text::default() };
             let tone = pal.tone(outcome_tone(&g.outcome));
             t.push(Line::from(vec![Span::styled(format!("{} ", g.kind), pal.strong()), Span::styled(g.title.clone(), pal.strong()), Span::raw("   "), Span::styled(format!("● {}", g.outcome), tone)]));
             t.extend(hanging(&g.sentence, 0, width as usize, pal.muted()));
@@ -332,7 +444,7 @@ fn detail(app: &App, width: u16) -> Text<'static> {
                     let facts: Vec<String> = [(!s.params.base.is_empty()).then(|| format!("base {}", short(&s.params.base))), s.params.limit.map(|l| format!("limit {}", money(Some(l)))), (!kernel.is_empty()).then(|| kernel.to_string())].into_iter().flatten().collect();
                     if !facts.is_empty() { t.push(Line::from(Span::styled(format!("    {}", facts.join(" · ")), pal.faint()))); }
                     if !s.params.authority.is_empty() { t.extend(hanging(&format!("may change {}", s.params.authority), 4, width as usize, pal.faint())); }
-                    if let Some(bl) = &s.blocked { t.push(Line::from(Span::styled(format!("    {}", bl.trim_start_matches("blocked: ")), pal.tone(Tone::Yellow)))); }
+                    if s.blocked.is_some() { for l in why_blocked(s) { t.extend(hanging(&l, 4, width as usize, pal.tone(Tone::Yellow))); } }
                     if !s.candidates.is_empty() {
                         t.push(Line::from(Span::styled(format!("    {}  {}  {}  {}  {}  {}", fit("#", 4), fit("commit", 8), fit("verified", 9), fit("rank", 5), fit("lines", 10), "gen"), pal.faint())));
                         let mut cs: Vec<&Facts> = s.candidates.iter().collect();
@@ -355,41 +467,171 @@ fn detail(app: &App, width: u16) -> Text<'static> {
             }
         }
         Tab::Queue => {
-            let Some(q) = app.p.queue.as_ref().and_then(|q| q.get(nth_focusable(app))) else { return Text::default() };
-            t.push(head(format!("queue {}", q.id)));
-            t.push(Line::default());
-            t.push(Line::from(Span::styled(q.intent.clone(), pal.ink())));
+            match focused(app) {
+                Some(Key::Queue(qi)) => {
+                    let Some(q) = app.p.queue.as_ref().and_then(|q| q.get(qi)) else { return Text::default() };
+                    t.push(head(format!("queue {}", q.id)));
+                    t.push(Line::from(Span::styled("wanted, and not yet in the spec", pal.muted())));
+                    t.push(Line::default());
+                    t.extend(hanging(&q.intent, 0, width as usize, pal.ink()));
+                }
+                Some(Key::Proposal(pi)) => {
+                    let Some(pr) = app.p.proposals.get(pi) else { return Text::default() };
+                    t.push(Line::from(vec![Span::styled("proposal  ", pal.strong()), Span::styled(pr.source.clone(), pal.ink()), Span::styled("   ● waiting for you", pal.tone(Tone::Yellow))]));
+                    t.push(Line::from(Span::styled(pr.path.clone(), pal.faint())));
+                    for i in &pr.intents {
+                        t.push(Line::default());
+                        t.push(Line::from(vec![Span::styled(format!("{} ", i.id.map_or("—".into(), |n| n.to_string())), pal.muted()), Span::styled(i.cue.clone().map_or(String::new(), |c| format!("cue {c}")), pal.faint())]));
+                        t.extend(hanging(&i.intent, 2, width as usize, pal.ink()));
+                    }
+                    if !pr.contested.is_empty() { t.push(Line::default()); t.push(sub("contested: one candidate only")); for c in &pr.contested { t.push(Line::from(Span::styled(format!("  {c}"), pal.ink()))); } }
+                    t.push(Line::default());
+                    t.push(kv("accept", vec![Span::styled(format!("git am {}", pr.path), pal.ink())]));
+                }
+                _ => {}
+            }
         }
         Tab::Spec => {
             let Some(spec) = &app.p.spec else { return Text::default() };
-            let order = ["type", "init", "transition", "predicate", "property", "invariant"];
-            let mut items: Vec<_> = spec.items.iter().collect();
-            items.sort_by_key(|i| order.iter().position(|k| *k == i.kind).unwrap_or(9));
-            let n = nth_focusable(app);
-            if let Some(i) = items.get(n) {
-                t.push(Line::from(vec![Span::styled(i.name.clone(), pal.strong()), Span::styled(format!("   {}", i.kind), pal.muted())]));
-                if let Some(d) = &i.doc { t.extend(hanging(d, 0, width as usize, pal.ink())); }
-                for (title, list) in [("requires", &i.requires), ("reads", &i.reads), ("updates", &i.updates)] {
-                    if list.is_empty() { continue; }
-                    t.push(Line::default()); t.push(sub(title));
-                    for r in list { t.push(Line::from(Span::styled(format!("  {r}"), pal.ink()))); }
+            let g = app.p.system.clone().unwrap_or_default();
+            let wide = width as usize;
+            let node = |id: &str| g.nodes.iter().find(|n| n.id == id).cloned();
+            let at = |n: &projection::SpecNode| format!("{}:{}", n.file, n.line.unwrap_or(0));
+            let verbatim = |t: &mut Vec<Line<'static>>, title: &str, list: &[String]| {
+                if list.is_empty() { return; }
+                t.push(Line::default()); t.push(sub(title));
+                for r in list { t.extend(hanging(r, 2, wide, pal.ink())); }
+            };
+            let graph = |t: &mut Vec<Line<'static>>, id: &str| {
+                let mut up = Vec::new(); chain(&g, id, true, 4, 0, &mut vec![id.to_string()], pal, &mut up);
+                if !up.is_empty() { t.push(Line::default()); t.push(sub("reached from")); t.extend(up); }
+                let mut down = Vec::new(); chain(&g, id, false, 3, 0, &mut vec![id.to_string()], pal, &mut down);
+                if !down.is_empty() { t.push(Line::default()); t.push(sub("reaches")); t.extend(down); }
+            };
+            match focused(app) {
+                Some(Key::Item(i)) => {
+                    let it = &spec.items[i];
+                    t.push(Line::from(vec![Span::styled(it.name.clone(), pal.strong()), Span::styled(format!("   {}", it.kind), pal.muted())]));
+                    if let Some(d) = &it.doc { t.extend(hanging(d, 0, wide, pal.ink())); }
+                    let sid = format!("spec:{}", it.name);
+                    if let Some(n) = node(&sid) { t.push(Line::from(Span::styled(format!("{}{}", at(&n), if n.changed { "  · differs from trunk" } else { "" }), pal.faint()))); }
+                    verbatim(&mut t, "requires", &it.requires);
+                    let list = |t: &mut Vec<Line<'static>>, k: &str, v: &[String]| {
+                        let mut ls = hanging(&v.join(" · "), 13, wide, pal.ink());
+                        if let Some(first) = ls.first_mut() { let rest: String = first.spans[0].content.chars().skip(13).collect(); *first = Line::from(vec![Span::styled(format!("{} ", fit(k, 12)), pal.muted()), Span::styled(rest, pal.ink())]); }
+                        t.extend(ls);
+                    };
+                    if !it.reads.is_empty() { t.push(Line::default()); list(&mut t, "reads", &it.reads); }
+                    if !it.updates.is_empty() { list(&mut t, "writes", &it.updates); }
+                    if let Some(n) = node(&sid) {
+                        if !n.adds.is_empty() { t.push(kv("adds", vec![Span::styled(n.adds.join(" · "), pal.ink())])); }
+                        if !n.removes.is_empty() { t.push(kv("removes", vec![Span::styled(n.removes.join(" · "), pal.ink())])); }
+                    }
+                    // A predicate a gate decides: the gate's contract, as written.
+                    if let Some(gate) = node(&format!("gate:{}", it.name)) {
+                        t.push(Line::default());
+                        t.push(Line::from(vec![Span::styled(format!("gate {}", gate.name), pal.ink()), Span::styled(format!("   trait {} · {}{}", gate.group, at(&gate), if gate.changed { " · differs from trunk" } else { "" }), pal.faint())]));
+                        verbatim(&mut t, "requires", &gate.requires);
+                        verbatim(&mut t, "ensures", &gate.ensures);
+                        if let Some(k) = node(&format!("kernel:{}", it.name)) {
+                            t.push(Line::default());
+                            t.push(Line::from(vec![Span::styled(format!("implementation {}", k.name), pal.ink()), Span::styled(format!("   {}{}", at(&k), if k.uses.is_empty() { String::new() } else { format!(" · uses {}", k.uses.join(", ")) }), pal.faint())]));
+                        }
+                    }
+                    // Where it is a guard.
+                    let guards: Vec<String> = g.nodes.iter().filter(|n| n.guards.contains(&it.name)).map(|n| n.name.clone()).collect();
+                    if !guards.is_empty() { t.push(Line::default()); t.push(kv("guards", vec![Span::styled(guards.join(" · "), pal.ink())])); }
+                    // The emitted type of the same name, and who reads it.
+                    if let Some(ty) = node(&format!("type:{}", it.name)) { t.push(Line::default()); t.push(kv("emitted", vec![Span::styled(format!("for programs, from {}", at(&ty)), pal.ink())])); }
+                    graph(&mut t, &sid);
                 }
-                // How it reaches the code: the spec graph's edges into and out of it.
-                if let Some(g) = &app.p.system {
-                    let id = format!("spec:{}", i.name);
-                    let name = |id: &str| g.nodes.iter().find(|n| n.id == id).map_or(id.to_string(), |n| format!("{}  {}:{}", n.name, n.file, n.line.unwrap_or(0)));
-                    let into: Vec<_> = g.edges.iter().filter(|e| e.1 == id).collect();
-                    if !into.is_empty() { t.push(Line::default()); t.push(sub("reached from")); for e in into { t.push(Line::from(vec![Span::styled(format!("  {} ", fit(&e.2, 11)), pal.muted()), Span::styled(name(&e.0), pal.ink())])); } }
+                Some(Key::Grid) => {
+                    t.push(Line::from(vec![Span::styled("state machine", pal.strong()), Span::styled(format!("   {} fields", spec.fields.len()), pal.muted())]));
+                    t.push(Line::from(Span::styled("r reads · w writes · + adds · − removes", pal.faint())));
+                    t.push(Line::default());
+                    let ts: Vec<&projection::SpecItem> = spec.items.iter().filter(|x| x.kind == "transition" || x.kind == "init").collect();
+                    let nw = ts.iter().map(|x| x.name.chars().count()).max().unwrap_or(8) + 2;
+                    // Columns: one per field, as wide as its name, or its first letters when narrow.
+                    let cw = |f: &str| f.chars().count().min(((wide.saturating_sub(nw)) / spec.fields.len().max(1)).saturating_sub(1).max(2)) + 1;
+                    let mut header = vec![Span::raw(" ".repeat(nw))];
+                    for f in &spec.fields { header.push(Span::styled(format!("{} ", fit(&f.name, cw(&f.name) - 1)), pal.muted())); }
+                    t.push(Line::from(header));
+                    for x in ts {
+                        let n = node(&format!("spec:{}", x.name));
+                        let mut row = vec![Span::styled(fit(&x.name, nw), pal.ink())];
+                        for f in &spec.fields {
+                            let mut m = String::new();
+                            if x.reads.contains(&f.name) { m.push('r'); }
+                            if x.updates.contains(&f.name) { m.push('w'); }
+                            if n.as_ref().is_some_and(|n| n.adds.contains(&f.name)) { m.push('+'); }
+                            if n.as_ref().is_some_and(|n| n.removes.contains(&f.name)) { m.push('−'); }
+                            row.push(Span::styled(format!("{} ", fit(if m.is_empty() { "·" } else { &m }, cw(&f.name) - 1)), if m.is_empty() { pal.faint() } else { pal.ink() }));
+                        }
+                        t.push(Line::from(row));
+                    }
+                    t.push(Line::default());
+                    t.push(sub("fields"));
+                    for f in &spec.fields {
+                        t.push(Line::from(vec![Span::styled(format!("{} ", fit(&f.name, nw)), pal.ink()), Span::styled(f.r#type.clone(), pal.muted())]));
+                        if let Some(d) = f.doc.as_ref().filter(|d| !d.is_empty()) { t.extend(hanging(d, nw + 1, wide, pal.faint())); }
+                    }
                 }
-            } else if let Some(f) = spec.fields.get(n.saturating_sub(items.len())) {
-                t.push(Line::from(vec![Span::styled(f.name.clone(), pal.strong()), Span::styled(format!("   {}", f.r#type), pal.muted())]));
-                if let Some(d) = &f.doc { t.push(Line::default()); t.push(Line::from(Span::styled(d.clone(), pal.ink()))); }
-                if let Some(s) = &f.sharding { t.push(Line::default()); t.push(kv("sharding", vec![Span::styled(s.clone(), pal.muted())])); }
+                Some(Key::Trusted(ti)) => {
+                    let Some(tf) = g.trusted.get(ti) else { return Text::default() };
+                    t.push(Line::from(vec![Span::styled(tf.name.clone(), pal.strong()), Span::styled("   trusted: Verus does not check it", pal.muted())]));
+                    if let Some(d) = &tf.doc { t.extend(hanging(d, 0, wide, pal.ink())); }
+                    t.push(Line::from(Span::styled(format!("{}:{}{}", tf.file, tf.line, if tf.changed { "  · differs from trunk" } else { "" }), pal.faint())));
+                    let callers: Vec<&projection::SpecNode> = g.nodes.iter().filter(|n| n.trusted.contains(&tf.name)).collect();
+                    if !callers.is_empty() { t.push(Line::default()); t.push(sub("called by")); for c in callers { t.push(Line::from(vec![Span::styled(format!("  {}  ", c.name), pal.ink()), Span::styled(at(c), pal.faint())])); } }
+                }
+                Some(Key::Sbom(k)) => {
+                    let Some(sb) = &app.p.sbom else { return Text::default() };
+                    t.push(Line::from(vec![Span::styled(k.to_string(), pal.strong()), Span::styled(format!("   .bon/sbom.json · {}", if sb.source == "trunk" { "on trunk" } else { "working tree, not on trunk" }), pal.muted())]));
+                    t.push(Line::default());
+                    match k {
+                        "tools" => for c in sb.document.components.iter().filter(|c| c.group.as_deref() == Some("tcb")) { t.push(Line::from(vec![Span::styled(format!("{} ", fit(&c.name, 14)), pal.ink()), Span::styled(c.version.clone(), pal.muted())])); },
+                        "services" => for sv in &sb.document.services { t.push(Line::from(vec![Span::styled(format!("{} ", fit(&sv.name, 14)), pal.ink()), Span::styled(sv.endpoints.join(", "), pal.muted())])); },
+                        _ => for c in sb.document.components.iter().filter(|c| c.r#type == "library") {
+                            t.push(Line::from(vec![Span::styled(format!("{} ", fit(&c.name, 26)), pal.ink()), Span::styled(format!("{} ", fit(&c.version, 12)), pal.muted()), Span::styled(c.hashes.first().map_or(String::new(), |h| h.content.chars().take(12).collect()), pal.faint())]));
+                        },
+                    }
+                }
+                _ => {}
             }
         }
         Tab::Project => {}
     }
     Text::from(t)
+}
+
+/// The verified candidates of a search, grouped by their agree output.
+fn groups(s: &SearchTrace) -> Vec<Vec<&Facts>> {
+    let mut out: Vec<Vec<&Facts>> = Vec::new();
+    for c in s.candidates.iter().filter(|c| c.verified) {
+        match out.iter_mut().find(|g| g[0].out == c.out) { Some(g) => g.push(c), None => out.push(vec![c]) }
+    }
+    out
+}
+
+/// Why a search blocked, from what its candidates show: too few verified, or
+/// verified candidates that disagree, each group of agreeing ones by index.
+fn why_blocked(s: &SearchTrace) -> Vec<String> {
+    let v = s.candidates.iter().filter(|c| c.verified).count();
+    let mut out = Vec::new();
+    if s.kind == "counterexample" {
+        out.push(format!("{v} of its {} tests verified; two are needed to say a counterexample was found or not, so neither", s.candidates.len()));
+    } else if v < 2 {
+        out.push(format!("too few verified: {v} of {}", s.candidates.len()));
+    } else {
+        let gs = groups(s);
+        if gs.len() > 1 {
+            out.push(format!("the verified candidates disagree: {} groups by their agree output", gs.len()));
+            for g in &gs { out.push(format!("  {}", g.iter().map(|c| format!("#{}", c.index)).collect::<Vec<_>>().join(" "))); }
+            out.push("d shows two groups' agree output side by side".into());
+        }
+    }
+    if let Some(b) = &s.blocked { out.push(format!("trace: {}", b.trim_start_matches("blocked: "))); }
+    out
 }
 
 /// Text wrapped at `width`, every line after the first indented like the first.
@@ -475,7 +717,7 @@ fn draw(f: &mut Frame, app: &mut App) {
     // Keep the focus on a focusable row, and in view.
     if !list.is_empty() {
         let mut i = app.focus[ti].min(list.len() - 1);
-        if !list[i].focusable { if let Some(j) = (i..list.len()).chain((0..i).rev()).find(|&j| list[j].focusable) { i = j; } }
+        if !list[i].focusable() { if let Some(j) = (i..list.len()).chain((0..i).rev()).find(|&j| list[j].focusable()) { i = j; } }
         app.focus[ti] = i;
         let h = list_area.height as usize;
         if h > 0 {
@@ -485,7 +727,7 @@ fn draw(f: &mut Frame, app: &mut App) {
     }
     if list_area.width > 0 {
         let lines: Vec<Line> = list.into_iter().enumerate().skip(app.top[ti]).take(list_area.height as usize).map(|(i, r)| {
-            if r.focusable && i == app.focus[ti] && detail_tab {
+            if r.focusable() && i == app.focus[ti] && detail_tab {
                 let mut l = r.line.patch_style(pal.selected());
                 if let Some(first) = l.spans.first_mut() { if first.content.starts_with(' ') { *first = Span::styled(format!("▎{}", &first.content[1..]), pal.tone(Tone::Blue).patch(pal.selected())); } }
                 l
@@ -497,11 +739,54 @@ fn draw(f: &mut Frame, app: &mut App) {
         let inner = Rect { x: d.x + 1, width: d.width.saturating_sub(2), ..d };
         f.render_widget(Paragraph::new(detail(app, inner.width)).wrap(Wrap { trim: false }).scroll((app.detail_top, 0)), inner);
     }
+    // An overlay covers the body.
+    match &app.overlay {
+        Overlay::None => {}
+        Overlay::Logs { items, sel } => {
+            f.render_widget(ratatui::widgets::Clear, body);
+            let mut lines = vec![Line::from(Span::styled(" logs  ⏎ open · esc back", pal.faint().add_modifier(Modifier::BOLD))), Line::default()];
+            let h = body.height.saturating_sub(2) as usize;
+            let first = sel.saturating_sub(h.saturating_sub(1));
+            for (i, (label, _)) in items.iter().enumerate().skip(first).take(h) {
+                let l = Line::from(Span::styled(format!(" {}", fit(label, body.width as usize - 1)), if i == *sel { pal.ink().patch(pal.selected()) } else { pal.muted() }));
+                lines.push(l);
+            }
+            f.render_widget(Paragraph::new(lines), body);
+        }
+        Overlay::Text { title, lines, top } => {
+            f.render_widget(ratatui::widgets::Clear, body);
+            let [head, text] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(body);
+            f.render_widget(Paragraph::new(Line::from(vec![Span::styled(format!(" {title}"), pal.strong()), Span::styled(format!("   line {} of {} · esc back", top + 1, lines.len()), pal.faint())])), head);
+            // Long lines wrap, so nothing is cut at the edge.
+            let shown: Vec<Line> = lines.iter().skip(*top).take(text.height as usize * 2).map(|l| Line::from(Span::styled(l.clone(), pal.ink()))).collect();
+            f.render_widget(Paragraph::new(shown).wrap(Wrap { trim: false }), Rect { x: text.x + 1, width: text.width.saturating_sub(2), ..text });
+        }
+        Overlay::Compare { titles, left, right, top } => {
+            f.render_widget(ratatui::widgets::Clear, body);
+            let [l, _, r] = Layout::horizontal([Constraint::Percentage(50), Constraint::Length(1), Constraint::Percentage(50)]).areas(body);
+            for (area, title, text) in [(l, &titles.0, left), (r, &titles.1, right)] {
+                let mut out = vec![Line::from(Span::styled(format!(" {title}"), pal.strong())), Line::default()];
+                out.extend(text.iter().enumerate().skip(*top).take(area.height as usize).map(|(i, line)| {
+                    let other = if std::ptr::eq(text, left) { right.get(i) } else { left.get(i) };
+                    Line::from(Span::styled(format!(" {line}"), if other == Some(line) { pal.muted() } else { pal.ink() }))
+                }));
+                f.render_widget(Paragraph::new(out), area);
+            }
+            for y in body.top()..body.bottom() { f.buffer_mut()[(l.right(), y)].set_symbol("│").set_style(pal.rule()); }
+        }
+    }
 
     // Footer: the keys, or an error reading the projection.
-    let foot_line = if let Some(e) = &app.error { Line::from(Span::styled(format!(" {e}"), pal.tone(Tone::Red))) } else {
+    let filter = app.filter.lock().map(|f| f.clone()).unwrap_or_default();
+    let foot_line = if let Some(e) = &app.error { Line::from(Span::styled(format!(" {e}"), pal.tone(Tone::Red))) }
+    else if let Some(buf) = &app.input { Line::from(vec![Span::styled(" find ", pal.muted()), Span::styled(format!("{buf}▏"), pal.ink()), Span::styled("   ⏎ apply · esc cancel", pal.faint())]) }
+    else {
         let k = |key: &str, what: &str| vec![Span::styled(format!(" {key} "), pal.ink()), Span::styled(format!("{what}  "), pal.faint())];
         let mut items: Vec<Vec<Span>> = vec![k("↑↓", "move"), k("⇥", "tab")];
+        if app.tab == Tab::Traces { items.push(k("l", "logs")); }
+        let find_label = filter.find.as_deref().map_or("find".to_string(), |f| format!("find: {f}"));
+        items.push(k("/", &find_label));
+        items.push(k("r", RANGES[app.range].0));
         if detail_tab && !wide { items.push(if app.detail_open { k("esc", "back") } else { k("⏎", "open") }); }
         if detail_tab { items.push(k("⇧↑↓", "scroll")); }
         items.push(k("t", if app.dark { "light" } else { "dark" }));
@@ -515,10 +800,11 @@ fn draw(f: &mut Frame, app: &mut App) {
     f.render_widget(Paragraph::new(foot_line), foot);
 
     if app.keys {
-        let w = 46.min(area.width); let h = 12.min(area.height);
+        let w = 50.min(area.width); let h = 16.min(area.height);
         let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
         f.render_widget(ratatui::widgets::Clear, r);
-        let lines: Vec<Line> = [("↑ ↓  j k", "move"), ("⇥  1 2 3 4", "tab"), ("⏎", "open the detail (narrow)"), ("esc", "close it"), ("⇧↑ ⇧↓  pgup pgdn", "scroll the detail"), ("g G", "top, bottom"), ("t", "light or dark"), ("q", "quit")]
+        let lines: Vec<Line> = [("↑ ↓  j k", "move"), ("⇥  1 2 3 4", "tab"), ("⏎", "open the detail (narrow)"), ("esc", "close it"), ("⇧↑ ⇧↓  pgup pgdn", "scroll the detail"),
+            ("l", "a goal's logs"), ("d", "disagreeing outputs side by side"), ("/", "find"), ("r", "time range"), ("g G", "top, bottom"), ("t", "light or dark"), ("q", "quit")]
             .iter().map(|(k, w)| Line::from(vec![Span::styled(format!("  {} ", fit(k, 18)), pal.ink()), Span::styled(w.to_string(), pal.muted())])).collect();
         let mut all = vec![Line::from(Span::styled("  keys", pal.strong())), Line::default()]; all.extend(lines);
         f.render_widget(Paragraph::new(all).block(ratatui::widgets::Block::bordered().border_style(pal.rule())), r);
@@ -531,12 +817,15 @@ fn css(c: Color) -> Option<String> { match c { Color::Rgb(r, g, b) => Some(forma
 
 /// One frame of the view at w×h, on a given tab, as a self-contained HTML page:
 /// the same cells a terminal would show, for a preview anywhere.
-pub fn frame(root: &str, w: u16, h: u16, tab: usize, light: bool) -> Result<String, String> {
+pub fn frame(root: &str, w: u16, h: u16, tab: usize, focus: usize, light: bool) -> Result<String, String> {
     use ratatui::backend::TestBackend;
     let mut app = App::new();
+    app.root = root.into();
     app.p = projection::read(std::path::Path::new(root), &view::Filter::default())?;
     app.tab = TABS[tab.min(3)];
     if light { app.dark = false; app.palette = LIGHT; }
+    // Focus the focus-th focusable row.
+    if let Some((i, _)) = rows(&app, w).iter().enumerate().filter(|(_, r)| r.focusable()).nth(focus) { app.focus[app.ti()] = i; }
     let mut t = ratatui::Terminal::new(TestBackend::new(w, h)).map_err(|e| e.to_string())?;
     t.draw(|f| draw(f, &mut app)).map_err(|e| e.to_string())?;
     let b = t.backend().buffer().clone();
@@ -559,6 +848,27 @@ pub fn frame(root: &str, w: u16, h: u16, tab: usize, light: bool) -> Result<Stri
     Ok(out)
 }
 
+// ── bon spec ────────────────────────────────────────────
+
+/// Lines of styled text as plain text.
+fn plain(t: Text) -> String { t.lines.iter().map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect::<String>().trim_end().to_string()).collect::<Vec<_>>().join("\n") }
+
+/// `bon spec`: the Spec tab as text; `bon spec NAME`: one item's detail, as the view shows it.
+pub fn spec_text(root: &str, name: Option<&str>, width: u16) -> Result<String, String> {
+    let mut app = App::new();
+    app.root = root.into();
+    app.p = projection::read(std::path::Path::new(root), &view::Filter::default())?;
+    app.tab = Tab::Spec;
+    let list = rows(&app, width);
+    let Some(name) = name else { return Ok(list.into_iter().map(|r| plain(Text::from(r.line))).collect::<Vec<_>>().join("\n") + "\n") };
+    let spec = app.p.spec.clone().unwrap_or_default();
+    let key = spec.items.iter().position(|i| i.name == name).map(Key::Item).or_else(|| (name == "fields" || name == "state").then_some(Key::Grid))
+        .ok_or_else(|| format!("no {name} in the spec; bon spec lists every item"))?;
+    let at = list.iter().position(|r| r.key.as_ref() == Some(&key)).ok_or("not listed")?;
+    app.focus[app.ti()] = at;
+    Ok(plain(detail(&app, width)) + "\n")
+}
+
 // ── input ───────────────────────────────────────────────
 
 /// Handle one key; false to quit.
@@ -567,9 +877,62 @@ fn key(app: &mut App, k: KeyEvent) -> bool {
     let step = |app: &mut App, down: bool| {
         let list = rows(app, 200);
         let mut i = app.focus[ti] as isize;
-        loop { i += if down { 1 } else { -1 }; if i < 0 || i as usize >= list.len() { break; } if list[i as usize].focusable { app.focus[ti] = i as usize; app.detail_top = 0; break; } }
+        loop { i += if down { 1 } else { -1 }; if i < 0 || i as usize >= list.len() { break; } if list[i as usize].focusable() { app.focus[ti] = i as usize; app.detail_top = 0; break; } }
     };
     if app.keys { app.keys = false; return true; }
+    // Typing after /: find, as the page's find box.
+    if let Some(buf) = app.input.as_mut() {
+        match k.code {
+            KeyCode::Esc => app.input = None,
+            KeyCode::Enter => { let f = app.input.take().filter(|s| !s.is_empty()); app.filter.lock().map(|mut x| x.find = f).ok(); app.focus = [0; 4]; }
+            KeyCode::Backspace => { buf.pop(); }
+            KeyCode::Char(c) => buf.push(c),
+            _ => {}
+        }
+        return true;
+    }
+    // An overlay takes the keys until esc.
+    match &mut app.overlay {
+        Overlay::None => {}
+        Overlay::Logs { items, sel } => {
+            match k.code {
+                KeyCode::Esc | KeyCode::Char('q') => app.overlay = Overlay::None,
+                KeyCode::Up | KeyCode::Char('k') => *sel = sel.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => *sel = (*sel + 1).min(items.len().saturating_sub(1)),
+                KeyCode::Enter => if let Some((label, path)) = items.get(*sel).cloned() {
+                    let text = std::fs::read_to_string(&path).unwrap_or_else(|_| "This log is no longer on disk.".into());
+                    app.overlay = Overlay::Text { title: label, lines: text.lines().map(String::from).collect(), top: 0 };
+                },
+                _ => {}
+            }
+            return true;
+        }
+        Overlay::Text { top, lines, .. } => {
+            match k.code {
+                KeyCode::Esc | KeyCode::Char('q') => app.overlay = Overlay::None,
+                KeyCode::Up | KeyCode::Char('k') => *top = top.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => *top = (*top + 1).min(lines.len().saturating_sub(1)),
+                KeyCode::PageUp => *top = top.saturating_sub(20),
+                KeyCode::PageDown | KeyCode::Char(' ') => *top = (*top + 20).min(lines.len().saturating_sub(1)),
+                KeyCode::Char('g') => *top = 0,
+                KeyCode::Char('G') => *top = lines.len().saturating_sub(1),
+                _ => {}
+            }
+            return true;
+        }
+        Overlay::Compare { top, left, right, .. } => {
+            let n = left.len().max(right.len());
+            match k.code {
+                KeyCode::Esc | KeyCode::Char('q') => app.overlay = Overlay::None,
+                KeyCode::Up | KeyCode::Char('k') => *top = top.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => *top = (*top + 1).min(n.saturating_sub(1)),
+                KeyCode::PageUp => *top = top.saturating_sub(20),
+                KeyCode::PageDown | KeyCode::Char(' ') => *top = (*top + 20).min(n.saturating_sub(1)),
+                _ => {}
+            }
+            return true;
+        }
+    }
     match (k.code, k.modifiers) {
         (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => return false,
         (KeyCode::Esc, _) => app.detail_open = false,
@@ -585,6 +948,41 @@ fn key(app: &mut App, k: KeyEvent) -> bool {
         (KeyCode::Char('G'), _) => { app.focus[ti] = usize::MAX; }
         (KeyCode::Enter, _) => app.detail_open = true,
         (KeyCode::Char('t'), _) => { app.dark = !app.dark; app.palette = if app.dark { DARK } else { LIGHT }; }
+        (KeyCode::Char('/'), _) => app.input = Some(app.filter.lock().ok().and_then(|f| f.find.clone()).unwrap_or_default()),
+        (KeyCode::Char('r'), _) => {
+            app.range = (app.range + 1) % RANGES.len();
+            let since = (RANGES[app.range].1 > 0).then(|| (app.p.repo.now - RANGES[app.range].1).max(0) as u64);
+            app.filter.lock().map(|mut f| f.since = since).ok();
+        }
+        // Traces: every log of the focused goal's agent processes.
+        (KeyCode::Char('l'), _) if app.tab == Tab::Traces => {
+            if let Some(Key::Goal(gi)) = focused(app) {
+                if let Some(g) = sorted_groups(&app.p).get(gi) {
+                    let mut items = Vec::new();
+                    for b in &g.processes { for s in &b.searches { for c in &s.candidates { for l in &c.logs {
+                        items.push((format!("bon process {} · search {} · #{} · {l}", b.pid, s.search, c.index), app.root.join(".bon/traces").join(b.pid.to_string()).join(s.search.to_string()).join(c.index.to_string()).join(l)));
+                    } } } }
+                    if !items.is_empty() { app.overlay = Overlay::Logs { items, sel: 0 }; }
+                }
+            }
+        }
+        // Traces: two groups of disagreeing candidates, their agree output side by side.
+        (KeyCode::Char('d'), _) if app.tab == Tab::Traces => {
+            if let Some(Key::Goal(gi)) = focused(app) {
+                if let Some(g) = sorted_groups(&app.p).get(gi) {
+                    'find: for b in &g.processes { for s in &b.searches {
+                        let gs = groups(s);
+                        if gs.len() < 2 { continue; }
+                        let side = |c: &Facts| { let dir = app.root.join(".bon/traces").join(b.pid.to_string()).join(s.search.to_string()).join(c.index.to_string());
+                            let name = c.logs.iter().find(|l| l.starts_with("agree")).cloned().unwrap_or("agree-0".into());
+                            (format!("#{} {name}", c.index), std::fs::read_to_string(dir.join(&name)).unwrap_or_default().lines().map(String::from).collect::<Vec<_>>()) };
+                        let ((lt, l), (rt, r)) = (side(gs[0][0]), side(gs[1][0]));
+                        app.overlay = Overlay::Compare { titles: (lt, rt), left: l, right: r, top: 0 };
+                        break 'find;
+                    } }
+                }
+            }
+        }
         _ => {}
     }
     true
@@ -599,13 +997,25 @@ pub fn wanted() -> bool { std::io::stdout().is_terminal() && std::io::stdin().is
 /// of its own, so input never waits on the traces.
 pub fn run(root: &str, filter: view::Filter) -> Result<(), String> {
     let (tx, rx) = mpsc::channel::<Result<Projection, String>>();
-    let root_t = std::path::PathBuf::from(root);
-    std::thread::spawn(move || loop {
-        if tx.send(projection::read(&root_t, &filter)).is_err() { break; }
-        std::thread::sleep(Duration::from_secs(2));
+    let mut app = App::new();
+    app.root = root.into();
+    app.filter = std::sync::Arc::new(std::sync::Mutex::new(filter));
+    let (root_t, shared) = (app.root.clone(), app.filter.clone());
+    // Read the projection every 2 s, or as soon as find or the range changes.
+    std::thread::spawn(move || {
+        let mut last: Option<(Option<u64>, Option<String>)> = None;
+        let mut at = Instant::now() - Duration::from_secs(10);
+        loop {
+            let f = shared.lock().map(|f| f.clone()).unwrap_or_default();
+            let now_key = (f.since, f.find.clone());
+            if last.as_ref() != Some(&now_key) || at.elapsed() >= Duration::from_secs(2) {
+                if tx.send(projection::read(&root_t, &f)).is_err() { break; }
+                last = Some(now_key); at = Instant::now();
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
     });
     let mut terminal: DefaultTerminal = ratatui::init();
-    let mut app = App::new();
     let result = (|| -> Result<(), String> {
         loop {
             while let Ok(p) = rx.try_recv() {
@@ -666,5 +1076,40 @@ mod tests {
         }
         // Wide: the selected group's candidates show beside the list.
         assert!(screen(p.clone(), Tab::Traces, 120, 30).contains("1111111"));
+    }
+
+    fn search(kind: &str, outs: &[(bool, u64)]) -> SearchTrace {
+        serde_json::from_value(serde_json::json!({ "kind": kind, "blocked": "blocked: fewer than two verified candidates, or they disagree",
+            "candidates": outs.iter().enumerate().map(|(i, (v, o))| serde_json::json!({ "index": i, "accepted": true, "verified": v, "out": [o] })).collect::<Vec<_>>() })).unwrap()
+    }
+
+    #[test]
+    fn a_blocked_search_says_why() {
+        // Disagreeing: two groups by agree output, each by index.
+        let w = why_blocked(&search("code", &[(true, 1), (true, 2), (true, 1), (false, 3)]));
+        assert!(w[0].contains("disagree: 2 groups") && w[1].trim() == "#0 #2" && w[2].trim() == "#1", "{w:?}");
+        // Too few verified.
+        assert!(why_blocked(&search("code", &[(true, 1), (false, 1)]))[0].contains("too few verified: 1 of 2"));
+        // A counterexample with fewer than two verified tests: neither found nor not found.
+        assert!(why_blocked(&search("counterexample", &[(true, 1), (false, 1)]))[0].contains("so neither"));
+    }
+
+    #[test]
+    fn proposals_wait_above_the_queue_and_spec_shows_what_reaches_a_predicate() {
+        let p: Projection = serde_json::from_value(serde_json::json!({
+            "configured": true, "repo": { "now": 1 },
+            "queue": [{ "id": 7, "intent": "queued" }],
+            "proposals": [{ "name": "a", "path": ".bon/traces/proposals/a.patch", "source": "transcripts/a.vtt",
+                "intents": [{ "id": 8, "intent": "new one", "cue": "transcripts/a.vtt#1200" }], "contested": ["transcripts/a.vtt#900"] }],
+            "spec": { "path": "k/model.rs", "items": [{ "kind": "predicate", "name": "may_open", "doc": "A door opens when unlocked." }] },
+            "system": { "nodes": [{ "id": "spec:may_open", "layer": "spec", "name": "may_open", "file": "k/model.rs" },
+                                  { "id": "gate:may_open", "layer": "gates", "group": "Policy", "name": "may_open", "file": "k/rules.rs", "ensures": ["r == spec::may_open(locked)"] },
+                                  { "id": "kernel:may_open", "layer": "implementation", "name": "may_open", "file": "k/impl.rs" }],
+                        "edges": [["gate:may_open", "spec:may_open", "ensures"], ["kernel:may_open", "gate:may_open", "implements"]] }
+        })).unwrap();
+        let q = screen(p.clone(), Tab::Queue, 120, 20);
+        assert!(q.find("proposed").unwrap() < q.find("queued").unwrap() && q.contains("1 new, 1 contested"), "{q}");
+        let sp = screen(p.clone(), Tab::Spec, 120, 30);
+        assert!(sp.contains("may_open") && sp.contains("gate impl"), "{sp}");
     }
 }

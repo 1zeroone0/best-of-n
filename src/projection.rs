@@ -18,6 +18,8 @@ pub struct Projection {
     pub groups: Vec<GoalTrace>,
     /// What is wanted and not yet in the spec.
     pub queue: Option<Vec<QueueLine>>,
+    /// Queue proposals waiting for engineer: patches bon queue wrote.
+    pub proposals: Vec<Proposal>,
     pub filter: Filter,
     pub bounds: Bounds,
     pub spec: Option<SpecOutline>,
@@ -205,6 +207,28 @@ pub struct Facts {
     pub flags: Vec<String>,
     pub logs: Vec<String>,
     pub changed: Vec<String>,
+    /// A hash of each agree check's output: candidates with the same agree.
+    pub out: Vec<u64>,
+}
+
+/// A queue proposal: a patch adding intents, each with the cue it came from.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Proposal {
+    pub name: String,
+    pub path: String,
+    pub source: String,
+    pub intents: Vec<ProposedIntent>,
+    /// Cues only one candidate cited, shown apart from the proposal.
+    pub contested: Vec<String>,
+}
+
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct ProposedIntent {
+    pub id: Option<u64>,
+    pub intent: String,
+    pub cue: Option<String>,
 }
 
 /// One line of the queue.
@@ -295,6 +319,9 @@ pub struct SpecNode {
     pub uses: Vec<String>,
     pub trusted: Vec<String>,
     pub proof: bool,
+    /// A gate's contract, each clause as written.
+    pub requires: Vec<String>,
+    pub ensures: Vec<String>,
 }
 
 /// A function in trusted code the bon process calls.
@@ -302,6 +329,7 @@ pub struct SpecNode {
 #[serde(default)]
 pub struct TrustedFunction {
     pub name: String,
+    pub file: String,
     pub line: u64,
     pub doc: Option<String>,
     pub changed: bool,

@@ -68,6 +68,29 @@ fn git(root: &Path, args: &[&str]) -> String {
     super::git(root, args).unwrap_or_default()
 }
 
+/// Each queue proposal bon queue left for engineer: its new intents with the cue
+/// each came from, and its contested cues, from the patch's lines and trailers.
+fn proposals(root: &Path) -> Vec<Value> {
+    let dir = root.join(".bon/traces/proposals");
+    let mut out: Vec<Value> = std::fs::read_dir(&dir).into_iter().flatten().flatten().filter_map(|e| {
+        let path = e.path();
+        if path.extension().is_none_or(|x| x != "patch") { return None; }
+        let text = std::fs::read_to_string(&path).ok()?;
+        let cue_of = |id: &str| text.lines().find_map(|l| l.strip_prefix("Cue: ").and_then(|r| r.split_once(' ')).filter(|(i, _)| *i == id).map(|(_, c)| c.to_string()));
+        let intents: Vec<Value> = text.lines().filter(|l| l.starts_with('+') && !l.starts_with("+++")).filter_map(|l| {
+            let (id, intent) = l[1..].split_once('\t')?;
+            id.parse::<u64>().ok()?;
+            Some(json!({ "id": id.parse::<u64>().ok(), "intent": intent, "cue": cue_of(id) }))
+        }).collect();
+        let contested: Vec<String> = text.lines().filter_map(|l| l.strip_prefix("Contested: ").map(String::from)).collect();
+        let source = text.lines().find_map(|l| l.strip_prefix("Source: ")).unwrap_or("").to_string();
+        Some(json!({ "name": path.file_stem()?.to_string_lossy(), "path": format!(".bon/traces/proposals/{}", path.file_name()?.to_string_lossy()),
+            "source": source, "intents": intents, "contested": contested }))
+    }).collect();
+    out.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    out
+}
+
 fn jsonl(path: &Path) -> Vec<Value> {
     std::fs::read_to_string(path).unwrap_or_default().lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
 }
@@ -98,7 +121,7 @@ fn log(root: &Path, query: &str) -> Option<String> {
 /// Which bon processes the projection covers: those last active in
 /// [since, until] (unix seconds), whose pid, kind, goal, outcome or any commit
 /// contains `find`. Totals are over the same set.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct Filter { pub since: Option<u64>, pub until: Option<u64>, pub find: Option<String> }
 
 impl Filter {
@@ -294,6 +317,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
                     "removed": c["removed"],
                     "flags": (["killed", "over_limit", "price_mismatch"]).iter().filter(|k| facts[**k] == true).collect::<Vec<_>>(),
                     "logs": logs,
+                    "out": c["out"],
                 })))
             }).collect();
             candidates.sort_by_key(|(i, _)| *i);
@@ -507,9 +531,10 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
         "filter": { "since": filter.since, "until": filter.until, "find": filter.find },
         "bounds": { "earliest": (earliest != u64::MAX).then_some(earliest), "latest": (latest > 0).then_some(latest) },
         "queue": queue,
+        "proposals": proposals(root),
         "sbom": sbom(root),
         "spec": spec(root, &manifest),
-        "system": system(root, &format!("{remote}/{trunk_name}")),
+        "system": system(root, &format!("{remote}/{trunk_name}"), &manifest),
     })
 }
 
@@ -590,7 +615,19 @@ fn spec(root: &Path, manifest: &toml::Value) -> Value {
     while i < lines.len() {
         let l = lines[i].trim();
         if let Some(d) = l.strip_prefix("///") { doc.push(d.trim().to_string()); i += 1; continue; }
-        if l.starts_with("fields {") { in_fields = true; doc.clear(); i += 1; continue; }
+        if l.starts_with("fields {") {
+            // Fields on the same line as `fields {` and its close: read them there.
+            if let Some(inner) = l.strip_prefix("fields {").and_then(|r| r.trim_end().strip_suffix('}')) {
+                for part in inner.split(',').filter(|p| p.contains(':')) {
+                    let p = part.split("pub ").nth(1).unwrap_or(part);
+                    if let Some((name, ty)) = p.split_once(':') {
+                        let sharding = part.split("sharding(").nth(1).and_then(|s| s.split(')').next()).unwrap_or("");
+                        fields.push(json!({ "name": name.trim(), "type": ty.trim(), "sharding": sharding, "doc": "" }));
+                    }
+                }
+            } else { in_fields = true; }
+            doc.clear(); i += 1; continue;
+        }
         if in_fields {
             if l.starts_with('}') { in_fields = false; }
             else if let Some(rest) = l.split("pub ").nth(1) {
@@ -722,11 +759,6 @@ fn calls(text: &str, prefix: &str, name: &str) -> bool {
         || !text[..at].chars().last().map_or(false, |c| c.is_alphanumeric() || c == '_' || c == '.' || c == ':'))
 }
 
-/// The lines of each file that differ from `base` (trunk on the remote), working tree included.
-fn changed_lines(root: &Path, base: &str) -> std::collections::HashMap<String, Vec<(usize, usize)>> {
-    changed_lines_for(root, base, &["src", "view/src"])
-}
-
 fn changed_lines_for(root: &Path, base: &str, paths: &[&str]) -> std::collections::HashMap<String, Vec<(usize, usize)>> {
     let mut args = vec!["diff", "-U0", base, "--"];
     args.extend_from_slice(paths);
@@ -772,21 +804,28 @@ fn items(root: &Path, query: &str) -> Option<Value> {
     Some(json!({ "files": files, "items": out }))
 }
 
-/// The system as the source composes it, each layer named from the next by its own
-/// syntax. The kernel: the spec's state machine and predicates (src/spec.rs); the
-/// gates, whose `ensures` name the spec's predicates (src/gates.rs); and their
-/// implementation (src/exec.rs, src/encoding.rs). Then the bon process, whose
-/// functions hold the tokens and call the transitions (src/process.rs); the entry
-/// points (src/main.rs, src/view.rs, src/wasm.rs); the programs (view/src); and the
-/// trusted code the bon process calls (src/trusted.rs). Read from the working tree;
-/// each item is marked where its lines differ from trunk.
-fn system(root: &Path, base: &str) -> Value {
+/// The spec and how it reaches the code, found from the repository's own manifest
+/// and syntax, never from file names: the spec is the `checks.paths` file with a
+/// state machine; the gates are each `pub trait` in `checks.paths` whose contracts
+/// cite `spec::`; an implementation is an `impl <gate trait> for` anywhere; a driver
+/// is a function that fires a transition; entry points and targets are the
+/// `[sbom] trusted` files that reach a driver or a gate; trusted functions are the
+/// `external_body` ones a driver calls; emitted types are `[programs] from`'s
+/// declarations, and programs are the files that import a `[programs] types`
+/// target. Read from the working tree; each item is marked where it differs from trunk.
+fn system(root: &Path, base: &str, manifest: &toml::Value) -> Value {
     let read = |f: &str| std::fs::read_to_string(root.join(f)).unwrap_or_default();
-    let (spec_t, gates_t, exec_t, enc_t, proc_t, wasm_t, main_t, view_t, page_t, trusted_t) =
-        (read("src/spec.rs"), read("src/gates.rs"), read("src/exec.rs"), read("src/encoding.rs"), read("src/process.rs"),
-         read("src/wasm.rs"), read("src/main.rs"), read("src/view.rs"), read("view/src/main.ts"), read("src/trusted.rs"));
-    if !spec_t.contains("state_machine!") { return Value::Null; }
-    let changed = changed_lines(root, base);
+    let list = |v: Option<&toml::Value>| -> Vec<String> { v.and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect()).unwrap_or_default() };
+    let checks = list(manifest.get("checks").and_then(|c| c.get("paths")));
+    let trusted_files = list(manifest.get("sbom").and_then(|s| s.get("trusted")));
+    let from = list(manifest.get("programs").and_then(|p| p.get("from")));
+    let targets: Vec<String> = manifest.get("programs").and_then(|p| p.get("types")).and_then(|t| t.as_table())
+        .map(|t| t.values().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
+    let tracked: Vec<String> = git(root, &["ls-files"]).lines().map(String::from).collect();
+    let rust: Vec<&String> = tracked.iter().filter(|f| f.ends_with(".rs")).collect();
+    let Some(spec_file) = checks.iter().find(|p| p.ends_with(".rs") && read(p).contains("state_machine!")).cloned() else { return Value::Null };
+    let spec_t = read(&spec_file);
+    let changed = hunks(&git(root, &["diff", "-U0", base]));
     let hit = |file: &str, a: usize, b: usize| changed.get(file).map_or(false, |hs| hs.iter().any(|&(c, d)| c <= b && d >= a));
     let mut nodes: Vec<Value> = Vec::new();
     let mut edges: Vec<Value> = Vec::new();
@@ -796,6 +835,22 @@ fn system(root: &Path, base: &str) -> Value {
             "changed": f.map_or(false, |f| hit(file, f.start, f.end)) });
         if let (Some(o), Some(e)) = (v.as_object_mut(), extra.as_object()) { for (k, x) in e { o.insert(k.clone(), x.clone()); } }
         v
+    };
+    // Each `keyword …;` or `keyword …,` clause of a contract, verbatim, one line each.
+    let clauses = |body: &str, keyword: &str| -> Vec<String> {
+        let Some(rest) = body.split_once(&format!("{keyword}\n")).map(|(_, r)| r).or_else(|| body.split_once(&format!("{keyword} ")).map(|(_, r)| r)) else { return Vec::new() };
+        let stop = ["requires", "ensures", "decreases", "{", "recommends"];
+        let mut out = Vec::new();
+        let mut cur = String::new();
+        for l in rest.lines() {
+            let t = l.trim();
+            if stop.iter().any(|s| t.starts_with(s) && *s != keyword) || t.is_empty() { break; }
+            cur.push_str(if cur.is_empty() { "" } else { " " }); cur.push_str(t);
+            if t.ends_with(',') || t.ends_with(';') { out.push(cur.trim_end_matches([',', ';']).to_string()); cur.clear(); }
+            if t.ends_with(';') { break; }
+        }
+        if !cur.is_empty() { out.push(cur.trim_end_matches([',', ';']).to_string()); }
+        out
     };
 
     // ── spec: transitions (guards inline), then the predicates the gates cite, then the rules.
@@ -814,133 +869,186 @@ fn system(root: &Path, base: &str) -> Value {
             if depth <= 0 && j > i { break; }
             j += 1;
         }
-        let mut doc = String::new();
         let mut k = i;
         while k > 0 && spec_lines[k - 1].trim().starts_with("///") { k -= 1; }
-        if k < i { doc = spec_lines[k].trim().trim_start_matches("///").trim().to_string(); }
+        let doc = if k < i { spec_lines[k].trim().trim_start_matches("///").trim().to_string() } else { String::new() };
         let guards: Vec<String> = preds.iter().filter(|p| body.split("require").skip(1).any(|r| calls(r.split(';').next().unwrap_or(""), "", &p.name))).map(|p| p.name.clone()).collect();
         let token = |op: &str| body.lines().filter_map(|b| b.trim().strip_prefix(op).and_then(|r| r.split_whitespace().next()).map(String::from)).collect::<Vec<_>>();
         let f = Fn { name: name.clone(), start: i + 1, end: j + 1, doc, body: String::new(), public: true };
-        transitions.push(node(format!("spec:{name}"), "spec", if t.starts_with("init") { "init" } else { "transition" }, &name, "src/spec.rs", Some(&f),
+        transitions.push(node(format!("spec:{name}"), "spec", if t.starts_with("init") { "init" } else { "transition" }, &name, &spec_file, Some(&f),
             json!({ "guards": guards, "adds": token("add "), "removes": token("remove ") })));
     }
     let mut rules: Vec<Value> = spec_lines.iter().enumerate().filter(|(_, l)| l.trim().starts_with("property!{"))
         .filter_map(|(i, l)| {
             let name = l.trim().trim_start_matches("property!{").trim().split('(').next()?.trim().to_string();
-            let f = spec_fns.iter().find(|f| f.name == name).map(|f| Fn { name: f.name.clone(), start: i + 1, end: f.end, doc: f.doc.clone(), body: String::new(), public: true })
-                .unwrap_or(Fn { name: name.clone(), start: i + 1, end: i + 1, doc: String::new(), body: String::new(), public: true });
-            Some(node(format!("spec:{name}"), "spec", "property", &name, "src/spec.rs", Some(&f), json!({})))
+            let f = Fn { name: name.clone(), start: i + 1, end: i + 1, doc: String::new(), body: String::new(), public: true };
+            Some(node(format!("spec:{name}"), "spec", "property", &name, &spec_file, Some(&f), json!({})))
         }).collect();
-    let invariants: Vec<Value> = spec_lines.iter().enumerate().filter(|(_, l)| l.trim() == "#[invariant]")
+    rules.extend(spec_lines.iter().enumerate().filter(|(_, l)| l.trim() == "#[invariant]")
         .filter_map(|(i, _)| spec_fns.iter().find(|f| f.start == i + 2))
-        .map(|f| node(format!("spec:{}", f.name), "spec", "invariant", &f.name, "src/spec.rs", Some(f), json!({}))).collect();
-    rules.extend(invariants);
+        .map(|f| node(format!("spec:{}", f.name), "spec", "invariant", &f.name, &spec_file, Some(f), json!({}))));
 
-    // ── gates: the trait methods, their contracts citing spec::.
-    let gfns = fns(&gates_t);
-    let trait_at = |name: &str| gates_t.lines().position(|l| l.trim_start().starts_with(&format!("pub trait {name}"))).map(|p| p + 1).unwrap_or(usize::MAX);
-    let (gates_at, enc_at) = (trait_at("Gates"), trait_at("Encoding"));
-    let mut gate_names = Vec::new();
+    // ── gates: each `pub trait` in the checks whose methods' contracts cite spec::.
+    let mut gate_names: Vec<String> = Vec::new();
+    let mut gate_traits: Vec<String> = Vec::new();
     let mut cited: Vec<String> = Vec::new();
-    let glines: Vec<&str> = gates_t.lines().collect();
-    // A gate is a method of one of the two traits: indented, after its `pub trait`.
-    for f in gfns.iter().filter(|f| f.start > enc_at.min(gates_at) && glines[f.start - 1].starts_with(' ')) {
-        // Its trait: the nearest `pub trait` above it.
-        // Its block: the nearest unindented `pub trait` or `impl` above it; a method of an impl is not a gate.
-        let block = glines[..f.start - 1].iter().rev().find(|l| l.starts_with("pub trait ") || l.starts_with("impl")).copied().unwrap_or("");
-        let Some(group) = block.strip_prefix("pub trait ").map(|r| r.split(|c: char| !c.is_alphanumeric()).next().unwrap_or("").to_string()) else { continue };
-        let group = group.as_str();
-        nodes.push(node(format!("gate:{}", f.name), "gates", group, &f.name, "src/gates.rs", Some(f), json!({ "proof": f.body.contains("proof fn") })));
-        for p in &preds { if calls(&f.body, "spec::", &p.name) { edges.push(json!([format!("gate:{}", f.name), format!("spec:{}", p.name), "ensures"])); if !cited.contains(&p.name) { cited.push(p.name.clone()); } } }
-        gate_names.push(f.name.clone());
-    }
-
-    // ── the types the kernel emits for programs (examples/types.rs → view/src/kernel.ts),
-    //    each where gates.rs declares it.
-    let emitted = read("view/src/kernel.ts");
-    let mut type_names = Vec::new();
-    for l in emitted.lines() {
-        let Some(rest) = l.strip_prefix("export type ").or_else(|| l.strip_prefix("export interface ")) else { continue };
-        let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
-        let Some(at) = glines.iter().position(|g| ["pub struct ", "pub enum ", "pub type "].iter().any(|k| g.trim_start().strip_prefix(k).map_or(false, |r| r.starts_with(&name) && !r[name.len()..].starts_with(|c: char| c.is_alphanumeric() || c == '_')))) else { continue };
-        let mut end = at;
-        if !glines[at].trim_end().ends_with(';') { while end + 1 < glines.len() && !glines[end].starts_with('}') && !(end > at && glines[end].trim_end().ends_with('}') && !glines[end].starts_with(' ')) { end += 1; } }
-        let mut k = at;
-        while k > 0 && glines[k - 1].trim().starts_with("///") { k -= 1; }
-        let doc = if k < at { glines[k].trim().trim_start_matches("///").trim().to_string() } else { String::new() };
-        let f = Fn { name: name.clone(), start: at + 1, end: end + 1, doc, body: String::new(), public: true };
-        nodes.push(node(format!("type:{name}"), "gates", "types", &name, "src/gates.rs", Some(&f), json!({})));
-        type_names.push(name);
-    }
-
-    // ── implementation: each gate's, and the public functions the bon process calls.
-    let efns = fns(&exec_t);
-    let private: Vec<&Fn> = efns.iter().filter(|f| !f.public).collect();
-    let impl_at = exec_t.lines().position(|l| l.starts_with("impl Gates for Kernel")).map(|p| p + 1).unwrap_or(usize::MAX);
-    let mut kernel_names = Vec::new();
-    for f in efns.iter().filter(|f| f.public && f.start < impl_at) {
-        let uses: Vec<String> = private.iter().filter(|h| h.name != f.name && calls(&f.body, "", &h.name)).map(|h| h.name.clone()).collect();
-        let group = if gate_names.contains(&f.name) { "gate" } else { "process" };
-        nodes.push(node(format!("kernel:{}", f.name), "implementation", group, &f.name, "src/exec.rs", Some(f), json!({ "uses": uses })));
-        if gate_names.contains(&f.name) { edges.push(json!([format!("kernel:{}", f.name), format!("gate:{}", f.name), "implements"])); }
-        kernel_names.push(f.name.clone());
-    }
-    let enc_impl = enc_t.lines().position(|l| l.starts_with("impl Encoding for Kernel")).map(|p| p + 1).unwrap_or(usize::MAX);
-    for f in fns(&enc_t).iter().filter(|f| f.start > enc_impl && gate_names.contains(&f.name)) {
-        nodes.push(node(format!("kernel:{}", f.name), "implementation", "encoding", &f.name, "src/encoding.rs", Some(f), json!({ "uses": [] })));
-        edges.push(json!([format!("kernel:{}", f.name), format!("gate:{}", f.name), "implements"]));
-        kernel_names.push(f.name.clone());
-    }
-
-    // ── the bon process (tokens, gates, trusted code); the wasm32 target; entry points; programs.
-    let trusted_fns = fns(&trusted_t);
-    let mut trusted_used: Vec<String> = Vec::new();
-    let pfns = fns(&proc_t);
-    for f in &pfns {
-        let fires: Vec<&Value> = transitions.iter().filter(|t| { let n = t["name"].as_str().unwrap_or(""); f.body.contains(&format!("instance.{n}(")) || f.body.contains(&format!("Instance::{n}(")) }).collect();
-        let gates_called: Vec<&String> = kernel_names.iter().filter(|g| calls(&f.body, "", g)).collect();
-        if fires.is_empty() && gates_called.is_empty() { continue; }
-        let trusted: Vec<String> = trusted_fns.iter().filter(|t| calls(&f.body, "trusted::", &t.name)).map(|t| t.name.clone()).collect();
-        for t in &trusted { if !trusted_used.contains(t) { trusted_used.push(t.clone()); } }
-        let id = format!("driver:{}", f.name);
-        nodes.push(node(id.clone(), "process", "function", &f.name, "src/process.rs", Some(f), json!({ "trusted": trusted })));
-        for t in fires { edges.push(json!([id, t["id"], "transition"])); }
-        for g in gates_called { edges.push(json!([id, format!("kernel:{g}"), "calls"])); }
-        for d in pfns.iter().filter(|d| d.name != f.name && calls(&f.body, "", &d.name)) { edges.push(json!([id, format!("driver:{}", d.name), "calls"])); }
-    }
-    let wfns = fns(&wasm_t);
-    let mut exported = Vec::new();
-    for f in wfns.iter().filter(|f| f.body.contains("extern \"C\"")) {
-        let id = format!("wasm:{}", f.name);
-        let called: Vec<&String> = gate_names.iter().filter(|g| calls(&f.body, "Kernel::", g)).collect();
-        if called.is_empty() { continue; }
-        nodes.push(node(id.clone(), "target", "wasm32", &f.name, "src/wasm.rs", Some(f), json!({})));
-        for g in called { if kernel_names.contains(g) { edges.push(json!([id, format!("kernel:{g}"), "calls"])); } }
-        exported.push(f.name.clone());
-    }
-    let whole = |text: &str| Fn { name: String::new(), start: 1, end: text.lines().count().max(1), doc: text.lines().next().unwrap_or("").trim_start_matches("//!").trim().to_string(), body: text.to_string(), public: true };
-    nodes.push(node("entry:cli".into(), "entry", "main", "bon", "src/main.rs", Some(&whole(&main_t)), json!({})));
-    for f in pfns.iter().filter(|f| f.public && calls(&main_t, "process::", &f.name)) { edges.push(json!(["entry:cli", format!("driver:{}", f.name), "calls"])); }
-    nodes.push(node("entry:view".into(), "entry", "view", "bon view", "src/view.rs", Some(&whole(&view_t)), json!({})));
-    for g in gate_names.iter().filter(|g| calls(&view_t, "Kernel::", g)) { edges.push(json!(["entry:view", format!("kernel:{g}"), "calls"])); }
-    nodes.push(node("program:page".into(), "program", "typescript", "the page", "view/src/main.ts", Some(&whole(&page_t)), json!({})));
-    for l in page_t.lines().filter(|l| l.starts_with("import") && l.contains("from './kernel'")) {
-        let names = l.split('{').nth(1).and_then(|r| r.split('}').next()).unwrap_or("");
-        for n in names.split(',').map(|n| n.trim().split_whitespace().next().unwrap_or("")) {
-            if type_names.iter().any(|t| t == n) { edges.push(json!(["program:page", format!("type:{n}"), "types"])); }
+    for file in checks.iter().filter(|p| p.ends_with(".rs") && **p != spec_file) {
+        let text = read(file);
+        let lines: Vec<&str> = text.lines().collect();
+        for f in fns(&text).iter().filter(|f| lines[f.start - 1].starts_with(' ')) {
+            let block = lines[..f.start - 1].iter().rev().find(|l| l.starts_with("pub trait ") || l.starts_with("impl")).copied().unwrap_or("");
+            let Some(tr) = block.strip_prefix("pub trait ").map(|r| r.split(|c: char| !c.is_alphanumeric() && c != '_').next().unwrap_or("").to_string()) else { continue };
+            let cites: Vec<&&Fn> = preds.iter().filter(|p| calls(&f.body, "spec::", &p.name)).collect();
+            let contract = f.body.contains("ensures") || f.body.contains("requires");
+            if !contract { continue; }
+            if !gate_traits.contains(&tr) { gate_traits.push(tr.clone()); }
+            nodes.push(node(format!("gate:{}", f.name), "gates", &tr, &f.name, file, Some(f),
+                json!({ "proof": f.body.contains("proof fn"), "requires": clauses(&f.body, "requires"), "ensures": clauses(&f.body, "ensures") })));
+            for p in cites { edges.push(json!([format!("gate:{}", f.name), format!("spec:{}", p.name), "ensures"])); if !cited.contains(&p.name) { cited.push(p.name.clone()); } }
+            gate_names.push(f.name.clone());
         }
     }
-    for w in exported.iter().filter(|w| page_t.contains(&format!("call('{w}'"))) { edges.push(json!(["program:page", format!("wasm:{w}"), "calls"])); }
 
-    // Spec nodes: the transitions, the predicates the gates cite, the rules.
+    // ── the types emitted for programs: `[programs] from`'s declarations.
+    let mut type_names = Vec::new();
+    for file in &from {
+        let text = read(file);
+        let lines: Vec<&str> = text.lines().collect();
+        for (at, l) in lines.iter().enumerate() {
+            let Some(rest) = ["pub struct ", "pub enum ", "pub type "].iter().find_map(|k| l.strip_prefix(k)) else { continue };
+            let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+            let mut k = at;
+            while k > 0 && lines[k - 1].trim().starts_with("///") { k -= 1; }
+            let doc = if k < at { lines[k].trim().trim_start_matches("///").trim().to_string() } else { String::new() };
+            let f = Fn { name: name.clone(), start: at + 1, end: at + 1, doc, body: String::new(), public: true };
+            nodes.push(node(format!("type:{name}"), "gates", "types", &name, file, Some(&f), json!({})));
+            type_names.push(name);
+        }
+    }
+
+    // ── implementation: each `impl <gate trait> for`, anywhere; its methods, at the free fn they delegate to.
+    let mut kernel_names: Vec<String> = Vec::new();
+    let mut impl_files: Vec<String> = Vec::new();
+    let mut private = 0usize;
+    for file in rust.iter().filter(|f| !checks.contains(f) && !trusted_files.contains(f)) {
+        let text = read(file);
+        let lines: Vec<&str> = text.lines().collect();
+        let all = fns(&text);
+        let mut found = false;
+        for (at, l) in lines.iter().enumerate() {
+            let Some(tr) = l.strip_prefix("impl ").and_then(|r| r.split(" for ").next()).map(|t| t.split('<').next().unwrap_or("").trim().to_string()) else { continue };
+            if !gate_traits.contains(&tr) { continue; }
+            found = true;
+            for m in all.iter().filter(|m| m.start > at + 1 && lines[m.start - 1].starts_with(' ') && gate_names.contains(&m.name)) {
+                if lines[at + 1..m.start - 1].iter().any(|x| x.starts_with("impl ") || x.starts_with('}')) { continue; }
+                let target = all.iter().find(|f| f.name == m.name && !lines[f.start - 1].starts_with(' ')).unwrap_or(m);
+                let uses: Vec<String> = all.iter().filter(|h| !h.public && h.name != target.name && calls(&target.body, "", &h.name)).map(|h| h.name.clone()).collect();
+                nodes.push(node(format!("kernel:{}", m.name), "implementation", &tr, &m.name, file, Some(target), json!({ "uses": uses })));
+                edges.push(json!([format!("kernel:{}", m.name), format!("gate:{}", m.name), "implements"]));
+                kernel_names.push(m.name.clone());
+            }
+        }
+        if found { private += all.iter().filter(|f| !f.public).count(); impl_files.push(file.to_string()); }
+    }
+
+    // ── drivers: the functions that fire a transition, and what they call.
+    let stem = |f: &str| Path::new(f).file_stem().map_or(String::new(), |s| s.to_string_lossy().to_string());
+    let trusted_fns: Vec<(String, Fn)> = trusted_files.iter().filter(|f| f.ends_with(".rs"))
+        .flat_map(|f| { let text = read(f); let lines: Vec<String> = text.lines().map(String::from).collect();
+            fns(&text).into_iter().filter(|x| x.start >= 2 && lines[x.start - 2].trim().starts_with("#[verifier::external_body]")).map(|x| (f.clone(), x)).collect::<Vec<_>>() })
+        .collect();
+    let mut trusted_used: Vec<(String, String)> = Vec::new();
+    let mut drivers: Vec<(String, String)> = Vec::new();
+    for file in rust.iter().filter(|f| !checks.contains(f) && !trusted_files.contains(f)) {
+        let all = fns(&read(file));
+        for f in &all {
+            let fires: Vec<&Value> = transitions.iter().filter(|t| { let n = t["name"].as_str().unwrap_or(""); f.body.contains(&format!("instance.{n}(")) || f.body.contains(&format!("Instance::{n}(")) }).collect();
+            let gates_called: Vec<&String> = if impl_files.contains(file) { Vec::new() } else { kernel_names.iter().filter(|g| calls(&f.body, "", g)).collect() };
+            if fires.is_empty() && gates_called.is_empty() { continue; }
+            let trusted: Vec<String> = trusted_fns.iter().filter(|(tf, t)| calls(&f.body, &format!("{}::", stem(tf)), &t.name)).map(|(_, t)| t.name.clone()).collect();
+            for (tf, t) in &trusted_fns { if trusted.contains(&t.name) && !trusted_used.iter().any(|(a, b)| a == tf && *b == t.name) { trusted_used.push((tf.clone(), t.name.clone())); } }
+            let id = format!("driver:{}", f.name);
+            nodes.push(node(id.clone(), "process", &stem(file), &f.name, file, Some(f), json!({ "trusted": trusted })));
+            for t in fires { edges.push(json!([id, t["id"], "transition"])); }
+            for g in gates_called { edges.push(json!([id, format!("kernel:{g}"), "calls"])); }
+            for d in all.iter().filter(|d| d.name != f.name && calls(&f.body, "", &d.name)) { edges.push(json!([id, format!("driver:{}", d.name), "calls"])); }
+            drivers.push((file.to_string(), f.name.clone()));
+        }
+    }
+
+    // The public functions of an implementation file that a driver calls, beside the gates.
+    let driver_bodies: Vec<String> = rust.iter().filter(|f| !checks.contains(f) && !trusted_files.contains(f) && !impl_files.contains(f))
+        .flat_map(|f| fns(&read(f)).into_iter().filter(|d| drivers.iter().any(|(_, n)| *n == d.name)).map(|d| d.body)).collect();
+    for file in &impl_files {
+        let text = read(file);
+        let lines: Vec<&str> = text.lines().collect();
+        for f in fns(&text).iter().filter(|f| f.public && !lines[f.start - 1].starts_with(' ') && !kernel_names.contains(&f.name)) {
+            if !driver_bodies.iter().any(|b| calls(b, "", &f.name)) { continue; }
+            nodes.push(node(format!("kernel:{}", f.name), "implementation", "called by drivers", &f.name, file, Some(f), json!({ "uses": [] })));
+            for (df, d) in &drivers { if fns(&read(df)).iter().any(|x| x.name == *d && calls(&x.body, "", &f.name)) { edges.push(json!([format!("driver:{d}"), format!("kernel:{}", f.name), "calls"])); } }
+        }
+    }
+
+    // ── entry points and targets: the trusted files that reach a driver or a gate.
+    let whole = |text: &str| Fn { name: String::new(), start: 1, end: text.lines().count().max(1), doc: text.lines().find(|l| l.starts_with("//!")).unwrap_or("").trim_start_matches("//!").trim().to_string(), body: text.to_string(), public: true };
+    let mut exported = Vec::new();
+    for file in trusted_files.iter().filter(|f| f.ends_with(".rs")) {
+        let text = read(file);
+        let externs: Vec<Fn> = fns(&text).into_iter().filter(|f| f.body.contains("extern \"C\"")).collect();
+        let mut reached = false;
+        for f in &externs {
+            let called: Vec<&String> = gate_names.iter().filter(|g| calls(&f.body, "::", g)).collect();
+            if called.is_empty() { continue; }
+            reached = true;
+            nodes.push(node(format!("target:{}", f.name), "target", &stem(file), &f.name, file, Some(f), json!({})));
+            for g in called { if kernel_names.contains(g) { edges.push(json!([format!("target:{}", f.name), format!("kernel:{g}"), "calls"])); } }
+            exported.push(f.name.clone());
+        }
+        if reached { continue; }
+        let to_drivers: Vec<&(String, String)> = drivers.iter().filter(|(df, d)| calls(&text, &format!("{}::", stem(df)), d)).collect();
+        let to_gates: Vec<&String> = gate_names.iter().filter(|g| calls(&text, "::", g)).collect();
+        if to_drivers.is_empty() && to_gates.is_empty() { continue; }
+        let id = format!("entry:{}", stem(file));
+        nodes.push(node(id.clone(), "entry", &stem(file), file, file, Some(&whole(&text)), json!({})));
+        for (_, d) in to_drivers { edges.push(json!([id, format!("driver:{d}"), "calls"])); }
+        for g in to_gates { if kernel_names.contains(g) { edges.push(json!([id, format!("kernel:{g}"), "calls"])); } }
+    }
+
+    // ── programs: the files that import a `[programs] types` target.
+    for target in &targets {
+        let module = stem(target);
+        let dir = Path::new(target).parent().map_or(String::new(), |d| d.to_string_lossy().to_string());
+        let dirname = stem(&dir);
+        // A program is in the target's own language.
+        let ext = Path::new(target).extension().map_or(String::new(), |e| e.to_string_lossy().to_string());
+        for file in tracked.iter().filter(|f| *f != target && f.ends_with(&format!(".{ext}"))) {
+            let text = read(file);
+            let imported: Vec<String> = text.lines().filter_map(|l| {
+                let t = l.trim();
+                if file.ends_with(".ts") && (t.contains(&format!("from './{module}'")) || t.contains(&format!("from \"./{module}\""))) { Some(t.split('{').nth(1)?.split('}').next()?.to_string()) }
+                else if file.ends_with(".py") && t.starts_with(&format!("from {module} import ")) { Some(t[format!("from {module} import ").len()..].to_string()) }
+                else { None }
+            }).flat_map(|names| names.split(',').map(|n| n.trim().split_whitespace().next().unwrap_or("").to_string()).collect::<Vec<_>>()).collect();
+            let go = file.ends_with(".go") && text.contains(&format!("/{dirname}\""));
+            if imported.is_empty() && !go { continue; }
+            let id = format!("program:{file}");
+            let lang = if file.ends_with(".ts") { "typescript" } else if file.ends_with(".go") { "go" } else { "python" };
+            nodes.push(node(id.clone(), "program", lang, file, file, Some(&whole(&text)), json!({})));
+            let used: Vec<&String> = if go { type_names.iter().filter(|t| text.contains(&format!("{dirname}.{t}"))).collect() } else { type_names.iter().filter(|t| imported.contains(t)).collect() };
+            for t in used { edges.push(json!([id, format!("type:{t}"), "types"])); }
+            for w in exported.iter().filter(|w| text.contains(&format!("call('{w}'"))) { edges.push(json!([id, format!("target:{w}"), "calls"])); }
+        }
+    }
+
+    // Spec nodes: the transitions, the predicates the gates cite, the rules; then the rest.
     let mut spec_nodes = transitions;
-    for p in preds.iter().filter(|p| cited.contains(&p.name)) { spec_nodes.push(node(format!("spec:{}", p.name), "spec", "predicate", &p.name, "src/spec.rs", Some(p), json!({}))); }
+    for p in preds.iter().filter(|p| cited.contains(&p.name)) { spec_nodes.push(node(format!("spec:{}", p.name), "spec", "predicate", &p.name, &spec_file, Some(p), json!({}))); }
     spec_nodes.extend(rules);
     spec_nodes.extend(nodes);
-    let trusted: Vec<Value> = trusted_fns.iter().filter(|t| trusted_used.contains(&t.name))
-        .map(|t| json!({ "name": t.name, "line": t.start, "doc": t.doc, "changed": hit("src/trusted.rs", t.start, t.end) })).collect();
+    let trusted: Vec<Value> = trusted_fns.iter().filter(|(tf, t)| trusted_used.iter().any(|(a, b)| a == tf && *b == t.name))
+        .map(|(tf, t)| json!({ "name": t.name, "file": tf, "line": t.start, "doc": t.doc, "changed": hit(tf, t.start, t.end) })).collect();
     json!({ "nodes": spec_nodes, "edges": edges, "trusted": trusted,
-        "counts": { "predicates": preds.len(), "private": private.len(), "trusted": trusted_fns.len() } })
+        "counts": { "predicates": preds.len(), "private": private, "trusted": trusted_fns.len() } })
 }
 
 /// A tracked file as text, its lines numbered, `from`..`to` marked, and each line that
@@ -969,7 +1077,9 @@ fn source(root: &Path, query: &str) -> Option<String> {
         if changed.iter().any(|&(a, b)| n >= a && n <= b) { class.push_str(" diff"); }
         format!("<tr id=\"L{n}\" class=\"{}\"><td class=\"n\"><a href=\"#L{n}\">{n}</a></td><td class=\"c\">{}</td></tr>", class.trim(), esc(l))
     }).collect();
-    let files = ["src/spec.rs", "src/gates.rs", "src/exec.rs", "src/encoding.rs", "src/process.rs", "src/trusted.rs", "src/main.rs", "src/view.rs", "src/wasm.rs", "view/src/main.ts", "view/src/kernel.ts", "examples/types.rs"];
+    let graph = system(root, &format!("{remote}/{trunk}"), &manifest.clone().unwrap_or(toml::Value::Table(Default::default())));
+    let mut files: Vec<String> = graph["nodes"].as_array().into_iter().flatten().filter_map(|n| n["file"].as_str().map(String::from)).collect();
+    files.sort(); files.dedup();
     let nav: String = files.iter().map(|f| format!("<a class=\"{}\" href=\"/source?path={f}\">{f}</a>", if *f == path { "here" } else { "" })).collect();
     Some(format!(r#"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{p} · bon view</title><style>
 :root{{color-scheme:light dark;--bg:#F3EDE0;--surface:#FAF6EE;--ink:#1B1A18;--muted:#8F887C;--line:#DDD3C1;--on:rgba(51,37,138,.12);--onbar:#33258A;--diff:#93680A}}

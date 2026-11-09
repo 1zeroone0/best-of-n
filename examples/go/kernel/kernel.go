@@ -107,12 +107,14 @@ type Projection struct {
 	// The bon processes of one goal, together: a row of the traces.
 	Groups []GoalTrace `json:"groups"`
 	// What is wanted and not yet in the spec.
-	Queue  *[]QueueLine `json:"queue"`
-	Filter Filter       `json:"filter"`
-	Bounds Bounds       `json:"bounds"`
-	Spec   *SpecOutline `json:"spec"`
-	System *SpecGraph   `json:"system"`
-	Sbom   *SbomFile    `json:"sbom"`
+	Queue *[]QueueLine `json:"queue"`
+	// Queue proposals waiting for engineer: patches bon queue wrote.
+	Proposals []Proposal   `json:"proposals"`
+	Filter    Filter       `json:"filter"`
+	Bounds    Bounds       `json:"bounds"`
+	Spec      *SpecOutline `json:"spec"`
+	System    *SpecGraph   `json:"system"`
+	Sbom      *SbomFile    `json:"sbom"`
 }
 
 // The repository and its trunk.
@@ -271,6 +273,24 @@ type Facts struct {
 	Flags   []string `json:"flags"`
 	Logs    []string `json:"logs"`
 	Changed []string `json:"changed"`
+	// A hash of each agree check's output: candidates with the same agree.
+	Out []uint64 `json:"out"`
+}
+
+// A queue proposal: a patch adding intents, each with the cue it came from.
+type Proposal struct {
+	Name    string           `json:"name"`
+	Path    string           `json:"path"`
+	Source  string           `json:"source"`
+	Intents []ProposedIntent `json:"intents"`
+	// Cues only one candidate cited, shown apart from the proposal.
+	Contested []string `json:"contested"`
+}
+
+type ProposedIntent struct {
+	Id     *uint64 `json:"id"`
+	Intent string  `json:"intent"`
+	Cue    *string `json:"cue"`
 }
 
 // One line of the queue.
@@ -344,11 +364,15 @@ type SpecNode struct {
 	Uses    []string `json:"uses"`
 	Trusted []string `json:"trusted"`
 	Proof   bool     `json:"proof"`
+	// A gate's contract, each clause as written.
+	Requires []string `json:"requires"`
+	Ensures  []string `json:"ensures"`
 }
 
 // A function in trusted code the bon process calls.
 type TrustedFunction struct {
 	Name    string  `json:"name"`
+	File    string  `json:"file"`
 	Line    uint64  `json:"line"`
 	Doc     *string `json:"doc"`
 	Changed bool    `json:"changed"`
