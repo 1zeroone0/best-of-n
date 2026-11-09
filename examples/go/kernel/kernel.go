@@ -57,7 +57,8 @@ type KindCounterexample struct {
 }
 
 type KindFoil struct {
-	Goal AgentProcess `json:"goal"`
+	Goal    AgentProcess `json:"goal"`
+	Changed []Path       `json:"changed"`
 }
 
 // One generated change, as trusted code observed it.
@@ -78,8 +79,12 @@ type Candidate struct {
 	// foil search. A repeated index: the first counts.
 	AcceptsFoils           []Tuple2[int64, bool] `json:"accepts_foils"`
 	RejectsCounterexamples bool                  `json:"rejects_counterexamples"`
-	Rank                   int64                 `json:"rank"`
-	Diff                   uint64                `json:"diff"`
+	// Every agree check and the rank check exited 0.
+	Measured bool `json:"measured"`
+	// The paths the diff added, as git reports them.
+	Added []Path `json:"added"`
+	Rank  int64  `json:"rank"`
+	Diff  uint64 `json:"diff"`
 }
 
 // One search, once every agent process has returned: `results[i]` is what

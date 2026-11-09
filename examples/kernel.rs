@@ -13,7 +13,7 @@ fn candidate(commit: &str, out: u64, rank: i64) -> Candidate {
         commit: t(commit), base: t("b0"), accepted: true, proved: true,
         changed: vec![t("src/a.rs"), t("src/\"quoted\"\\path.rs")],
         out: vec![Hash(out), Hash(u64::MAX)], intents: vec![(1200, t("an intent\twith a tab"))],
-        accepts: vec![(-1, true), (0, false)], accepts_foils: vec![(0, false), (1, true)], rejects_counterexamples: true, rank, diff: 3,
+        accepts: vec![(-1, true), (0, false)], accepts_foils: vec![(0, false), (1, true)], rejects_counterexamples: true, measured: true, added: vec![t("tests/c_1.rs")], rank, diff: 3,
     }
 }
 
@@ -24,7 +24,7 @@ fn main() {
         Kind::Compaction { goal: t("c0ffee"), out: vec![Hash(5276956862258435173)] },
         Kind::Counterexample { goal: Some(AgentProcess { search: 0, index: 1 }) },
         Kind::Counterexample { goal: None },
-        Kind::Foil { goal: AgentProcess { search: 0, index: 1 } },
+        Kind::Foil { goal: AgentProcess { search: 0, index: 1 }, changed: vec![t("src/a.rs")] },
     ];
     for kind in kinds {
         let s = Search {

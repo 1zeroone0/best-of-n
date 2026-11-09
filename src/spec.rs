@@ -79,8 +79,9 @@ pub enum Kind {
     /// The goal is the selected candidate of a code or compaction search:
     /// candidates change it into a program trunk's tests accept and Verus
     /// rejects, a foil. A counterexample's test counts toward `not_found` only
-    /// when it rejects a foil. Never pushed.
-    Foil { goal: AgentProcess },
+    /// when it rejects a foil. `changed` is the paths the goal changed: a foil
+    /// may change only those, so it breaks what this push adds. Never pushed.
+    Foil { goal: AgentProcess, changed: Set<Path> },
 }
 
 /// One generated change, as trusted code observed it after its agent process exited.
@@ -107,6 +108,11 @@ pub struct Candidate {
     /// Compaction: this candidate's tests reject every counterexample on
     /// trunk. (TCB: trusted code ran them)
     pub rejects_counterexamples: bool,
+    /// Code and compaction: every agree check and the rank check exited 0, so
+    /// `out` and `rank` were measured, not read off a failure. (TCB: trusted code ran them)
+    pub measured: bool,
+    /// The paths the diff added: in this commit and not in its base. (TCB: git)
+    pub added: Set<Path>,
     pub rank: int,
     /// Lines changed against base.
     pub diff: nat,
@@ -169,7 +175,8 @@ pub open spec fn protected(checks: Set<Path>, trusted: Set<Path>, path: Path) ->
 pub open spec fn authority(kind: Kind, checks: Set<Path>, tests: Set<Path>, trusted: Set<Path>) -> ISet<Path> {
     match kind {
         Kind::Queue { .. } => ISet::new(|path: Path| path == queue_path()),
-        Kind::Code { .. } | Kind::Foil { .. } => ISet::new(|path: Path| !protected(checks, trusted, path) && !under(tests, path)),
+        Kind::Code { .. } => ISet::new(|path: Path| !protected(checks, trusted, path) && !under(tests, path)),
+        Kind::Foil { changed, .. } => ISet::new(|path: Path| !protected(checks, trusted, path) && !under(tests, path) && changed.contains(path)),
         Kind::Compaction { .. } => ISet::new(|path: Path| !protected(checks, trusted, path)),
         Kind::Counterexample { .. } => ISet::new(|path: Path| !protected(checks, trusted, path) && under(tests, path)),
     }
@@ -206,12 +213,16 @@ pub open spec fn rejected(candidate: Candidate) -> bool { !candidate.accepted }
 /// candidate is a test, which Verus says nothing about: it starts from
 /// trunk's head, which fails Verus (and, when a gate is added or changed, does
 /// not build) while a code search closes a spec change, so it is verified
-/// without `proved`, and accepted when it builds on the tree it tests. A compaction's candidate also keeps
-/// rejecting every counterexample.
+/// without `proved`, and accepted when it builds on the tree it tests; it is
+/// exactly one new test, the one that runs, so nothing lands that did not. A
+/// code or compaction candidate's agree and rank were measured. A compaction's
+/// candidate also keeps rejecting every counterexample.
 pub open spec fn verified(search: Search, candidate: Candidate) -> bool {
     accepted(candidate) && (candidate.proved || search.kind is Counterexample)
     && (forall|path: Path| candidate.changed.contains(path) ==> search.authority.contains(path))
     && (search.kind is Compaction ==> candidate.rejects_counterexamples)
+    && ((search.kind is Code || search.kind is Compaction) ==> candidate.measured)
+    && (search.kind is Counterexample ==> exists|path: Path| candidate.changed == set![path] && candidate.added.contains(path))
 }
 
 /// Index i of search has a candidate, and it is verified.
@@ -245,8 +256,13 @@ pub open spec fn pushable(searches: Seq<Search>, tested_index: int, i: int) -> b
     exists|counterexample_index: int, foil_index: int|
         0 <= counterexample_index < searches.len() && 0 <= foil_index < searches.len()
         && searches[counterexample_index].kind == (Kind::Counterexample { goal: Some(AgentProcess { search: tested_index, index: i }) })
-        && searches[foil_index].kind == (Kind::Foil { goal: AgentProcess { search: tested_index, index: i } })
+        && foils_on(searches[foil_index], tested_index, i)
         && not_found(searches[counterexample_index], searches[tested_index], searches[foil_index])
+}
+
+/// search is a foil search on candidate i of the search at tested_index.
+pub open spec fn foils_on(search: Search, tested_index: int, i: int) -> bool {
+    search.kind matches Kind::Foil { goal, .. } && goal == (AgentProcess { search: tested_index, index: i })
 }
 
 /// a at index ai outranks b at index bi: rank, then smaller diff, then earlier.
@@ -269,11 +285,17 @@ pub open spec fn member(tested: Search, j: int) -> bool {
 
 /// Counterexample: candidate, a test, splits the members of tested: it accepts
 /// one and rejects another, so one shows a behavior the spec forbids. A test
-/// with no result on a member counts as splitting.
+/// with no result on a member (it did not build there, or timed out) says
+/// nothing about it: no result never splits.
 pub open spec fn splits(candidate: Candidate, tested: Search) -> bool {
     exists|j1: int, j2: int| member(tested, j1) && member(tested, j2)
-        && !(candidate.accepts.contains_key(j1) && candidate.accepts.contains_key(j2)
-             && candidate.accepts[j1] == candidate.accepts[j2])
+        && candidate.accepts.contains_key(j1) && candidate.accepts.contains_key(j2)
+        && candidate.accepts[j1] != candidate.accepts[j2]
+}
+
+/// Counterexample: candidate, a test, has a result on every member of tested.
+pub open spec fn judges(candidate: Candidate, tested: Search) -> bool {
+    forall|j: int| member(tested, j) ==> candidate.accepts.contains_key(j)
 }
 
 /// Counterexample: candidate, a test, rejects every member of tested. It
@@ -305,17 +327,17 @@ pub open spec fn found(counterexample: Search, tested: Search) -> bool {
 }
 
 /// Counterexample: every agent process of counterexample and of foils
-/// returned, at least two verified tests reject a foil, and no verified test
-/// splits tested or rejects every member of it: no counterexample was found.
-/// Fewer than two tests that reject a foil means nothing was looked for; a
-/// test that rejects every member does not split them, but is no sign that
-/// nothing is wrong. Either way, neither `found` nor `not_found`, so nothing
-/// it tested may be pushed.
+/// returned, at least two verified tests judge every member and reject a
+/// foil, and no verified test splits tested or rejects every member of it: no
+/// counterexample was found. Fewer than two such tests means nothing was
+/// looked for; a test that rejects every member does not split them, but is
+/// no sign that nothing is wrong. Either way, neither `found` nor `not_found`,
+/// so nothing it tested may be pushed.
 pub open spec fn not_found(counterexample: Search, tested: Search, foils: Search) -> bool {
     complete(counterexample) && complete(foils)
     && (exists|i: int, j: int| i != j
-        && verified_at(counterexample, i) && discriminates(at(counterexample, i), foils)
-        && verified_at(counterexample, j) && discriminates(at(counterexample, j), foils))
+        && verified_at(counterexample, i) && judges(at(counterexample, i), tested) && discriminates(at(counterexample, i), foils)
+        && verified_at(counterexample, j) && judges(at(counterexample, j), tested) && discriminates(at(counterexample, j), foils))
     && forall|i: int| verified_at(counterexample, i) ==>
         !splits(at(counterexample, i), tested) && !rejects_every(at(counterexample, i), tested)
 }
@@ -375,7 +397,7 @@ pub enum Blocked {
     TooFewTests,
     /// Otherwise: a verified test rejects every candidate it tested.
     RejectsEvery,
-    /// Otherwise: fewer than two verified tests reject a foil.
+    /// Otherwise: fewer than two verified tests judge every candidate and reject a foil.
     Undiscriminating,
     /// The gates allowed the push, and trunk moved during the search. (git)
     TrunkMoved,
@@ -581,13 +603,14 @@ tokenized_state_machine!{ bon {
             0 <= agent_process.search < pre.searches.len()
             && selected(pre.searches[agent_process.search], agent_process.index)
             && pre.searches[agent_process.search].base == pre.trunk.last();
-        require kind matches Kind::Foil { goal: agent_process } ==>
+        require kind matches Kind::Foil { goal: agent_process, changed } ==>
             0 <= agent_process.search < pre.searches.len()
             && selected(pre.searches[agent_process.search], agent_process.index)
-            && pre.searches[agent_process.search].base == pre.trunk.last();
+            && pre.searches[agent_process.search].base == pre.trunk.last()
+            && changed == at(pre.searches[agent_process.search], agent_process.index).changed;
         let search_index = pre.searches.len() as int;
         let base = match kind {
-            Kind::Foil { goal } => at(pre.searches[goal.search], goal.index).commit,
+            Kind::Foil { goal, .. } => at(pre.searches[goal.search], goal.index).commit,
             _ => pre.trunk.last(),
         };
         let attenuated = authority(kind, pre.checks, pre.tests, pre.trusted);
@@ -618,7 +641,7 @@ tokenized_state_machine!{ bon {
         require 0 <= tested_index < pre.searches.len() && 0 <= counterexample_index < pre.searches.len() && 0 <= foil_index < pre.searches.len();
         require selected(pre.searches[tested_index], i);
         require pre.searches[counterexample_index].kind == Kind::Counterexample { goal: Some(AgentProcess { search: tested_index, index: i }) };
-        require pre.searches[foil_index].kind == Kind::Foil { goal: AgentProcess { search: tested_index, index: i } };
+        require foils_on(pre.searches[foil_index], tested_index, i);
         require not_found(pre.searches[counterexample_index], pre.searches[tested_index], pre.searches[foil_index]);
         require pre.searches[tested_index].base == pre.trunk.last();
         update trunk = pre.trunk.push(at(pre.searches[tested_index], i).commit);
@@ -752,7 +775,7 @@ tokenized_state_machine!{ bon {
                 let (counterexample_index, foil_index) = choose|counterexample_index: int, foil_index: int|
                     0 <= counterexample_index < pre.searches.len() && 0 <= foil_index < pre.searches.len()
                     && pre.searches[counterexample_index].kind == (Kind::Counterexample { goal: Some(AgentProcess { search: tested_index, index: i }) })
-                    && pre.searches[foil_index].kind == (Kind::Foil { goal: AgentProcess { search: tested_index, index: i } })
+                    && foils_on(pre.searches[foil_index], tested_index, i)
                     && not_found(pre.searches[counterexample_index], pre.searches[tested_index], pre.searches[foil_index]);
                 assert(post.searches[counterexample_index] == pre.searches[counterexample_index]);
                 assert(post.searches[foil_index] == pre.searches[foil_index]);
@@ -818,7 +841,7 @@ tokenized_state_machine!{ bon {
                 let (counterexample_index, foil_index) = choose|counterexample_index: int, foil_index: int|
                     0 <= counterexample_index < pre.searches.len() && 0 <= foil_index < pre.searches.len()
                     && pre.searches[counterexample_index].kind == (Kind::Counterexample { goal: Some(AgentProcess { search: tested_index, index: i }) })
-                    && pre.searches[foil_index].kind == (Kind::Foil { goal: AgentProcess { search: tested_index, index: i } })
+                    && foils_on(pre.searches[foil_index], tested_index, i)
                     && not_found(pre.searches[counterexample_index], pre.searches[tested_index], pre.searches[foil_index]);
                 assert(complete(pre.searches[counterexample_index]) && complete(pre.searches[foil_index]));
                 assert(counterexample_index != agent_process.search && foil_index != agent_process.search);

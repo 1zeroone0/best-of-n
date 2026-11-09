@@ -61,7 +61,7 @@ pub enum Kind {
     Code { goal: Commit },
     Compaction { goal: Commit, out: Vec<Hash> },
     Counterexample { goal: Option<AgentProcess> },
-    Foil { goal: AgentProcess },
+    Foil { goal: AgentProcess, changed: Vec<Path> },
 }
 
 impl View for Kind {
@@ -73,7 +73,7 @@ impl View for Kind {
             Kind::Compaction { goal, out } => spec::Kind::Compaction { goal: goal@, out: hashes(out@) },
             Kind::Counterexample { goal } => spec::Kind::Counterexample {
                 goal: match goal { Some(agent_process) => Some(agent_process@), None => None } },
-            Kind::Foil { goal } => spec::Kind::Foil { goal: goal@ },
+            Kind::Foil { goal, changed } => spec::Kind::Foil { goal: goal@, changed: paths(changed@) },
         }
     }
 }
@@ -96,6 +96,10 @@ pub struct Candidate {
     /// foil search. A repeated index: the first counts.
     pub accepts_foils: Vec<(i64, bool)>,
     pub rejects_counterexamples: bool,
+    /// Every agree check and the rank check exited 0.
+    pub measured: bool,
+    /// The paths the diff added, as git reports them.
+    pub added: Vec<Path>,
     pub rank: i64,
     pub diff: u64,
 }
@@ -114,6 +118,8 @@ impl View for Candidate {
             accepts: first_by_key(self.accepts@.map_values(|pair: (i64, bool)| (pair.0 as int, pair.1))),
             accepts_foils: first_by_key(self.accepts_foils@.map_values(|pair: (i64, bool)| (pair.0 as int, pair.1))),
             rejects_counterexamples: self.rejects_counterexamples,
+            measured: self.measured,
+            added: paths(self.added@),
             rank: self.rank as int,
             diff: self.diff as nat,
         }
@@ -211,7 +217,7 @@ pub open spec fn texts(list: Seq<Path>) -> Seq<u64> {
 
 /// A kind: a tag (0 queue, 1 code, 2 compaction, 3 counterexample, 4 foil),
 /// then its fields; a counterexample's goal is 0 for trunk, or 1 and the agent
-/// process; a foil's goal is the agent process.
+/// process; a foil's, the agent process and the paths it changed.
 pub open spec fn kind_words(kind: Kind) -> Seq<u64> {
     match kind {
         Kind::Queue { goal } => seq![0u64] + text(goal.0.0@),
@@ -221,7 +227,7 @@ pub open spec fn kind_words(kind: Kind) -> Seq<u64> {
             Some(agent_process) => seq![3u64, 1u64, agent_process.search as u64, agent_process.index as u64],
             None => seq![3u64, 0u64],
         },
-        Kind::Foil { goal } => seq![4u64, goal.search as u64, goal.index as u64],
+        Kind::Foil { goal, changed } => seq![4u64, goal.search as u64, goal.index as u64] + texts(changed@),
     }
 }
 
@@ -238,7 +244,8 @@ pub open spec fn candidate_words(candidate: Candidate) -> Seq<u64> {
         + candidate.accepts@.map_values(|pair: (i64, bool)| seq![pair.0 as u64, bit(pair.1)]).flatten()
         + seq![candidate.accepts_foils.len() as u64]
         + candidate.accepts_foils@.map_values(|pair: (i64, bool)| seq![pair.0 as u64, bit(pair.1)]).flatten()
-        + seq![bit(candidate.rejects_counterexamples), candidate.rank as u64, candidate.diff]
+        + seq![bit(candidate.rejects_counterexamples), bit(candidate.measured)] + texts(candidate.added@)
+        + seq![candidate.rank as u64, candidate.diff]
 }
 
 /// A result: 0 for none, or 1 and the candidate.
@@ -339,8 +346,9 @@ pub open spec fn kind_json(kind: Kind) -> Seq<char> {
             Some(agent_process) => object(seq![field("search"@, decimal(agent_process.search as nat)), field("index"@, decimal(agent_process.index as nat))]),
             None => seq!['n', 'u', 'l', 'l'],
         })]))]),
-        Kind::Foil { goal } => object(seq![field("foil"@, object(seq![field("goal"@,
-            object(seq![field("search"@, decimal(goal.search as nat)), field("index"@, decimal(goal.index as nat))]))]))]),
+        Kind::Foil { goal, changed } => object(seq![field("foil"@, object(seq![field("goal"@,
+            object(seq![field("search"@, decimal(goal.search as nat)), field("index"@, decimal(goal.index as nat))])),
+            field("changed"@, strings(changed@))]))]),
     }
 }
 
@@ -357,6 +365,8 @@ pub open spec fn candidate_json(candidate: Candidate) -> Seq<char> {
         field("accepts"@, array(candidate.accepts@.map_values(|pair: (i64, bool)| array(seq![signed(pair.0 as int), boolean(pair.1)])))),
         field("accepts_foils"@, array(candidate.accepts_foils@.map_values(|pair: (i64, bool)| array(seq![signed(pair.0 as int), boolean(pair.1)])))),
         field("rejects_counterexamples"@, boolean(candidate.rejects_counterexamples)),
+        field("measured"@, boolean(candidate.measured)),
+        field("added"@, strings(candidate.added@)),
         field("rank"@, signed(candidate.rank as int)),
         field("diff"@, decimal(candidate.diff as nat)),
     ])

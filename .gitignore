@@ -4,3 +4,4 @@
 .DS_Store
 /examples/python/.venv/
 __pycache__/
+/.claude/worktrees/

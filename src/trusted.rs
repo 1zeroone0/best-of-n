@@ -385,7 +385,7 @@ fn label(kind: &Kind) -> (String, String) {
         Kind::Compaction { goal, .. } => ("compaction".into(), text(goal)),
         Kind::Counterexample { goal: Some(p) } => ("counterexample".into(), format!("search {} candidate {}", p.search, p.index)),
         Kind::Counterexample { goal: None } => ("counterexample".into(), "trunk".into()),
-        Kind::Foil { goal: p } => ("foil".into(), format!("search {} candidate {}", p.search, p.index)),
+        Kind::Foil { goal: p, .. } => ("foil".into(), format!("search {} candidate {}", p.search, p.index)),
     }
 }
 static WARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -475,11 +475,12 @@ fn hash(s: &str) -> u64 {
 }
 
 /// Run a command as agent in a read-only checkout. (exit 0, stdout)
-fn run_check(config: &Config, dir: &std::path::Path, target: &std::path::Path, command: &str, log: &std::path::Path) -> (bool, String) {
+/// A check's exit (0 or not), its output, and whether its time limit stopped it.
+fn run_check(config: &Config, dir: &std::path::Path, target: &std::path::Path, command: &str, log: &std::path::Path) -> (bool, String, bool) {
     let argv = vec!["/bin/sh".to_string(), "-c".to_string(), command.to_string()];
     let c = as_agent(config, dir, &[("BON_BUILD", target.to_string_lossy().into()), ("CARGO_TARGET_DIR", target.to_string_lossy().into())], &argv);
-    let (ok, out, _) = supervise(c, None, Duration::from_secs(config.agent_process.time), log);
-    (ok, out)
+    let (ok, out, killed) = supervise(c, None, Duration::from_secs(config.agent_process.time), log);
+    (ok && !killed, out, killed)
 }
 
 // ── harnesses ───────────────────────────────────────────
@@ -551,7 +552,7 @@ fn aim(m: &Manifest, kind: &Kind, target: Option<&Search>, start: &str) -> Strin
             let d = git(&m.root, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>()).unwrap_or_default();
             if d.is_empty() { String::new() } else { format!("The spec changed for this push; aim your test at what the change requires:\n{}\n", cap(d)) }
         }
-        Kind::Foil { goal } => match selected(goal) {
+        Kind::Foil { goal, .. } => match selected(goal) {
             Some((base, commit)) => {
                 let files = git(&m.root, &["diff", "--name-only", &base, &commit]).unwrap_or_default().lines().collect::<Vec<_>>().join(", ");
                 let d = git(&m.root, &["diff", &base, &commit]).unwrap_or_default();
@@ -1069,7 +1070,7 @@ pub fn record_push(m: &Manifest, tested_index: usize, i: usize, counterexample_i
         foil_index < searches.len(),
         spec::selected(searches[tested_index as int], i as int),
         searches[counterexample_index as int].kind == (spec::Kind::Counterexample { goal: Some(spec::AgentProcess { search: tested_index as int, index: i as int }) }),
-        searches[foil_index as int].kind == (spec::Kind::Foil { goal: spec::AgentProcess { search: tested_index as int, index: i as int } }),
+        spec::foils_on(searches[foil_index as int], tested_index as int, i as int),
         spec::not_found(searches[counterexample_index as int], searches[tested_index as int], searches[foil_index as int]),
 {
     record(m, &format!("push {tested_index} {i} {counterexample_index} {foil_index}"));
@@ -1096,7 +1097,7 @@ pub fn record_blocked(m: &Manifest, reason: spec::Blocked, Ghost(tested): Ghost<
         spec::Blocked::Disagree => ("disagree", "the verified candidates disagree"),
         spec::Blocked::TooFewTests => ("too_few_tests", "fewer than two verified tests, and none splits the candidates"),
         spec::Blocked::RejectsEvery => ("rejects_every", "a verified test rejects every candidate"),
-        spec::Blocked::Undiscriminating => ("undiscriminating", "fewer than two verified tests reject a foil"),
+        spec::Blocked::Undiscriminating => ("undiscriminating", "fewer than two verified tests judge every candidate and reject a foil"),
         spec::Blocked::TrunkMoved => ("trunk_moved", "trunk moved during the search; run it again"),
         spec::Blocked::Refused => ("refused", "git refused what the gates allowed"),
     };
@@ -1209,6 +1210,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
             "commit": text(&c.commit), "base": text(&c.base), "accepted": c.accepted, "proved": c.proved,
             "changed": c.changed.iter().map(|p| text(p)).collect::<Vec<_>>(), "diff": c.diff, "added": added, "removed": removed, "rank": c.rank,
             "out": c.out.iter().map(|h| h.0).collect::<Vec<u64>>(), "accepts": c.accepts, "accepts_foils": c.accepts_foils, "rejects_counterexamples": c.rejects_counterexamples,
+            "measured": c.measured, "added": c.added.iter().map(|p| text(p)).collect::<Vec<_>>(),
             "intents": c.intents.iter().map(|(q, i)| (q, text(i))).collect::<Vec<_>>(),
         })),
     });
@@ -1280,6 +1282,7 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
     let mut accepts = Vec::new();
     let mut accepts_foils = Vec::new();
     let mut rejects_counterexamples = false;
+    let mut measured = false;
     let mut out = Vec::new();
     let mut rank = 0i64;
     match kind {
@@ -1292,12 +1295,18 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
                 if !run_check(config, &cdir, &build, v, &trace.join(format!("verify-{k}"))).0 { proved = false; break; }
             }
             if accepted && proved && !matches!(kind, Kind::Foil { .. }) {
+                // Measured only when every agree check and the rank check exited 0, and
+                // the rank parsed: a failure's output is no measurement.
+                measured = true;
                 for (k, a) in config.checks.agree.iter().enumerate() {
-                    out.push(Hash(hash(&run_check(config, &cdir, &build, a, &trace.join(format!("agree-{k}"))).1)));
+                    let (ok, text, _) = run_check(config, &cdir, &build, a, &trace.join(format!("agree-{k}")));
+                    measured &= ok;
+                    out.push(Hash(hash(&text)));
                 }
                 let which = if matches!(kind, Kind::Compaction { .. }) { "compaction" } else { "code" };
                 if let Some(r) = config.checks.rank.get(which) {
-                    rank = run_check(config, &cdir, &build, r, &trace.join("rank")).1.trim().parse().unwrap_or(0);
+                    let (ok, text, _) = run_check(config, &cdir, &build, r, &trace.join("rank"));
+                    match text.trim().parse() { Ok(v) if ok => rank = v, _ => measured = false }
                 }
                 if matches!(kind, Kind::Compaction { .. }) {
                     rejects_counterexamples = rejects_every_counterexample(m, &commit, &build, trace);
@@ -1324,22 +1333,20 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
                 }
                 None => members.push((-1, start.to_string())),
             }
-            if accepted {
+            // A verdict on each member and each foil, or none: a test that does not
+            // build there, or whose run times out or cannot be set up, has no result,
+            // which the spec reads as saying nothing (never a split, never a rejection).
+            if let (true, Some(bytes)) = (accepted, &test) {
                 for (j, mc) in members {
-                    let a = match &test { Some(bytes) => test_on(m, &mc, bytes, &build, &config.counterexample.run, &trace.join(format!("accepts-{j}"))), None => false };
-                    accepts.push((j, a));
+                    if let Some(a) = verdict(m, &mc, bytes, &build, &trace.join(format!("accepts-{j}"))) { accepts.push((j, a)); }
                 }
                 // Each foil: a program trunk's tests accept and Verus rejects. The
-                // spec decides which results are foils; every result is run. A test
-                // that does not build on a foil has no result on it: failing to
-                // build is not telling a wrong program apart.
-                if let (Some(f), Some(bytes)) = (foils, &test) {
+                // spec decides which results are foils; every result is run.
+                if let Some(f) = foils {
                     for (j, r) in f.results.iter().enumerate() {
                         let Some(c) = r else { continue };
                         let fc: String = c.commit.iter().collect();
-                        if !test_on(m, &fc, bytes, &build, &config.counterexample.build, &trace.join(format!("builds-foil-{j}"))) { continue; }
-                        let a = test_on(m, &fc, bytes, &build, &config.counterexample.run, &trace.join(format!("accepts-foil-{j}")));
-                        accepts_foils.push((j as i64, a));
+                        if let Some(a) = verdict(m, &fc, bytes, &build, &trace.join(format!("accepts-foil-{j}"))) { accepts_foils.push((j as i64, a)); }
                     }
                 }
             }
@@ -1382,6 +1389,8 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
         intents,
         accepts,
         accepts_foils,
+        measured,
+        added: added(root, start, &commit)?,
         rejects_counterexamples,
         rank,
         diff,
@@ -1435,6 +1444,34 @@ pub fn added_removed(root: &std::path::Path, base: &str, commit: &str) -> (u64, 
         if f.len() < 3 { return (a, r); }
         (a + f[0].parse::<u64>().unwrap_or(0), r + f[1].parse::<u64>().unwrap_or(0))
     })
+}
+
+/// The paths `commit` adds to `base`, as git stores them (NUL-delimited).
+fn added(root: &std::path::Path, base: &str, commit: &str) -> Result<Vec<Path>, String> {
+    let out = git(root, &["diff-tree", "-r", "-z", "--no-renames", "--name-only", "--diff-filter=A", base, commit])?;
+    Ok(out.split('\0').filter(|p| !p.is_empty()).map(|p| p.chars().collect()).collect())
+}
+
+/// A test's verdict on `commit`: whether it accepts it, or None when there is no
+/// verdict: the checkout or the test could not be set up, the test does not
+/// build there, or its run hit the time limit.
+fn verdict(m: &Manifest, commit: &str, test: &[u8], build: &std::path::Path, log: &std::path::Path) -> Option<bool> {
+    let config = &m.config;
+    let dir = scratch(&format!("test.{}/{}", hash(&format!("{commit}{log:?}")), repository_name(&m.root)));
+    let result = (|| {
+        materialize(&m.root, commit, &dir).ok()?;
+        let p = dir.join(&config.counterexample.path);
+        std::fs::create_dir_all(p.parent().unwrap_or(&dir)).ok()?;
+        std::fs::write(&p, test).ok()?;
+        let _ = Command::new("chmod").args(["-R", "a-w,g+rX"]).arg(&dir).status();
+        let (built, _, _) = run_check(config, &dir, build, &config.counterexample.build, &log.with_extension("build"));
+        if !built { return None; }
+        let (ok, _, killed) = run_check(config, &dir, build, &config.counterexample.run, log);
+        (!killed).then_some(ok)
+    })();
+    let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
+    let _ = std::fs::remove_dir_all(&dir);
+    result
 }
 
 /// Whether a test accepts `commit`: a read-only checkout of it with the test at
@@ -1647,7 +1684,7 @@ mod tests {
             kind: Kind::Counterexample { goal: None }, base: text(base), n: 1, checks: vec![], tests: vec![text("tests/")], trusted: vec![], limit: 1,
             results: vec![Some(Candidate {
                 commit: text(test), base: text(base), accepted: true, proved: false, changed: vec![text("tests/c_1.sh")],
-                out: vec![], intents: vec![], accepts: vec![(-1, false)], accepts_foils: vec![], rejects_counterexamples: false, rank: 0, diff: 1,
+                out: vec![], intents: vec![], accepts: vec![(-1, false)], accepts_foils: vec![], measured: false, added: vec![], rejects_counterexamples: false, rank: 0, diff: 1,
             })],
         }
     }
@@ -1699,7 +1736,7 @@ mod tests {
         fn text<T: FromIterator<char>>(s: &str) -> T { s.chars().collect() }
         let candidate = |commit: &str| Candidate {
             commit: text(commit), base: text("head"), accepted: true, proved: true, changed: vec![], out: vec![],
-            intents: vec![], accepts: vec![], accepts_foils: vec![], rejects_counterexamples: false, rank: 0, diff: 1,
+            intents: vec![], accepts: vec![], accepts_foils: vec![], measured: false, added: vec![], rejects_counterexamples: false, rank: 0, diff: 1,
         };
         let tested = Search {
             kind: Kind::Code { goal: text("head") }, base: text("head"), n: 2, checks: vec![], tests: vec![], trusted: vec![], limit: 1,

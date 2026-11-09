@@ -43,6 +43,7 @@ class KindCounterexample(TypedDict):
 
 class KindFoil(TypedDict):
     goal: AgentProcess
+    changed: list[Path]
 
 # One key: its variant.
 Kind = TypedDict("Kind", {"queue": KindQueue, "code": KindCode, "compaction": KindCompaction, "counterexample": KindCounterexample, "foil": KindFoil}, total=False)
@@ -65,6 +66,10 @@ class Candidate(TypedDict):
     # foil search. A repeated index: the first counts.
     accepts_foils: list[tuple[int, bool]]
     rejects_counterexamples: bool
+    # Every agree check and the rank check exited 0.
+    measured: bool
+    # The paths the diff added, as git reports them.
+    added: list[Path]
     rank: int
     diff: int
 

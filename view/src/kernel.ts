@@ -14,9 +14,9 @@ export type Hash = string;
 /** A process running as agent that writes one candidate. */
 export interface AgentProcess { search: number; index: number }
 /** What a search is for: its kind, carrying its goal. */
-export type Kind = { queue: { goal: Transcript } } | { code: { goal: Commit } } | { compaction: { goal: Commit; out: Array<Hash> } } | { counterexample: { goal: AgentProcess | null } } | { foil: { goal: AgentProcess } };
+export type Kind = { queue: { goal: Transcript } } | { code: { goal: Commit } } | { compaction: { goal: Commit; out: Array<Hash> } } | { counterexample: { goal: AgentProcess | null } } | { foil: { goal: AgentProcess; changed: Array<Path> } };
 /** One generated change, as trusted code observed it. */
-export interface Candidate { commit: Commit; base: Commit; accepted: boolean; proved: boolean; changed: Array<Path>; out: Array<Hash>; intents: Array<[Cue, Intent]>; accepts: Array<[number, boolean]>; accepts_foils: Array<[number, boolean]>; rejects_counterexamples: boolean; rank: number; diff: number }
+export interface Candidate { commit: Commit; base: Commit; accepted: boolean; proved: boolean; changed: Array<Path>; out: Array<Hash>; intents: Array<[Cue, Intent]>; accepts: Array<[number, boolean]>; accepts_foils: Array<[number, boolean]>; rejects_counterexamples: boolean; measured: boolean; added: Array<Path>; rank: number; diff: number }
 /** One search, once every agent process has returned: `results[i]` is what agent process i returned. */
 export interface Search { kind: Kind; base: Commit; n: number; checks: Array<Path>; tests: Array<Path>; trusted: Array<Path>; limit: number; results: Array<Candidate | null> }
 /** A gate's answer when it names no candidate. */
