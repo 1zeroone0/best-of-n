@@ -355,6 +355,7 @@ fn label(kind: &Kind) -> (String, String) {
         Kind::Compaction { goal, .. } => ("compaction".into(), text(goal)),
         Kind::Counterexample { goal: Some(p) } => ("counterexample".into(), format!("search {} candidate {}", p.search, p.index)),
         Kind::Counterexample { goal: None } => ("counterexample".into(), "trunk".into()),
+        Kind::Foil { goal: p } => ("foil".into(), format!("search {} candidate {}", p.search, p.index)),
     }
 }
 static WARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -521,6 +522,11 @@ fn prompt(kind: &Kind, config: &Config) -> String {
             "{blind} Write one test, at {}, aimed at a behavior the spec forbids that an implementation \
              might still show: a correct implementation accepts it. It builds with: {}. It runs with: {}.\n",
             c.path, c.build, c.run),
+        Kind::Foil { .. } => format!(
+            "This code is an implementation trunk's checks accept. Change its behavior so that it does \
+             something the spec forbids while every test still passes: Verus must reject it because the \
+             code no longer meets the spec, not only because a proof broke. Do not change the tests under {:?}.\n",
+            c.tests),
         Kind::Queue { goal } => format!(
             "Read the transcript at {} and append to {QUEUE} one line per need it voices that the spec does \
              not state yet: a tab, the intent in the speaker's words, a tab, then the transcript path, '#', \
@@ -589,7 +595,7 @@ pub fn trusted(m: &Manifest) -> Vec<Path> {
 #[verifier::external]
 fn harnesses(config: &Config, kind: &Kind) -> Vec<Harness> {
     match kind {
-        Kind::Counterexample { .. } => config.counterexample.harness.clone(),
+        Kind::Counterexample { .. } | Kind::Foil { .. } => config.counterexample.harness.clone(),
         _ => config.harness.clone(),
     }
 }
@@ -783,9 +789,10 @@ pub fn observe(m: &Manifest, commit: &Commit) -> (r: Result<(Permission, Permiss
 
 /// Run a search's agent processes in parallel and observe each: its candidate
 /// (None if it produced none) and its cost in microdollars. `target` is the
-/// search a counterexample attacks.
+/// search a counterexample attacks; `foils`, the foil search its tests must
+/// tell from correct code.
 #[verifier::external_body]
-pub fn run(m: &Manifest, kind: &Kind, a: usize, start: &Commit, target: Option<&Search>) -> Vec<(Option<Candidate>, u64)> {
+pub fn run(m: &Manifest, kind: &Kind, a: usize, start: &Commit, target: Option<&Search>, foils: Option<&Search>) -> Vec<(Option<Candidate>, u64)> {
     // Number runs once per bon process, so a command that runs several drivers
     // (a counterexample on trunk, then a code search) never reuses a working directory or trace.
     let search = RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -804,7 +811,7 @@ pub fn run(m: &Manifest, kind: &Kind, a: usize, start: &Commit, target: Option<&
             scope.spawn(|| loop {
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let Some(h) = slots.get(i) else { break };
-                *out[i].lock().unwrap() = agent_process(m, kind, search, i, h, &start, target, &traces.join(i.to_string()));
+                *out[i].lock().unwrap() = agent_process(m, kind, search, i, h, &start, target, foils, &traces.join(i.to_string()));
             });
         }
     });
@@ -950,17 +957,20 @@ pub fn record_wait(m: &Manifest, search: usize, index: usize, result: &Option<Ca
     record(m, &format!("wait {now} {search} {index} {commit} {generation}"));
 }
 
-/// push: the tested search's selected candidate i, cleared by the counterexample search.
+/// push: the tested search's selected candidate i, cleared by the counterexample
+/// search, measured against the foil search.
 #[verifier::external_body]
-pub fn record_push(m: &Manifest, tested_index: usize, i: usize, counterexample_index: usize, Ghost(searches): Ghost<Seq<spec::Search>>)
+pub fn record_push(m: &Manifest, tested_index: usize, i: usize, counterexample_index: usize, foil_index: usize, Ghost(searches): Ghost<Seq<spec::Search>>)
     requires
         tested_index < searches.len(),
         counterexample_index < searches.len(),
+        foil_index < searches.len(),
         spec::selected(searches[tested_index as int], i as int),
         searches[counterexample_index as int].kind == (spec::Kind::Counterexample { goal: Some(spec::AgentProcess { search: tested_index as int, index: i as int }) }),
-        spec::not_found(searches[counterexample_index as int], searches[tested_index as int]),
+        searches[foil_index as int].kind == (spec::Kind::Foil { goal: spec::AgentProcess { search: tested_index as int, index: i as int } }),
+        spec::not_found(searches[counterexample_index as int], searches[tested_index as int], searches[foil_index as int]),
 {
-    record(m, &format!("push {tested_index} {i} {counterexample_index}"));
+    record(m, &format!("push {tested_index} {i} {counterexample_index} {foil_index}"));
 }
 
 /// land: the counterexample search's test i.
@@ -1026,14 +1036,14 @@ pub const SBOM: &str = ".bon/sbom.json";
 /// One agent process: generate, capture, observe. Its log goes under `trace`.
 #[allow(clippy::too_many_arguments)]
 fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Harness, start: &str,
-                 target: Option<&Search>, trace: &std::path::Path) -> (Option<Candidate>, u64) {
+                 target: Option<&Search>, foils: Option<&Search>, trace: &std::path::Path) -> (Option<Candidate>, u64) {
     let _ = std::fs::create_dir_all(trace);
     let config = &m.config;
     let dir = scratch(&format!("{search}.{index}/{}", repository_name(&m.root)));
     // What each kind may not write, made structural: code, the counterexamples' tests.
     let (writable, more) = match kind {
         Kind::Queue { .. } => (Some(QUEUE), Vec::new()),
-        Kind::Code { .. } => (None, config.counterexample.tests.clone()),
+        Kind::Code { .. } | Kind::Foil { .. } => (None, config.counterexample.tests.clone()),
         _ => (None, Vec::new()),
     };
     if let Err(e) = working_directory_except(&m.root, config, start, &dir, writable, &more) {
@@ -1057,7 +1067,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
     // Without token counts there is no measured cost: charge the whole limit.
     let (spent, harness_cost, prices) = generation(h, config, &stdout).unwrap_or((micro(config.agent_process.limit), None, HashMap::new()));
     if killed { let _ = std::fs::write(trace.join("killed"), "time limit"); }
-    let candidate = capture(m, kind, search, index, start, &dir, target, trace).map_err(|e| {
+    let candidate = capture(m, kind, search, index, start, &dir, target, foils, trace).map_err(|e| {
         let _ = std::fs::write(trace.join("error"), &e);
     }).ok();
     let _ = Command::new("chmod").args(["-R", "-N"]).arg(&dir).stderr(Stdio::null()).status();
@@ -1080,7 +1090,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
         "candidate": candidate.as_ref().map(|c| serde_json::json!({
             "commit": text(&c.commit), "base": text(&c.base), "accepted": c.accepted, "proved": c.proved,
             "changed": c.changed.iter().map(|p| text(p)).collect::<Vec<_>>(), "diff": c.diff, "added": added, "removed": removed, "rank": c.rank,
-            "out": c.out.iter().map(|h| h.0).collect::<Vec<u64>>(), "accepts": c.accepts, "rejects_counterexamples": c.rejects_counterexamples,
+            "out": c.out.iter().map(|h| h.0).collect::<Vec<u64>>(), "accepts": c.accepts, "accepts_foils": c.accepts_foils, "rejects_counterexamples": c.rejects_counterexamples,
             "intents": c.intents.iter().map(|(q, i)| (q, text(i))).collect::<Vec<_>>(),
         })),
     });
@@ -1093,7 +1103,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
 /// its test accepts.
 #[allow(clippy::too_many_arguments)]
 fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, dir: &std::path::Path,
-           target: Option<&Search>, trace: &std::path::Path) -> Result<Candidate, String> {
+           target: Option<&Search>, foils: Option<&Search>, trace: &std::path::Path) -> Result<Candidate, String> {
     let root = &m.root;
     let config = &m.config;
     let index_file = trace.join("index");
@@ -1150,11 +1160,12 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
     let mut accepted = true;
     let mut proved = true;
     let mut accepts = Vec::new();
+    let mut accepts_foils = Vec::new();
     let mut rejects_counterexamples = false;
     let mut out = Vec::new();
     let mut rank = 0i64;
     match kind {
-        Kind::Code { .. } | Kind::Compaction { .. } => {
+        Kind::Code { .. } | Kind::Compaction { .. } | Kind::Foil { .. } => {
             for (k, v) in config.checks.test.iter().enumerate() {
                 if !run_check(config, &cdir, &build, v, &trace.join(format!("test-{k}"))).0 { accepted = false; break; }
             }
@@ -1162,7 +1173,7 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
                 if !accepted { proved = false; break; }
                 if !run_check(config, &cdir, &build, v, &trace.join(format!("verify-{k}"))).0 { proved = false; break; }
             }
-            if accepted && proved {
+            if accepted && proved && !matches!(kind, Kind::Foil { .. }) {
                 for (k, a) in config.checks.agree.iter().enumerate() {
                     out.push(Hash(hash(&run_check(config, &cdir, &build, a, &trace.join(format!("agree-{k}"))).1)));
                 }
@@ -1199,6 +1210,19 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
                 for (j, mc) in members {
                     let a = match &test { Some(bytes) => test_on(m, &mc, bytes, &build, &config.counterexample.run, &trace.join(format!("accepts-{j}"))), None => false };
                     accepts.push((j, a));
+                }
+                // Each foil: a program trunk's tests accept and Verus rejects. The
+                // spec decides which results are foils; every result is run. A test
+                // that does not build on a foil has no result on it: failing to
+                // build is not telling a wrong program apart.
+                if let (Some(f), Some(bytes)) = (foils, &test) {
+                    for (j, r) in f.results.iter().enumerate() {
+                        let Some(c) = r else { continue };
+                        let fc: String = c.commit.iter().collect();
+                        if !test_on(m, &fc, bytes, &build, &config.counterexample.build, &trace.join(format!("builds-foil-{j}"))) { continue; }
+                        let a = test_on(m, &fc, bytes, &build, &config.counterexample.run, &trace.join(format!("accepts-foil-{j}")));
+                        accepts_foils.push((j as i64, a));
+                    }
                 }
             }
         }
@@ -1239,6 +1263,7 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
         out,
         intents,
         accepts,
+        accepts_foils,
         rejects_counterexamples,
         rank,
         diff,
@@ -1461,7 +1486,7 @@ mod tests {
             kind: Kind::Counterexample { goal: None }, base: text(base), n: 1, checks: vec![], tests: vec![text("tests/")], trusted: vec![], limit: 1,
             results: vec![Some(Candidate {
                 commit: text(test), base: text(base), accepted: true, proved: false, changed: vec![text("tests/c_1.sh")],
-                out: vec![], intents: vec![], accepts: vec![(-1, false)], rejects_counterexamples: false, rank: 0, diff: 1,
+                out: vec![], intents: vec![], accepts: vec![(-1, false)], accepts_foils: vec![], rejects_counterexamples: false, rank: 0, diff: 1,
             })],
         }
     }
@@ -1512,7 +1537,7 @@ mod tests {
         fn text<T: FromIterator<char>>(s: &str) -> T { s.chars().collect() }
         let candidate = |commit: &str| Candidate {
             commit: text(commit), base: text("head"), accepted: true, proved: true, changed: vec![], out: vec![],
-            intents: vec![], accepts: vec![], rejects_counterexamples: false, rank: 0, diff: 1,
+            intents: vec![], accepts: vec![], accepts_foils: vec![], rejects_counterexamples: false, rank: 0, diff: 1,
         };
         let tested = Search {
             kind: Kind::Code { goal: text("head") }, base: text("head"), n: 2, checks: vec![], tests: vec![], trusted: vec![], limit: 1,

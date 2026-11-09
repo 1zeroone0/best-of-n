@@ -39,12 +39,13 @@ pub unsafe extern "C" fn selected(p: *const u64, len: usize) -> i32 {
     }
 }
 
-/// The not_found gate on x, a counterexample search, and t, the search it
-/// tested: 1 not found, 0 found, or NOT_A_SEARCH if either is not one.
+/// The not_found gate on x, a counterexample search, t, the search it tested,
+/// and f, the foil search on the same candidate: 1 not found, 0 not, or
+/// NOT_A_SEARCH if any is not one.
 #[no_mangle]
-pub unsafe extern "C" fn not_found(x: *const u64, xlen: usize, t: *const u64, tlen: usize) -> i32 {
-    match (Kernel::decode(&words(x, xlen)), Kernel::decode(&words(t, tlen))) {
-        (Some(x), Some(t)) => Kernel::not_found(&x, &t) as i32,
+pub unsafe extern "C" fn not_found(x: *const u64, xlen: usize, t: *const u64, tlen: usize, f: *const u64, flen: usize) -> i32 {
+    match (Kernel::decode(&words(x, xlen)), Kernel::decode(&words(t, tlen)), Kernel::decode(&words(f, flen))) {
+        (Some(x), Some(t), Some(f)) => Kernel::not_found(&x, &t, &f) as i32,
         _ => NOT_A_SEARCH,
     }
 }

@@ -176,10 +176,13 @@ async function rederive(s: State): Promise<void> {
         // A counterexample on a selection: not_found against the search it tested.
         if ('counterexample' in k.kind && k.kind.counterexample.goal !== null) {
             const tested = await read(p.pid, k.kind.counterexample.goal.search);
+            // The foil search on the same candidate: the last one before this search.
+            const foil = p.searches.filter(o => o.kind === 'foil' && o.search < r.search).at(-1);
+            const foils = foil ? await read(p.pid, foil.search) : null;
             const later = p.searches.some(o => o.search > r.search);
             const traced = later ? false : p.outcome === 'pushed' ? true : null;
-            if (tested && traced !== null) {
-                const nf = withWords(bytes, (xp, xl) => withWords(tested, (tp, tl) => call('not_found', xp, xl, tp, tl)));
+            if (tested && foils && traced !== null) {
+                const nf = withWords(bytes, (xp, xl) => withWords(tested, (tp, tl) => withWords(foils, (fp, fl) => call('not_found', xp, xl, tp, tl, fp, fl))));
                 if (nf !== NOT_A_SEARCH && (nf === 1) !== traced) said.push(`kernel: counterexample ${nf === 1 ? 'not found' : 'found'}, trace says otherwise`);
             }
         }

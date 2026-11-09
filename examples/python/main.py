@@ -17,8 +17,10 @@ def goal(search: Search) -> str:
     """The search's kind and goal, in the spec's words."""
     (name, fields), = search["kind"].items()
     target = fields["goal"]
-    if name == "counterexample":
-        target = "trunk" if target is None else f"search {target['search']} candidate {target['index']}"
+    if name == "counterexample" and target is None:
+        target = "trunk"
+    elif name in ("counterexample", "foil"):
+        target = f"search {target['search']} candidate {target['index']}"
     return f"{name} {target}"
 
 

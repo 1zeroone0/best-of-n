@@ -75,6 +75,7 @@ const kind = (k: Kind): string =>
   'queue' in k ? `queue ${k.queue.goal}`
   : 'code' in k ? `code ${k.code.goal}`
   : 'compaction' in k ? `compaction ${k.compaction.goal}`
+  : 'foil' in k ? `foil on search ${k.foil.goal.search} candidate ${k.foil.goal.index}`
   : k.counterexample.goal ? `counterexample on search ${k.counterexample.goal.search} candidate ${k.counterexample.goal.index}`
   : 'counterexample on trunk';
 

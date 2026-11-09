@@ -36,6 +36,7 @@ type Kind struct {
 	Code           *KindCode           `json:"code,omitempty"`
 	Compaction     *KindCompaction     `json:"compaction,omitempty"`
 	Counterexample *KindCounterexample `json:"counterexample,omitempty"`
+	Foil           *KindFoil           `json:"foil,omitempty"`
 }
 
 type KindQueue struct {
@@ -55,6 +56,10 @@ type KindCounterexample struct {
 	Goal *AgentProcess `json:"goal"`
 }
 
+type KindFoil struct {
+	Goal AgentProcess `json:"goal"`
+}
+
 // One generated change, as trusted code observed it.
 type Candidate struct {
 	Commit   Commit `json:"commit"`
@@ -68,7 +73,10 @@ type Candidate struct {
 	// Whether this candidate's test accepts each tested commit: the goal
 	// search's candidates by index, and trunk's head (or a compaction's goal)
 	// as -1. A repeated index: the first counts.
-	Accepts                []Tuple2[int64, bool] `json:"accepts"`
+	Accepts []Tuple2[int64, bool] `json:"accepts"`
+	// Whether this candidate's test accepts each foil, by its index in the
+	// foil search. A repeated index: the first counts.
+	AcceptsFoils           []Tuple2[int64, bool] `json:"accepts_foils"`
 	RejectsCounterexamples bool                  `json:"rejects_counterexamples"`
 	Rank                   int64                 `json:"rank"`
 	Diff                   uint64                `json:"diff"`

@@ -41,8 +41,11 @@ class KindCompaction(TypedDict):
 class KindCounterexample(TypedDict):
     goal: AgentProcess | None
 
+class KindFoil(TypedDict):
+    goal: AgentProcess
+
 # One key: its variant.
-Kind = TypedDict("Kind", {"queue": KindQueue, "code": KindCode, "compaction": KindCompaction, "counterexample": KindCounterexample}, total=False)
+Kind = TypedDict("Kind", {"queue": KindQueue, "code": KindCode, "compaction": KindCompaction, "counterexample": KindCounterexample, "foil": KindFoil}, total=False)
 
 # One generated change, as trusted code observed it.
 class Candidate(TypedDict):
@@ -58,6 +61,9 @@ class Candidate(TypedDict):
     # search's candidates by index, and trunk's head (or a compaction's goal)
     # as -1. A repeated index: the first counts.
     accepts: list[tuple[int, bool]]
+    # Whether this candidate's test accepts each foil, by its index in the
+    # foil search. A repeated index: the first counts.
+    accepts_foils: list[tuple[int, bool]]
     rejects_counterexamples: bool
     rank: int
     diff: int

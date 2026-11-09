@@ -28,6 +28,8 @@ func kind(k kernel.Kind) string {
 		return fmt.Sprintf("counterexample on search %d candidate %d", k.Counterexample.Goal.Search, k.Counterexample.Goal.Index)
 	case k.Counterexample != nil:
 		return "counterexample on trunk"
+	case k.Foil != nil:
+		return fmt.Sprintf("foil on search %d candidate %d", k.Foil.Goal.Search, k.Foil.Goal.Index)
 	}
 	return "unknown kind"
 }

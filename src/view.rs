@@ -372,7 +372,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
         }
         // A bon process's kind is its first recorded non-counterexample kind,
         // or its first recorded kind when it only searched for counterexamples.
-        let kind = searches.iter().find_map(|s| s["kind"].as_str().filter(|k| !k.is_empty() && *k != "counterexample"))
+        let kind = searches.iter().find_map(|s| s["kind"].as_str().filter(|k| !k.is_empty() && *k != "counterexample" && *k != "foil"))
             .or_else(|| searches.iter().find_map(|s| s["kind"].as_str().filter(|k| !k.is_empty())))
             .unwrap_or("").to_string();
         let goal = searches.iter().filter(|s| s["kind"] == kind).find_map(|s| s["goal"].as_str().filter(|g| !g.is_empty()).map(String::from))
@@ -408,7 +408,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
             generation_all += s["generation"].as_f64().unwrap_or(0.0);
             time_all += s["time_cost"].as_f64().unwrap_or(0.0);
         }
-        let main = searches.iter().find(|s| s["kind"] != "counterexample").or(searches.first());
+        let main = searches.iter().find(|s| s["kind"] != "counterexample" && s["kind"] != "foil").or(searches.first());
         let tally = |s: &Value| format!("{} of {} verified",
             s["verified"].as_u64().unwrap_or(0), count(s["returned"].as_u64().unwrap_or(0) as usize, "candidate", "candidates"));
         // One sentence in plain words, each spec word qualified.
@@ -486,10 +486,11 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
     for g in groups.iter_mut() {
         if g["outcome"] == "pushed" && g["push"].is_object() {
             let cost = g["cost"].as_f64().unwrap_or(0.0);
-            // The counterexample search that found none on the selection; everything
-            // before it is what reaching the selection cost.
-            let last_ce = g["processes"][0]["searches"].as_array().and_then(|x| x.iter().rev().find(|x| x["kind"] == "counterexample").cloned());
-            let ce = last_ce.as_ref().and_then(|x| x["cost"].as_f64()).unwrap_or(0.0);
+            // The foil and counterexample searches that found none on the selection;
+            // everything before them is what reaching the selection cost.
+            let ce: f64 = g["processes"][0]["searches"].as_array().map_or(0.0, |x| x.iter().rev()
+                .take_while(|x| x["kind"] == "counterexample" || x["kind"] == "foil")
+                .filter_map(|x| x["cost"].as_f64()).sum());
             g["push"]["cost"] = json!(cost);
             g["push"]["to_selection"] = json!(cost - ce);
             g["push"]["counterexample"] = json!(ce);
