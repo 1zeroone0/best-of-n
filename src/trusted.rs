@@ -73,6 +73,24 @@ pub struct Config {
     /// How many agent processes run at once, from the host file.
     #[serde(skip)]
     pub jobs: usize,
+    /// RUSTUP_HOME and CARGO_HOME for agent processes and checks, from the host file.
+    #[serde(skip)]
+    pub toolchain: Vec<(String, String)>,
+}
+
+/// Cargo reads a config.toml from every ancestor of the directory it builds in.
+/// /tmp is anyone's, so bon makes /tmp/.cargo its own before agent can, and
+/// refuses to run if another user made it first.
+fn cargo_config_guard(root: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let d = std::path::Path::new("/tmp/.cargo");
+    let _ = std::fs::create_dir(d);
+    let me = std::fs::metadata(root).map_err(|e| e.to_string())?.uid();
+    let it = std::fs::metadata(d).map_err(|e| format!("/tmp/.cargo: {e}"))?;
+    if it.uid() != me || it.mode() & 0o022 != 0 {
+        return Err("/tmp/.cargo belongs to another user or is writable by others: cargo would read a config.toml from it; remove it, then run again".into());
+    }
+    Ok(())
 }
 
 /// What is true of this machine rather than of a repository, written by
@@ -88,6 +106,13 @@ struct Host {
     /// Default: half the cores.
     #[serde(default)]
     jobs: Option<usize>,
+    /// The toolchain checks judge with, where no agent process can write it
+    /// (/opt/bon, root's all the way up): rustup's home, and a cargo home whose
+    /// root is root's, only its caches agent's. Unset: agent's own.
+    #[serde(default)]
+    rustup_home: Option<String>,
+    #[serde(default)]
+    cargo_home: Option<String>,
 }
 
 fn trunk_default() -> String { "main".into() }
@@ -198,6 +223,7 @@ fn as_agent(config: &Config, dir: &std::path::Path, env: &[(&str, String)], argv
     c.arg("HOME=/Users/agent");
     c.arg("LANG=en_US.UTF-8");
     c.arg("TERM=dumb");
+    for (k, v) in &config.toolchain { c.arg(format!("{k}={v}")); }
     for (k, v) in env { c.arg(format!("{k}={v}")); }
     c.args(argv);
     c.current_dir(dir);
@@ -592,6 +618,9 @@ pub fn manifest(root: &str, commit: &Commit) -> (r: Result<Manifest, String>) {
         .map_err(|e| format!("{HOST}: {e}"))?;
     config.path = host.path;
     config.prices = host.prices;
+    config.toolchain = [("RUSTUP_HOME", &host.rustup_home), ("CARGO_HOME", &host.cargo_home)].into_iter()
+        .filter_map(|(k, v)| v.clone().map(|v| (k.to_string(), v))).collect();
+    cargo_config_guard(&root)?;
     config.jobs = host.jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1)));
     for h in config.harness.iter().chain(config.counterexample.harness.iter()) {
         if !config.prices.contains_key(&h.model) {

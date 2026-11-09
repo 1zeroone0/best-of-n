@@ -3,7 +3,22 @@ id	intent
 15	A push's cost is everything run to reach it: the generation and time cost of every search of every bon process of its kind since the last push of that kind.
 20	A skill ships with the CLI for the model engineer talks to: how to work at the spec level and when to run bon, read from the bon.toml, queue and spec of the repo it runs in; agent processes never see it.
 27	Background work, compaction and counterexample searches on trunk, runs only on spare capacity, stalest first, staleness being trunk commits since that kind last ran.
-28	Programs in Go and Python run the kernel's gates compiled in, as the page does in WebAssembly, and add no trusted code beyond their entry points.
+28	Programs may run the kernel's gates compiled in, in any language, with no trusted code beyond their entry points.
 33	A counterexample's test counts toward no counterexample found only when it rejects something: a test that accepts every program shows nothing, as one that rejects every member shows nothing.
 34	bon shows, for each kind, how often an attempt is selected with no counterexample found, and so how often a run of k attempts ends blocked.
 35	bon shows how many searches each reason blocked: fewer than two verified candidates, disagreement, a counterexample found, too few verified tests, trunk moved.
+36	bon processes work on git's objects and the remote's trunk, never a working tree, and share the host's jobs among them.
+37	Checks run with a toolchain no agent process can write: root's all the way up, with a cargo home whose root agent cannot write.
+38	A counterexample's commit is exactly one new test, the one that was run on the members and the foils.
+39	A check directory holds exactly the commit's tree: no attribute of the candidate leaves a file out, and the build configuration a check reads is protected.
+40	Every measurement carries its exit status, and a run that failed, timed out or did not build is no result, never a verdict, alike for members and foils.
+41	Compaction's evidence comes from trunk's landed tests, each run alone; missing evidence fails the check.
+42	Changed paths are read as git stores them, never as quoted text.
+43	Proof holes are found by Verus's own account or by tokens, never by text.
+44	bon warns when the kernel it was built from (the spec, the gates and their implementation) differs from trunk's.
+45	Generation is recorded as measured, apart from what was charged against a limit.
+46	A search's kind is granted only on the trunk verdict it needs: code on a trunk its checks reject, compaction and counterexample on one they accept.
+47	Each run of bon has its own trace, never shared with an earlier process of the same pid; evidence is filed under the search it was tested in; a trace write that fails is reported; a time limit stops the whole harness.
+48	Whether trunk moved or git refused is decided from the remote's head.
+49	bon queue gives ids unique across one run; an intent counts only when it cites its own transcript; a queue candidate is accepted only when its lines parse.
+50	Before a grant, bon observes every check path and every object the policy names, and reports one that is missing as missing.
