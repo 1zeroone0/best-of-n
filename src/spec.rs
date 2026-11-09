@@ -413,6 +413,38 @@ pub open spec fn blocked(reason: Blocked, tested: Search, counterexample: Search
     }
 }
 
+/// Why the attempt on tested blocked, decided by the kernel: on the selection
+/// (no counterexample search yet), or on the counterexample search and the
+/// foil search on it. None where it did not block, or has not finished. The
+/// two git reasons, trunk moved and refused, are git's to say, not this.
+pub open spec fn reason(tested: Search, counterexample: Option<Search>, foils: Option<Search>) -> Option<Blocked> {
+    match counterexample {
+        None =>
+            if !complete(tested) { None }
+            else if !two_verified(tested) { Some(Blocked::TooFewVerified) }
+            else if !agree(tested) { Some(Blocked::Disagree) }
+            else { None },
+        Some(counterexample) =>
+            if !(complete(counterexample) && !found(counterexample, tested)) { None }
+            else if !two_verified(counterexample) { Some(Blocked::TooFewTests) }
+            else if exists|i: int| verified_at(counterexample, i) && rejects_every(at(counterexample, i), tested) { Some(Blocked::RejectsEvery) }
+            else {
+                match foils {
+                    Some(foils) => if complete(foils) && !not_found(counterexample, tested, foils) { Some(Blocked::Undiscriminating) } else { None },
+                    None => None,
+                }
+            },
+    }
+}
+
+/// The reason the kernel gives is one `blocked` holds for: what a block records.
+pub proof fn reason_is_blocked(tested: Search, counterexample: Option<Search>, foils: Option<Search>)
+    ensures
+        reason(tested, counterexample, foils) matches Some(r) ==>
+            blocked(r, tested, match counterexample { Some(c) => c, None => tested }, match foils { Some(f) => f, None => tested }),
+{
+}
+
 /// A counterexample search on a selection that neither found a counterexample
 /// nor found none blocked for exactly one of the counterexample reasons.
 pub proof fn blocked_has_one_reason(counterexample: Search, tested: Search, foils: Search)

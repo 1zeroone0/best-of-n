@@ -505,7 +505,35 @@ fn generation(h: &Harness, config: &Config, stdout: &str) -> Result<(u64, Option
     }
 }
 
-fn prompt(kind: &Kind, config: &Config) -> String {
+/// What a push changes, for the agent processes that test it: the spec's diff
+/// since bon's last push (for blind tests, which see the spec and not the code),
+/// and the selected candidate's diff against its base (for foils). Capped, so a
+/// large change still fits.
+fn aim(m: &Manifest, kind: &Kind, target: Option<&Search>, start: &str) -> String {
+    let cap = |d: String| { let lines: Vec<&str> = d.lines().collect(); if lines.len() > 400 { format!("{}\n[… {} more lines]", lines[..400].join("\n"), lines.len() - 400) } else { d } };
+    let selected = |p: &crate::gates::AgentProcess| target.and_then(|t| t.results.get(p.index)).and_then(|r| r.as_ref())
+        .map(|c| (c.base.iter().collect::<String>(), c.commit.iter().collect::<String>()));
+    match kind {
+        Kind::Counterexample { goal: Some(_) } => {
+            let since = git(&m.root, &["log", "-1", "--format=%H", "--author=agent", start]).unwrap_or_default();
+            let mut args = vec!["diff".to_string(), if since.is_empty() { git(&m.root, &["rev-list", "--max-parents=0", start]).unwrap_or_default() } else { since }, start.to_string(), "--".into()];
+            args.extend(m.config.checks.paths.iter().cloned());
+            let d = git(&m.root, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>()).unwrap_or_default();
+            if d.is_empty() { String::new() } else { format!("The spec changed for this push; aim your test at what the change requires:\n{}\n", cap(d)) }
+        }
+        Kind::Foil { goal } => match selected(goal) {
+            Some((base, commit)) => {
+                let files = git(&m.root, &["diff", "--name-only", &base, &commit]).unwrap_or_default().lines().collect::<Vec<_>>().join(", ");
+                let d = git(&m.root, &["diff", &base, &commit]).unwrap_or_default();
+                format!("The change under test touched {files}. Change only what it added or altered, in those files:\n{}\n", cap(d))
+            }
+            None => String::new(),
+        },
+        _ => String::new(),
+    }
+}
+
+fn prompt(kind: &Kind, config: &Config, aim: &str) -> String {
     let c = &config.counterexample;
     let blind = if c.visible.is_empty() { "" } else { "You will not see any implementation's code on purpose: write it from the spec and the checks alone." };
     let goal = match kind {
@@ -533,7 +561,7 @@ fn prompt(kind: &Kind, config: &Config) -> String {
              and the cue's start time.\n", goal.iter().collect::<String>()),
     };
     format!(
-        "You are working in a copy of a repository, with no git. {goal}\n\
+        "You are working in a copy of a repository, with no git. {goal}{aim}\n\
          The checks are {paths:?}: read and run them, never change them; you cannot.\n\
          The tests run with: {test:?}. Verus runs with: {verify:?}.\n\
          {scope} Reply with one line saying what you changed.",
@@ -1077,7 +1105,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
     }
     let argv = harness_argv(h, config, &dir);
     let _ = std::fs::write(trace.join("argv"), argv.join(" "));
-    let text = prompt(kind, config);
+    let text = prompt(kind, config, &aim(m, kind, target, start));
     let _ = std::fs::write(trace.join("prompt"), &text);
     let c = as_agent(config, &dir, &[], &argv);
     let (_, stdout, killed) = supervise(c, Some(text), Duration::from_secs(config.agent_process.time), &trace.join("harness"));

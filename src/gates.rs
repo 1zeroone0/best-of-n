@@ -428,6 +428,17 @@ pub trait Gates {
         requires counterexample.results.len() == counterexample.n, tested.results.len() == tested.n, foils.results.len() == foils.n,
         ensures r == spec::not_found(counterexample@, tested@, foils@);
 
+    /// Why the attempt on tested blocked: on its selection, or on the
+    /// counterexample and foil searches on it.
+    fn blocked(tested: &Search, counterexample: Option<&Search>, foils: Option<&Search>) -> (r: Option<spec::Blocked>)
+        requires
+            tested.results.len() == tested.n,
+            counterexample matches Some(c) ==> c.results.len() == c.n,
+            foils matches Some(f) ==> f.results.len() == f.n,
+        ensures r == spec::reason(tested@,
+            match counterexample { Some(c) => Some(c@), None => None },
+            match foils { Some(f) => Some(f@), None => None });
+
     /// The test that lands on trunk, if counterexample found one on trunk.
     fn found_on_trunk(counterexample: &Search) -> (r: Option<usize>)
         requires counterexample.results.len() == counterexample.n,
