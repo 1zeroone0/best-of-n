@@ -982,9 +982,25 @@ pub fn record_land(m: &Manifest, counterexample_index: usize, i: usize, Ghost(se
     record(m, &format!("land {counterexample_index} {i}"));
 }
 
-/// A search blocked, and why.
+/// An attempt blocked, and the one reason why, which Verus checks against the
+/// searches it names: tested, and the counterexample and foil searches on its
+/// selection (any search, for a reason that does not reach them).
 #[verifier::external_body]
-pub fn record_blocked(m: &Manifest, reason: &str) { record(m, &format!("blocked: {reason}")); }
+pub fn record_blocked(m: &Manifest, reason: spec::Blocked, Ghost(tested): Ghost<spec::Search>,
+                      Ghost(counterexample): Ghost<spec::Search>, Ghost(foils): Ghost<spec::Search>)
+    requires spec::blocked(reason, tested, counterexample, foils),
+{
+    let (word, sentence) = match reason {
+        spec::Blocked::TooFewVerified => ("too_few_verified", "fewer than two verified candidates"),
+        spec::Blocked::Disagree => ("disagree", "the verified candidates disagree"),
+        spec::Blocked::TooFewTests => ("too_few_tests", "fewer than two verified tests, and none splits the candidates"),
+        spec::Blocked::RejectsEvery => ("rejects_every", "a verified test rejects every candidate"),
+        spec::Blocked::Undiscriminating => ("undiscriminating", "fewer than two verified tests reject a foil"),
+        spec::Blocked::TrunkMoved => ("trunk_moved", "trunk moved during the search; run it again"),
+        spec::Blocked::Refused => ("refused", "git refused what the gates allowed"),
+    };
+    record(m, &format!("blocked: {word}: {sentence}"));
+}
 
 /// A counterexample search on trunk found none, and why.
 #[verifier::external_body]

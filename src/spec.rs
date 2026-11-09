@@ -361,6 +361,71 @@ pub open spec fn lands(searches: Seq<Search>, counterexample_index: int, i: int)
     }
 }
 
+// ── why a search blocked ────────────────────────────────
+
+/// Why an attempt ended without a push or a landed test. Each reason holds
+/// only where the ones before it do not, so a block has exactly one.
+pub enum Blocked {
+    /// Fewer than two candidates are verified.
+    TooFewVerified,
+    /// Two or more are verified, and they do not agree.
+    Disagree,
+    /// The counterexample search verified fewer than two tests, and none split
+    /// the candidates.
+    TooFewTests,
+    /// Otherwise: a verified test rejects every candidate it tested.
+    RejectsEvery,
+    /// Otherwise: fewer than two verified tests reject a foil.
+    Undiscriminating,
+    /// The gates allowed the push, and trunk moved during the search. (git)
+    TrunkMoved,
+    /// The gates allowed a push or a landing, and git refused it. (git)
+    Refused,
+}
+
+/// At least two of search's candidates are verified.
+pub open spec fn two_verified(search: Search) -> bool {
+    exists|i: int, j: int| i != j && verified_at(search, i) && verified_at(search, j)
+}
+
+/// The gates allowed tested's selected candidate i to be pushed: counterexample
+/// and foils are the searches on it, and no counterexample was found.
+pub open spec fn allowed(tested: Search, i: int, counterexample: Search, foils: Search) -> bool {
+    selected(tested, i) && not_found(counterexample, tested, foils)
+}
+
+/// reason is why the attempt on tested blocked, its counterexample and foil
+/// searches being counterexample and foils.
+pub open spec fn blocked(reason: Blocked, tested: Search, counterexample: Search, foils: Search) -> bool {
+    let checked = complete(counterexample) && !found(counterexample, tested);
+    match reason {
+        Blocked::TooFewVerified => complete(tested) && !two_verified(tested),
+        Blocked::Disagree => complete(tested) && two_verified(tested) && !agree(tested),
+        Blocked::TooFewTests => checked && !two_verified(counterexample),
+        Blocked::RejectsEvery => checked && two_verified(counterexample)
+            && exists|i: int| verified_at(counterexample, i) && rejects_every(at(counterexample, i), tested),
+        Blocked::Undiscriminating => checked && complete(foils) && two_verified(counterexample)
+            && (forall|i: int| verified_at(counterexample, i) ==> !rejects_every(at(counterexample, i), tested))
+            && !not_found(counterexample, tested, foils),
+        Blocked::TrunkMoved => exists|i: int| allowed(tested, i, counterexample, foils),
+        Blocked::Refused => (exists|i: int| allowed(tested, i, counterexample, foils))
+            || exists|j: int| lands_on(counterexample, tested, j),
+    }
+}
+
+/// A counterexample search on a selection that neither found a counterexample
+/// nor found none blocked for exactly one of the counterexample reasons.
+pub proof fn blocked_has_one_reason(counterexample: Search, tested: Search, foils: Search)
+    requires
+        complete(counterexample), complete(foils),
+        !found(counterexample, tested), !not_found(counterexample, tested, foils),
+    ensures
+        blocked(Blocked::TooFewTests, tested, counterexample, foils)
+        || blocked(Blocked::RejectsEvery, tested, counterexample, foils)
+        || blocked(Blocked::Undiscriminating, tested, counterexample, foils),
+{
+}
+
 /// Trunk commit commit, after its parent, is a selected candidate pushed once
 /// a counterexample search on it found none.
 pub open spec fn pushed(searches: Seq<Search>, parent: Commit, commit: Commit) -> bool {
