@@ -266,7 +266,8 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
         Tab::Spec => {
             let Some(spec) = &p.spec else { out.push(Row::text(Line::from(Span::styled(" No spec found.", pal.muted())))); return out };
             let g = p.system.clone().unwrap_or_default();
-            let nw = spec.items.iter().map(|i| i.name.chars().count()).chain(spec.fields.iter().map(|f| f.name.chars().count())).max().unwrap_or(10).min(24) + 2;
+            // Names as wide as the longest, but never more than a third of the width (a phone).
+            let nw = (spec.items.iter().map(|i| i.name.chars().count()).chain(spec.fields.iter().map(|f| f.name.chars().count())).max().unwrap_or(10).min(24) + 2).min((w / 3).max(10));
             let item = |i: usize, rest: Vec<Span<'static>>| { let mut v = vec![Span::styled(format!("   {}", fit(&spec.items[i].name, nw)), pal.ink())]; v.extend(rest); Row { line: Line::from(v), key: Some(Key::Item(i)) } };
             let doc_of = |i: usize, room: usize| Span::styled(fit(&spec.items[i].doc.clone().unwrap_or_default(), room), pal.muted());
             let of = |kind: &str| spec.items.iter().enumerate().filter(|(_, x)| x.kind == kind).map(|(i, _)| i).collect::<Vec<_>>();
