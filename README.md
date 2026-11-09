@@ -1,28 +1,24 @@
 # bon
 
-You write what the software must do. bon searches for the code.
+You write what the software must do. bon searches for the code: several
+agent processes each write a candidate, Verus proves them, two must agree,
+and blind tests try to split them before the best reaches trunk.
 
-Several agent processes each write a candidate. The tests accept or reject
-each one; Verus proves the accepted ones. Two verified candidates must agree.
-The highest rank is selected, and pushed to trunk once no counterexample
-splits them.
+<img src="readme/bon.svg" width="880" alt="You write intents to the queue, then the spec and checks. One search: agent processes generate candidates; the tests and Verus verify them; two must agree; a counterexample search tries to split them; the best is selected and pushed to trunk. People try trunk and talk again. Below: the kernel (spec, gates, implementation, proven by Verus) emits types; programs in TypeScript, Go and Python are built on them, around trusted code.">
 
-<img src="readme/loop.svg" width="880" alt="One iteration, transcript to transcript: a queue search turns a transcript into intents; the owner writes them into the spec and checks; code and counterexample searches write and test the code; it is pushed to trunk; counterexample searches on trunk and compaction keep trunk true and small; people try it and talk again.">
+`bon` in a terminal shows every search, what it cost and what reached trunk:
 
-<img src="readme/search.svg" width="880" alt="Inside one search: generate, verify, agree, counterexample, select. Four kinds share it: queue, code, compaction, counterexample.">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="readme/traces-dark.png">
+  <img src="readme/traces-light.png" width="880" alt="bon's Traces tab: each bon process by time, its outcome and cost; beside it the focused one's searches and candidates.">
+</picture>
 
-## Who decides
+and the spec, from its own source, down to the code that implements it:
 
-You decide the [spec](src/spec.rs) and the checks. The
-[queue](.bon/queue.tsv) holds what was asked for and is not in the spec yet;
-writing an intent into the spec takes it off the queue. Search decides the
-rest. Only a search that runs out of width or limit comes back to you.
-
-The kernel is the spec, the [gates](src/gates.rs) and their
-[implementation](src/exec.rs), proven by Verus. The terminal, `bon view` and
-the gates in WebAssembly are built from it.
-
-<img src="readme/kernel.svg" width="880" alt="The kernel at the center: spec, gates and their Rust implementation, proven by Verus. Programs around it, the terminal, the web view and WebAssembly, use what it emits and decide nothing.">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="readme/spec-dark.png">
+  <img src="readme/spec-light.png" width="880" alt="bon's Spec tab: the vocabulary, the state machine and, for a predicate, its gate's contract as written and every caller up to the programs.">
+</picture>
 
 ## Start
 
@@ -33,45 +29,37 @@ cargo verus build
 su admin -c "target/debug/bon setup --for $USER"   # --dry-run shows each step
 sudo -u agent -i codex login                         # or claude
 bon code      # after a spec change: code that trunk's checks accept
-bon view
+bon
 ```
 
 | | |
 |---|---|
-| `bon` | what is running, what was pushed, the queue |
+| `bon` | the view: Project, Spec, Queue, Traces (piped, plain text) |
 | `bon code` | search for code that trunk's checks accept; push it |
-| `bon compaction` | remove what is stale in code and tests, behavior unchanged |
-| `bon counterexample` | look for a behavior on trunk the spec forbids, with tests written blind; if found, its test lands on trunk: then `bon code` |
+| `bon counterexample` | look for a behavior on trunk the spec forbids, with tests written blind |
+| `bon compaction` | remove what is stale, behavior unchanged |
 | `bon queue` | turn each new transcript into a proposal for the queue |
 | `bon background` | the stalest of compaction and counterexample, on spare capacity |
-| `bon view` | the same, live, on localhost |
-| `bon sbom --check` | fail when what bon trusts changed |
+| `bon spec [NAME]` | the spec's vocabulary and how it reaches the code, or one item |
+| `bon types [--check]` | the types programs are built on, in TypeScript, Go and Python |
+| `bon sbom --check` | fail when what bon trusts changed, or a proof is skipped outside it |
+| `bon view` | the same on a page |
 
-## Host, repository, agent
-
-- **Host: `/etc/bon/host.toml`.** Where agent's tools are, model prices,
-  and `jobs`, how many agent processes run at once. `bon setup` writes it.
-- **Repository: `.bon/`.** Tracked: `bon.toml`, the manifest (the checks,
-  the harnesses and their widths, `n = [8, 12]`: 8 agent processes, 12 if
-  blocked, limits, trunk), `queue.tsv` and `sbom.json`. Not tracked:
-  `traces/`, every search's record. Trunk is the remote's; every selected
-  candidate is pushed to it.
-- **agent: the POSIX user every agent process runs as.** Each works in
-  `/tmp/bon/<pid>.<search>.<index>/<repository>`. It can read the checks,
-  write its own working directory, and nothing else; it cannot list
-  `/tmp/bon` to find another's. bon confirms this before every search.
-  That copy is thrown away after the search.
+**You decide** the spec and the checks; the [queue](.bon/queue.tsv) holds what
+is wanted and not yet in the spec. **Search decides** the rest, as the POSIX
+user `agent`, which can read the checks and write only its own working
+directory. Every search's record goes to a private git remote of its own,
+never this repository.
 
 ## Where things are
 
 | | |
 |---|---|
-| [`.bon/queue.tsv`](.bon/queue.tsv) | what was asked for, not yet in the spec |
 | [`src/spec.rs`](src/spec.rs) | what bon is |
 | [`src/gates.rs`](src/gates.rs) | each decision's contract |
 | [`src/exec.rs`](src/exec.rs) | the decisions, proven |
-| [`src/trusted.rs`](src/trusted.rs) | what Verus doesn't check |
-| [`view/`](view/) | `bon view` |
+| [`src/trusted.rs`](src/trusted.rs) | what Verus does not check; no search may change it |
+| [`src/tui.rs`](src/tui.rs), [`src/projection.rs`](src/projection.rs) | the view, and what it shows as types |
+| [`examples/`](examples/) | programs on the emitted types: Go, Python with PyTorch |
+| [`.bon/`](.bon/) | the manifest, the queue, the SBOM |
 | [`skills/bon/`](skills/bon/SKILL.md) | how your model runs bon |
-| [`.bon/sbom.json`](.bon/sbom.json) | everything bon trusts |
-| `.bon/traces/` | every search, every candidate, every cost; a counterexample's evidence as a git bundle |
