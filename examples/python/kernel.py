@@ -183,10 +183,13 @@ class Reason(TypedDict):
 # Where a goal came from: the goal, the commit and its subject.
 About = TypedDict("About", {"goal": str, "from": str, "subject": str})
 
-# What a push cost, and the commit it pushed.
+# What a push cost, and the commit it pushed. Cost is generation plus time,
+# each summed over every bon process run to reach the push.
 class Push(TypedDict):
     commit: str | None
     cost: float | None
+    generation: float | None
+    time_cost: float | None
     to_selection: float | None
     counterexample: float | None
     searches: int | None
@@ -291,6 +294,11 @@ class Facts(TypedDict):
     changed: list[str]
     # A hash of each agree check's output: candidates with the same agree.
     out: list[int]
+    # A test's verdict on each member it ran on, by index; trunk's head (or a
+    # compaction's goal) is -1. Empty for a candidate that is no test.
+    accepts: list[tuple[int, bool]]
+    # A test's verdict on each foil it ran on, by index in the foil search.
+    accepts_foils: list[tuple[int, bool]]
 
 # A queue proposal: a patch adding intents, each with the cue it came from.
 class Proposal(TypedDict):

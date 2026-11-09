@@ -112,7 +112,8 @@ fn date(t: u64) -> String {
 
 fn now() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) }
 
-fn money(d: f64) -> String { format!("${d:.2}") }
+/// Dollars to the cent; never `$-0.00`.
+fn money(d: f64) -> String { format!("${:.2}", if d.abs() < 0.005 { 0.0 } else { d }) }
 
 /// A count of things, in words: "1 candidate", "3 candidates".
 fn count(n: usize, one: &str, many: &str) -> String { format!("{n} {}", if n == 1 { one } else { many }) }
@@ -212,12 +213,16 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
                     "generation": facts["generation_microdollars"].as_f64().map(|m| m / 1e6),
                     "commit": c["commit"], "accepted": accepted, "verified": verified,
                     "rank": c["rank"], "diff": c["diff"], "changed": c["changed"],
-                    "added": c["added"],
-                    "removed": c["removed"],
+                    // Counts only: a facts.json whose `added` is a list of paths has no count.
+                    "added": c["added"].as_u64(),
+                    "removed": c["removed"].as_u64(),
                     "flags": (["killed", "over_limit", "price_mismatch"]).iter().filter(|k| facts[**k] == true).collect::<Vec<_>>(),
                     "logs": logs,
                     "out": c["out"],
                     "proved": c["proved"],
+                    // A trace from before tests ran on foils (or a candidate that is no test) has none.
+                    "accepts": if c["accepts"].is_array() { c["accepts"].clone() } else { json!([]) },
+                    "accepts_foils": if c["accepts_foils"].is_array() { c["accepts_foils"].clone() } else { json!([]) },
                 })))
             }).collect();
             candidates.sort_by_key(|(i, _)| *i);
@@ -382,18 +387,21 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
     // A push's cost is everything run to reach it: every bon process of its
     // kind since the last push of that kind, whatever ran in between, the ones
     // that exited or were blocked first included.
-    let mut since: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
-    let mut reached: Vec<f64> = vec![0.0; groups.len()];
+    // Cost, generation and time, each summed the same way.
+    let mut since: std::collections::HashMap<String, [f64; 3]> = std::collections::HashMap::new();
+    let mut reached: Vec<[f64; 3]> = vec![[0.0; 3]; groups.len()];
     for (k, g) in groups.iter().enumerate().rev() {
         let kind = g["kind"].as_str().unwrap_or_default().to_string();
-        let total = since.entry(kind).or_insert(0.0);
-        *total += g["cost"].as_f64().unwrap_or(0.0);
-        if g["outcome"] == "pushed" { reached[k] = *total; *total = 0.0; }
+        let total = since.entry(kind).or_insert([0.0; 3]);
+        for (i, f) in ["cost", "generation", "time_cost"].iter().enumerate() { total[i] += g[*f].as_f64().unwrap_or(0.0); }
+        if g["outcome"] == "pushed" { reached[k] = *total; *total = [0.0; 3]; }
     }
     let mut push_costs = Vec::new();
     for (k, g) in groups.iter_mut().enumerate() {
         if g["outcome"] == "pushed" && g["push"].is_object() {
-            let cost = reached[k];
+            let [cost, generation, time_cost] = reached[k];
+            g["push"]["generation"] = json!(generation);
+            g["push"]["time_cost"] = json!(time_cost);
             // The foil and counterexample searches that found none on the selection;
             // everything before them is what reaching the selection cost.
             let ce: f64 = g["processes"][0]["searches"].as_array().map_or(0.0, |x| x.iter().rev()
@@ -528,24 +536,43 @@ fn reasons(processes: &[Value]) -> Vec<Value> {
     by.into_iter().map(|(reason, count)| json!({ "reason": reason, "count": count })).collect()
 }
 
-/// Attempts, how bon processes ended, and why attempts blocked: measured, each
-/// with the count it is measured over.
-pub fn outcome_lines(t: &crate::projection::Totals) -> Vec<String> {
-    let mut lines = Vec::new();
+/// The columns of the outcomes table.
+pub const OUTCOME_COLUMNS: [&str; 7] = ["Outcomes", "Attempts", "Pushed", "p", "Blocked", "Expected", "Exited"];
+
+/// Attempts and how bon processes ended, by kind: one row per kind, and one
+/// per width under it when the kind ran at more than one. Attempts, pushed
+/// and p count attempts; blocked and exited count bon processes; expected is
+/// how many of them (1-p)^k predicts would block.
+pub fn outcome_table(t: &crate::projection::Totals) -> Vec<[String; 7]> {
+    let mut out = Vec::new();
+    let p = |a: u64, s: u64| if a > 0 { format!("{:.2}", s as f64 / a as f64) } else { "—".into() };
     for e in &t.ended {
         let rows: Vec<_> = t.attempts.iter().filter(|r| r.kind == e.kind).collect();
         let (a, s) = rows.iter().fold((0, 0), |(a, s), r| (a + r.attempts, s + r.pushed));
-        let widths = rows.iter().map(|r| format!("width {}: {} of {}", r.width, r.pushed, r.attempts)).collect::<Vec<_>>().join(", ");
-        let p = if a > 0 { format!(", p {:.2}", s as f64 / a as f64) } else { String::new() };
-        lines.push(format!("{}: {s} of {a} attempts pushed{p} ({widths})", e.kind));
-        let concluded = e.pushed + e.blocked;
-        let measured = if concluded > 0 { format!("{:.0}%", 100.0 * e.blocked as f64 / concluded as f64) } else { "—".into() };
-        let expected = e.expected.map_or("—".into(), |x| format!("{:.0}%", 100.0 * x));
-        lines.push(format!("  bon processes: {} pushed, {} blocked, {} exited; blocked {measured} of {concluded}, (1-p)^k predicts {expected}",
-            e.pushed, e.blocked, e.exited));
+        let expected = e.expected.map_or("—".into(), |x| format!("{:.1}", x * (e.pushed + e.blocked) as f64));
+        let mut kind = e.kind.clone();
+        if let Some(f) = kind.get_mut(0..1) { f.make_ascii_uppercase(); }
+        out.push([kind, a.to_string(), s.to_string(), p(a, s), e.blocked.to_string(), expected, e.exited.to_string()]);
+        if rows.len() > 1 {
+            for r in rows { out.push([format!("  Width {}", r.width), r.attempts.to_string(), r.pushed.to_string(), p(r.attempts, r.pushed), String::new(), String::new(), String::new()]); }
+        }
     }
+    out
+}
+
+/// The outcomes table as aligned text, and the reasons attempts blocked.
+pub fn outcome_lines(t: &crate::projection::Totals) -> Vec<String> {
+    let rows = outcome_table(t);
+    if rows.is_empty() { return Vec::new(); }
+    let all: Vec<[String; 7]> = std::iter::once(OUTCOME_COLUMNS.map(String::from)).chain(rows).collect();
+    let w: Vec<usize> = (0..7).map(|i| all.iter().map(|r| r[i].chars().count()).max().unwrap_or(0)).collect();
+    let mut lines: Vec<String> = all.iter().map(|r| {
+        let mut l = format!("{:<1$}", r[0], w[0]);
+        for i in 1..7 { l += &format!("  {:>1$}", r[i], w[i]); }
+        l.trim_end().to_string()
+    }).collect();
     let reasons = t.reasons.iter().map(|r| format!("{} {}", r.reason, r.count)).collect::<Vec<_>>();
-    if !reasons.is_empty() { lines.push(format!("blocked by: {}", reasons.join(", "))); }
+    if !reasons.is_empty() { lines.push(format!("Blocked by  {}", reasons.join(" · "))); }
     lines
 }
 
@@ -561,8 +588,10 @@ pub fn text(s: &Value) -> String {
     let r = &s["repo"];
     let t = &s["totals"];
     let opt = |v: &Value| v.as_f64().map_or("—".to_string(), money);
-    out.push_str(&format!("{} · trunk {} {} · {} cost · {} per verified candidate · {} per push\n\n",
+    // Generation and time side by side, then the total.
+    out.push_str(&format!("{} · trunk {} {} · {} generation + {} time{} = {} · {} per verified candidate · {} per push\n\n",
         r["name"].as_str().unwrap_or(""), r["trunk"].as_str().unwrap_or(""), &r["head"].as_str().unwrap_or("")[..7.min(r["head"].as_str().unwrap_or("").len())],
+        opt(&t["generation"]), opt(&t["time_cost"]), t["rate"].as_f64().map_or(String::new(), |r| format!(" at ${r:.0}/h")),
         opt(&t["cost"]), opt(&t["per_verified_candidate"]), opt(&t["per_push"])));
     out.push_str(&outcomes(t));
     let f = &s["filter"];
@@ -580,10 +609,13 @@ pub fn text(s: &Value) -> String {
     out.push_str("\nrecent\n");
     for g in s["groups"].as_array().into_iter().flatten().filter(|g| g["running"] != true).take(8) {
         let n = g["processes"].as_array().map_or(0, |p| p.len());
+        // Generation and time side by side, then the total: to the push when it pushed.
+        let split = |x: &Value| format!("{} generation + {} time = {}", money(x["generation"].as_f64().unwrap_or(0.0)),
+            money(x["time_cost"].as_f64().unwrap_or(0.0)), money(x["cost"].as_f64().unwrap_or(0.0)));
         let cost = match g["push"]["cost"].as_f64() {
-            Some(c) if n > 1 => format!("{} cost; {} for the push", money(g["cost"].as_f64().unwrap_or(0.0)), money(c)),
-            Some(c) => format!("{} to push", money(c)),
-            None => format!("{} cost", money(g["cost"].as_f64().unwrap_or(0.0))),
+            Some(c) if n > 1 && (c - g["cost"].as_f64().unwrap_or(0.0)).abs() >= 0.005 => format!("{} cost; {} for the push", split(g), split(&g["push"])),
+            Some(_) => format!("{} to push", split(&g["push"])),
+            None => format!("{} cost", split(g)),
         };
         out.push_str(&format!("  {:<14} {:<9} {}\n      {}\n      {}{cost}\n",
             g["kind"].as_str().unwrap_or(""), g["outcome"].as_str().unwrap_or(""), g["title"].as_str().unwrap_or(""),

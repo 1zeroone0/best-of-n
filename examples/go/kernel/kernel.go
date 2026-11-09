@@ -210,10 +210,13 @@ type About struct {
 	Subject string `json:"subject"`
 }
 
-// What a push cost, and the commit it pushed.
+// What a push cost, and the commit it pushed. Cost is generation plus time,
+// each summed over every bon process run to reach the push.
 type Push struct {
 	Commit         *string  `json:"commit"`
 	Cost           *float64 `json:"cost"`
+	Generation     *float64 `json:"generation"`
+	TimeCost       *float64 `json:"time_cost"`
 	ToSelection    *float64 `json:"to_selection"`
 	Counterexample *float64 `json:"counterexample"`
 	Searches       *uint64  `json:"searches"`
@@ -324,6 +327,11 @@ type Facts struct {
 	Changed []string `json:"changed"`
 	// A hash of each agree check's output: candidates with the same agree.
 	Out []uint64 `json:"out"`
+	// A test's verdict on each member it ran on, by index; trunk's head (or a
+	// compaction's goal) is -1. Empty for a candidate that is no test.
+	Accepts []Tuple2[int64, bool] `json:"accepts"`
+	// A test's verdict on each foil it ran on, by index in the foil search.
+	AcceptsFoils []Tuple2[int64, bool] `json:"accepts_foils"`
 }
 
 // A queue proposal: a patch adding intents, each with the cue it came from.

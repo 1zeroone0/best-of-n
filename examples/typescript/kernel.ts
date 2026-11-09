@@ -36,8 +36,8 @@ export interface Ended { kind: string; pushed: number; blocked: number; exited: 
 export interface Reason { reason: string; count: number }
 /** Where a goal came from: the goal, the commit and its subject. */
 export interface About { goal: string; from: string; subject: string }
-/** What a push cost, and the commit it pushed. */
-export interface Push { commit: string | null; cost: number | null; to_selection: number | null; counterexample: number | null; searches: number | null; processes: number | null }
+/** What a push cost, and the commit it pushed. Cost is generation plus time, each summed over every bon process run to reach the push. */
+export interface Push { commit: string | null; cost: number | null; generation: number | null; time_cost: number | null; to_selection: number | null; counterexample: number | null; searches: number | null; processes: number | null }
 /** The bon processes of one goal: one row of the traces. */
 export interface GoalTrace { kind: string; title: string; about: About; outcome: string; sentence: string; cost: number; generation: number; time_cost: number; push: Push | null; time: number; running: boolean; processes: Array<BonProcess> }
 /** One run of a bon command, by its pid. */
@@ -49,7 +49,7 @@ export interface Params { goal: GoalRef; base: string; n: number | null; limit: 
 /** A search's goal: a trunk commit, a selected candidate, or a transcript. */
 export interface GoalRef { trunk: string | null; candidate: string | null; transcript: string | null }
 /** One agent process, from its facts.json. */
-export interface Facts { index: number; harness: string | null; model: string | null; generation: number | null; commit: string | null; accepted: boolean; proved: boolean; verified: boolean; rank: number | null; diff: number | null; added: number | null; removed: number | null; flags: Array<string>; logs: Array<string>; changed: Array<string>; out: Array<number> }
+export interface Facts { index: number; harness: string | null; model: string | null; generation: number | null; commit: string | null; accepted: boolean; proved: boolean; verified: boolean; rank: number | null; diff: number | null; added: number | null; removed: number | null; flags: Array<string>; logs: Array<string>; changed: Array<string>; out: Array<number>; accepts: Array<[number, boolean]>; accepts_foils: Array<[number, boolean]> }
 /** A queue proposal: a patch adding intents, each with the cue it came from. */
 export interface Proposal { name: string; path: string; source: string; intents: Array<ProposedIntent>; contested: Array<string> }
 export interface ProposedIntent { id: number | null; intent: string; cue: string | null }

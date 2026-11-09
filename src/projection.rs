@@ -129,12 +129,15 @@ pub struct About {
     pub subject: String,
 }
 
-/// What a push cost, and the commit it pushed.
+/// What a push cost, and the commit it pushed. Cost is generation plus time,
+/// each summed over every bon process run to reach the push.
 #[derive(Deserialize, Default, Clone)]
 #[serde(default)]
 pub struct Push {
     pub commit: Option<String>,
     pub cost: Option<f64>,
+    pub generation: Option<f64>,
+    pub time_cost: Option<f64>,
     pub to_selection: Option<f64>,
     pub counterexample: Option<f64>,
     pub searches: Option<u64>,
@@ -257,6 +260,11 @@ pub struct Facts {
     pub changed: Vec<String>,
     /// A hash of each agree check's output: candidates with the same agree.
     pub out: Vec<u64>,
+    /// A test's verdict on each member it ran on, by index; trunk's head (or a
+    /// compaction's goal) is -1. Empty for a candidate that is no test.
+    pub accepts: Vec<(i64, bool)>,
+    /// A test's verdict on each foil it ran on, by index in the foil search.
+    pub accepts_foils: Vec<(i64, bool)>,
 }
 
 /// A queue proposal: a patch adding intents, each with the cue it came from.
@@ -462,5 +470,12 @@ mod tests {
     fn the_projection_of_a_repository_without_bon_reads() {
         let p: Projection = serde_json::from_value(serde_json::json!({ "configured": false })).unwrap();
         assert!(!p.configured && p.processes.is_empty());
+    }
+
+    #[test]
+    fn a_candidate_without_verdicts_reads_as_none() {
+        let f: Facts = serde_json::from_value(serde_json::json!({ "index": 0, "accepts": [], "accepts_foils": [[1, false]] })).unwrap();
+        assert!(f.accepts.is_empty() && f.accepts_foils == vec![(1, false)]);
+        assert!(serde_json::from_value::<Facts>(serde_json::json!({ "index": 0 })).unwrap().accepts.is_empty());
     }
 }
