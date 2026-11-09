@@ -531,17 +531,13 @@ fn queue(root: &str) -> Result<(), String> {
     if new.is_empty() { println!("no new transcripts in {dir}"); return Ok(()); }
     for (_, rel) in &new { println!("{rel}: searching"); }
     let found = process::queue(root, &new.iter().map(|(_, rel)| rel.chars().collect()).collect())?;
+    // One counter for the run: each proposal's ids follow the last one's.
+    let mut id = next_id(r);
     for ((p, rel), (agreed, contested)) in new.iter().zip(found) {
         let head = git(r, &["rev-parse", "HEAD"])?;
         let mut text = git(r, &["show", "HEAD:.bon/queue.tsv"]).unwrap_or_else(|_| "id\tintent\n".into());
-        if !text.ends_with('\n') { text.push('\n'); }
-        let mut id = next_id(r);
-        let mut cues = Vec::new();
-        for (cue, intent) in &agreed {
-            text.push_str(&format!("{id}\t{}\n", intent.iter().collect::<String>()));
-            cues.push((id, *cue));
-            id += 1;
-        }
+        let intents: Vec<(u64, String)> = agreed.iter().map(|(cue, intent)| (*cue, intent.iter().collect())).collect();
+        let cues = numbered(&mut text, &mut id, &intents);
         let commit = proposal(r, &head, &text, &rel, &cues, &contested)?;
         let name = p.file_stem().unwrap().to_string_lossy().to_string();
         let file = r.join(".bon/traces/proposals").join(format!("{name}.patch"));
@@ -555,7 +551,6 @@ fn queue(root: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// One more than the largest id the queue has ever held, in any commit.
 /// The ids in `queue` that an earlier commit retired: removed with no line of
 /// the same id added in that commit (an edit keeps its id; a retirement does
 /// not). `log` is `git log -p --reverse --format="commit %h" -- .bon/queue.tsv`.
@@ -579,6 +574,18 @@ fn reused_ids(log: &str, queue: &str) -> Vec<(u64, String)> {
     out
 }
 
+/// Append each intent to `queue` with the next id from `id`, which it advances;
+/// returns each id with the cue it came from.
+fn numbered(queue: &mut String, id: &mut u64, intents: &[(u64, String)]) -> Vec<(u64, u64)> {
+    if !queue.ends_with('\n') { queue.push('\n'); }
+    intents.iter().map(|(cue, intent)| {
+        queue.push_str(&format!("{id}\t{intent}\n"));
+        *id += 1;
+        (*id - 1, *cue)
+    }).collect()
+}
+
+/// One more than the largest id the queue has ever held, in any commit.
 fn next_id(root: &Path) -> u64 {
     git(root, &["log", "-p", "--format=", "--", ".bon/queue.tsv"]).unwrap_or_default().lines()
         .filter_map(|l| l.trim_start_matches(['+', '-', ' ']).split('\t').next()?.parse::<u64>().ok())
@@ -971,6 +978,17 @@ mod tests {
         assert!(std::fs::read_to_string(work.join(".bon/bon.toml")).unwrap().contains("# editing"));
         assert!(!work.join(".bon/cost.toml").exists());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn two_transcripts_in_one_run_get_disjoint_ids() {
+        let mut id = 7;
+        let (mut a, mut b) = ("id\tintent\n".to_string(), "id\tintent".to_string());
+        let first = numbered(&mut a, &mut id, &[(1, "one".into()), (2, "two".into())]);
+        let second = numbered(&mut b, &mut id, &[(3, "three".into())]);
+        assert_eq!(first, vec![(7, 1), (8, 2)]);
+        assert_eq!(second, vec![(9, 3)]);
+        assert_eq!(b, "id\tintent\n9\tthree\n");
     }
 
     #[test]

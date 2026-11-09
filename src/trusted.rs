@@ -1407,6 +1407,7 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
         }
         Kind::Queue { .. } => {
             // Only the queue changed: trunk's verdicts stand; the lines must parse.
+            accepted = queue_accepted(root, start, &commit);
             proved = trunk_proved;
         }
     }
@@ -1430,7 +1431,7 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
     }
 
     let intents: Vec<(Cue, Intent)> = match kind {
-        Kind::Queue { .. } => queue_intents(root, start, &commit),
+        Kind::Queue { goal } => queue_intents(root, start, &commit, &goal.iter().collect::<String>()),
         _ => Vec::new(),
     };
     Ok(Candidate {
@@ -1577,16 +1578,35 @@ fn prune(dir: &std::path::Path, keep: &[String]) {
     }
 }
 
-/// A queue candidate's new lines, by the cue each cites:
-/// `<tab>intent<tab>path#HH:MM:SS.mmm` (bon gives each its id in the proposal).
-fn queue_intents(root: &std::path::Path, start: &str, commit: &str) -> Vec<(Cue, Intent)> {
-    let diff = git(root, &["diff", "--unified=0", start, commit, "--", QUEUE]).unwrap_or_default();
-    diff.lines().filter(|l| l.starts_with('+') && !l.starts_with("+++")).filter_map(|l| {
-        let fields: Vec<&str> = l[1..].split('\t').collect();
-        let (text, source) = match fields.as_slice() { [_, t, s] => (*t, *s), [t, s] => (*t, *s), _ => return None };
-        let cue = source.rsplit_once('#')?.1;
-        Some((parse_cue(cue)?, text.trim().chars().collect()))
-    }).collect()
+/// The lines a queue candidate appends to trunk's queue, or None when it
+/// changes or removes a line trunk's queue holds.
+fn appended(root: &std::path::Path, start: &str, commit: &str) -> Option<Vec<String>> {
+    let old = git(root, &["show", &format!("{start}:{QUEUE}")]).unwrap_or_default();
+    let new = git(root, &["show", &format!("{commit}:{QUEUE}")]).ok()?;
+    let (old, new): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
+    if !new.starts_with(&old) { return None; }
+    Some(new[old.len()..].iter().map(|l| l.to_string()).collect())
+}
+
+/// One line as the queue prompt asks for it: an id (empty; bon gives it in the
+/// proposal), a tab, the intent, a tab, the transcript path, '#', the cue's
+/// start time. Returns the transcript, the cue and the intent.
+fn queue_line(l: &str) -> Option<(&str, Cue, &str)> {
+    let [id, intent, source] = l.split('\t').collect::<Vec<_>>()[..] else { return None };
+    let (transcript, cue) = source.rsplit_once('#')?;
+    if !id.chars().all(|c| c.is_ascii_digit()) || intent.trim().is_empty() || transcript.is_empty() { return None; }
+    Some((transcript, parse_cue(cue)?, intent.trim()))
+}
+
+/// A queue candidate is accepted when it only appends lines and each parses.
+fn queue_accepted(root: &std::path::Path, start: &str, commit: &str) -> bool {
+    appended(root, start, commit).is_some_and(|a| a.iter().all(|l| queue_line(l).is_some()))
+}
+
+/// A queue candidate's new lines that cite its own transcript, by cue.
+fn queue_intents(root: &std::path::Path, start: &str, commit: &str, transcript: &str) -> Vec<(Cue, Intent)> {
+    appended(root, start, commit).unwrap_or_default().iter().filter_map(|l| queue_line(l))
+        .filter(|(t, _, _)| *t == transcript).map(|(_, cue, intent)| (cue, intent.chars().collect())).collect()
 }
 
 /// WebVTT timestamp to milliseconds.
@@ -1716,6 +1736,50 @@ mod tests {
         assert_eq!(parse_cue("00:01:02.345"), Some(62_345));
         assert_eq!(parse_cue("01:00:00.000"), Some(3_600_000));
         assert_eq!(parse_cue("nope"), None);
+    }
+
+    /// A repository whose queue is `old`, then `new`: the two commits.
+    fn queues(name: &str, old: &str, new: &str) -> (PathBuf, String, String) {
+        let d = std::env::temp_dir().join(format!("bon-queue-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join(BON)).unwrap();
+        git(&d, &["init", "-q"]).unwrap();
+        let mut commits = Vec::new();
+        for q in [old, new] {
+            std::fs::write(d.join(QUEUE), q).unwrap();
+            git(&d, &["add", "."]).unwrap();
+            git(&d, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "q"]).unwrap();
+            commits.push(git(&d, &["rev-parse", "HEAD"]).unwrap());
+        }
+        (d, commits[0].clone(), commits[1].clone())
+    }
+
+    #[test]
+    fn an_intent_counts_only_when_it_cites_its_own_transcript() {
+        let (d, a, b) = queues("cites", "id\tintent\n1\told\n",
+            "id\tintent\n1\told\n\tmine\tt/a.vtt#00:00:01.000\n\tsomeone else's\tt/b.vtt#00:00:02.000\n");
+        assert!(queue_accepted(&d, &a, &b));
+        let i: Vec<(Cue, String)> = queue_intents(&d, &a, &b, "t/a.vtt").into_iter().map(|(c, i)| (c, i.iter().collect())).collect();
+        assert_eq!(i, vec![(1000, "mine".to_string())]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_queue_candidate_is_accepted_only_when_its_lines_parse() {
+        let old = "id\tintent\n1\told\n";
+        for (new, ok) in [
+            ("id\tintent\n1\told\n\tnew\tt/a.vtt#00:00:01.000\n", true),
+            ("id\tintent\n1\told\n", true),
+            ("id\tintent\n1\told\nnew without fields\n", false),
+            ("id\tintent\n1\told\n\tnew\tt/a.vtt#soon\n", false),
+            ("id\tintent\n1\told\n\t\tt/a.vtt#00:00:01.000\n", false),
+            ("id\tintent\n1\told, reworded\n\tnew\tt/a.vtt#00:00:01.000\n", false),
+            ("id\tintent\n\tnew\tt/a.vtt#00:00:01.000\n", false),
+        ] {
+            let (d, a, b) = queues("parse", old, new);
+            assert_eq!(queue_accepted(&d, &a, &b), ok, "{new:?}");
+            let _ = std::fs::remove_dir_all(&d);
+        }
     }
 
     #[test]
