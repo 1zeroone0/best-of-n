@@ -68,10 +68,10 @@ fn under(checks: &Vec<Path>, p: &Path) -> (r: bool)
     while i < checks.len()
         invariant
             0 <= i <= checks.len(),
-            forall|j: int| 0 <= j < i ==> !checks@[j]@.is_prefix_of(p@),
+            forall|j: int| 0 <= j < i ==> !checks@[j]@.0.is_prefix_of(p@.0),
         decreases checks.len() - i,
     {
-        if is_prefix_of(&checks[i], p) {
+        if is_prefix_of(&checks[i].0, &p.0) {
             proof {
                 let c = checks@[i as int]@;
                 assert(checks@.map_values(|q: Path| q@)[i as int] == c);
@@ -82,7 +82,7 @@ fn under(checks: &Vec<Path>, p: &Path) -> (r: bool)
         i += 1;
     }
     proof {
-        assert forall|c: spec::Path| paths(checks@).contains(c) implies !c.is_prefix_of(p@) by {
+        assert forall|c: spec::Path| paths(checks@).contains(c) implies !c.0.is_prefix_of(p@.0) by {
             let s = checks@.map_values(|q: Path| q@);
             assert(s.contains(c));
             let j = choose|j: int| 0 <= j < s.len() && s[j] == c;
@@ -94,10 +94,10 @@ fn under(checks: &Vec<Path>, p: &Path) -> (r: bool)
 
 /// bon's directory, as text.
 fn bon_path() -> (r: Vec<char>)
-    ensures r@ == spec::bon_path(),
+    ensures r@ == spec::bon_path().0,
 {
     let r = vec!['.', 'b', 'o', 'n', '/'];
-    assert(r@ =~= spec::bon_path());
+    assert(r@ =~= spec::bon_path().0);
     r
 }
 
@@ -105,7 +105,7 @@ fn bon_path() -> (r: Vec<char>)
 fn protected(checks: &Vec<Path>, trusted: &Vec<Path>, p: &Path) -> (r: bool)
     ensures r == spec::protected(paths(checks@), paths(trusted@), p@),
 {
-    is_prefix_of(&bon_path(), p) || under(checks, p) || under(trusted, p)
+    is_prefix_of(&bon_path(), &p.0) || under(checks, p) || under(trusted, p)
 }
 
 /// p is within the authority of a search of this kind.
@@ -117,8 +117,8 @@ fn authority_contains(kind: &Kind, checks: &Vec<Path>, tests: &Vec<Path>, truste
             let mut q = bon_path();
             q.push('q'); q.push('u'); q.push('e'); q.push('u'); q.push('e');
             q.push('.'); q.push('t'); q.push('s'); q.push('v');
-            assert(q@ =~= spec::queue_path());
-            eq(p, &q)
+            assert(q@ =~= spec::queue_path().0);
+            eq(&p.0, &q)
         }
         Kind::Code { .. } => !protected(checks, trusted, p) && !under(tests, p),
         Kind::Compaction { .. } => !protected(checks, trusted, p),
@@ -737,8 +737,8 @@ fn intent(c: &Candidate, q: Cue) -> (r: Option<&Intent>)
 
 /// w at index i is at least as short as at index j for cue q, ties to the earlier.
 spec fn shortest(s: spec::Search, q: nat, i: int, j: int) -> bool {
-    spec::at(s, i).intents[q].len() < spec::at(s, j).intents[q].len()
-    || (spec::at(s, i).intents[q].len() == spec::at(s, j).intents[q].len() && i <= j)
+    spec::at(s, i).intents[q].0.len() < spec::at(s, j).intents[q].0.len()
+    || (spec::at(s, i).intents[q].0.len() == spec::at(s, j).intents[q].0.len() && i <= j)
 }
 
 /// Who cites q: the first two citing indices, and the one with the shortest intent.
@@ -782,7 +782,7 @@ fn cites(s: &Search, v: &Vec<bool>, q: Cue) -> (r: (Option<usize>, Option<usize>
                             if second.is_none() { second = Some(i); }
                             let b = candidate(s, best);
                             let bw = match intent(b, q) { Some(bw) => bw, None => vstd::pervasive::unreached() };
-                            if w.len() < bw.len() {
+                            if w.0.len() < bw.0.len() {
                                 proof {
                                     assert forall|j: int| 0 <= j < i + 1 && spec::cites(sv, j, q as nat)
                                         implies shortest(sv, q as nat, i as int, j) by {
@@ -874,7 +874,7 @@ fn cues(s: &Search, v: &Vec<bool>) -> (r: Vec<Cue>)
             }
             proof {
                 assert forall|q: Cue| spec::cites(sv, i as int, q as nat) implies r@.contains(q) by {
-                    let keys = m.map_values(|e: (nat, Seq<char>)| e.0);
+                    let keys = m.map_values(|e: (nat, spec::Intent)| e.0);
                     assert(c@.intents.contains_key(q as nat));
                     assert(keys.to_set().contains(q as nat));
                     assert(keys.contains(q as nat));
@@ -907,7 +907,7 @@ pub fn proposed(s: &Search) -> (r: Vec<(Cue, Intent)>)
     requires s.results.len() == s.n,
     ensures
         forall|k: int| 0 <= k < r.len() ==> spec::proposed(s@, r[k].0 as nat, r[k].1@),
-        forall|q: Cue, w: Seq<char>| spec::proposed(s@, q as nat, w) ==>
+        forall|q: Cue, w: spec::Intent| spec::proposed(s@, q as nat, w) ==>
             exists|k: int| 0 <= k < r.len() && r[k].0 == q,
         forall|a: int, b: int| 0 <= a < b < r.len() ==> r[a].0 < r[b].0,
 {
@@ -937,7 +937,7 @@ pub fn proposed(s: &Search) -> (r: Vec<(Cue, Intent)>)
         let ghost before = r@;
         if second.is_some() {
             let c = candidate(s, best);
-            let w = match intent(c, q) { Some(w) => w.clone(), None => vstd::pervasive::unreached() };
+            let w = match intent(c, q) { Some(w) => Intent(w.0.clone()), None => vstd::pervasive::unreached() };
             proof { reveal(spec::proposed); reveal(spec::agreed); }
             r.push((q, w));
         } else {
@@ -957,7 +957,7 @@ pub fn proposed(s: &Search) -> (r: Vec<(Cue, Intent)>)
         k += 1;
     }
     proof {
-        assert forall|q: Cue, w: Seq<char>| spec::proposed(sv, q as nat, w) implies
+        assert forall|q: Cue, w: spec::Intent| spec::proposed(sv, q as nat, w) implies
             exists|y: int| 0 <= y < r.len() && r[y].0 == q by {
             reveal(spec::proposed);
             assert(spec::agreed(sv, q as nat));

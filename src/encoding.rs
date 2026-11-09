@@ -277,6 +277,66 @@ impl<T: Wire> Wire for Option<T> {
 
 // Built only in proofs, which cargo erases; inconsistent_fields is Verus's lint.
 #[allow(unknown_lints, dead_code)]
+impl Wire for Commit {
+    type Model = <Vec<char> as Wire>::Model;
+    spec fn model(&self) -> Self::Model { self.0.model() }
+    spec fn valid_model(m: Self::Model) -> bool { <Vec<char> as Wire>::valid_model(m) }
+    proof fn valid(&self) { self.0.valid(); }
+    spec fn words(m: Self::Model) -> Seq<u64> { <Vec<char> as Wire>::words(m) }
+    spec fn parse(w: Seq<u64>) -> Option<(Self::Model, Seq<u64>)> { <Vec<char> as Wire>::parse(w) }
+    proof fn roundtrip(m: Self::Model, tail: Seq<u64>) { <Vec<char> as Wire>::roundtrip(m, tail); }
+    fn write(&self) -> (r: Vec<u64>) { self.0.write() }
+    fn read(w: &Vec<u64>) -> (r: Option<(Self, Vec<u64>)>) { match <Vec<char> as Wire>::read(w) { Some((v, tail)) => Some((Commit(v), tail)), None => None } }
+}
+impl Json for Commit {
+    spec fn json(&self) -> Seq<char> { string(self.0@) }
+    fn emit(&self) -> (r: Vec<char>) { self.0.emit() }
+}
+impl Wire for Path {
+    type Model = <Vec<char> as Wire>::Model;
+    spec fn model(&self) -> Self::Model { self.0.model() }
+    spec fn valid_model(m: Self::Model) -> bool { <Vec<char> as Wire>::valid_model(m) }
+    proof fn valid(&self) { self.0.valid(); }
+    spec fn words(m: Self::Model) -> Seq<u64> { <Vec<char> as Wire>::words(m) }
+    spec fn parse(w: Seq<u64>) -> Option<(Self::Model, Seq<u64>)> { <Vec<char> as Wire>::parse(w) }
+    proof fn roundtrip(m: Self::Model, tail: Seq<u64>) { <Vec<char> as Wire>::roundtrip(m, tail); }
+    fn write(&self) -> (r: Vec<u64>) { self.0.write() }
+    fn read(w: &Vec<u64>) -> (r: Option<(Self, Vec<u64>)>) { match <Vec<char> as Wire>::read(w) { Some((v, tail)) => Some((Path(v), tail)), None => None } }
+}
+impl Json for Path {
+    spec fn json(&self) -> Seq<char> { string(self.0@) }
+    fn emit(&self) -> (r: Vec<char>) { self.0.emit() }
+}
+impl Wire for Intent {
+    type Model = <Vec<char> as Wire>::Model;
+    spec fn model(&self) -> Self::Model { self.0.model() }
+    spec fn valid_model(m: Self::Model) -> bool { <Vec<char> as Wire>::valid_model(m) }
+    proof fn valid(&self) { self.0.valid(); }
+    spec fn words(m: Self::Model) -> Seq<u64> { <Vec<char> as Wire>::words(m) }
+    spec fn parse(w: Seq<u64>) -> Option<(Self::Model, Seq<u64>)> { <Vec<char> as Wire>::parse(w) }
+    proof fn roundtrip(m: Self::Model, tail: Seq<u64>) { <Vec<char> as Wire>::roundtrip(m, tail); }
+    fn write(&self) -> (r: Vec<u64>) { self.0.write() }
+    fn read(w: &Vec<u64>) -> (r: Option<(Self, Vec<u64>)>) { match <Vec<char> as Wire>::read(w) { Some((v, tail)) => Some((Intent(v), tail)), None => None } }
+}
+impl Json for Intent {
+    spec fn json(&self) -> Seq<char> { string(self.0@) }
+    fn emit(&self) -> (r: Vec<char>) { self.0.emit() }
+}
+impl Wire for Transcript {
+    type Model = <Vec<char> as Wire>::Model;
+    spec fn model(&self) -> Self::Model { self.0.0.model() }
+    spec fn valid_model(m: Self::Model) -> bool { <Vec<char> as Wire>::valid_model(m) }
+    proof fn valid(&self) { self.0.0.valid(); }
+    spec fn words(m: Self::Model) -> Seq<u64> { <Vec<char> as Wire>::words(m) }
+    spec fn parse(w: Seq<u64>) -> Option<(Self::Model, Seq<u64>)> { <Vec<char> as Wire>::parse(w) }
+    proof fn roundtrip(m: Self::Model, tail: Seq<u64>) { <Vec<char> as Wire>::roundtrip(m, tail); }
+    fn write(&self) -> (r: Vec<u64>) { self.0.0.write() }
+    fn read(w: &Vec<u64>) -> (r: Option<(Self, Vec<u64>)>) { match <Vec<char> as Wire>::read(w) { Some((v, tail)) => Some((Transcript(Path(v)), tail)), None => None } }
+}
+impl Json for Transcript {
+    spec fn json(&self) -> Seq<char> { string(self.0.0@) }
+    fn emit(&self) -> (r: Vec<char>) { self.0.0.emit() }
+}
 #[allow(inconsistent_fields)]
 enum KindModel {
     Queue { goal: Seq<char> }, Code { goal: Seq<char> },
@@ -345,15 +405,15 @@ impl Wire for Kind {
         Kind::Counterexample { goal } => { let mut r = vec![3u64]; append(&mut r, &goal.write()); r },
     } }
     fn read(w: &Vec<u64>) -> (r: Option<(Self, Vec<u64>)>) { if w.len() == 0 { return None; } let t = suffix(w, 1); match w[0] {
-        0 => match <Vec<char> as Wire>::read(&t) { Some((goal, tail)) => Some((Kind::Queue { goal }, tail)), None => None },
-        1 => match <Vec<char> as Wire>::read(&t) { Some((goal, tail)) => Some((Kind::Code { goal }, tail)), None => None },
-        2 => match <(Vec<char>, Vec<Hash>) as Wire>::read(&t) { Some(((goal, out), tail)) => Some((Kind::Compaction { goal, out }, tail)), None => None },
+        0 => match <Vec<char> as Wire>::read(&t) { Some((goal, tail)) => Some((Kind::Queue { goal: Transcript(Path(goal)) }, tail)), None => None },
+        1 => match <Vec<char> as Wire>::read(&t) { Some((goal, tail)) => Some((Kind::Code { goal: Commit(goal) }, tail)), None => None },
+        2 => match <(Vec<char>, Vec<Hash>) as Wire>::read(&t) { Some(((goal, out), tail)) => Some((Kind::Compaction { goal: Commit(goal), out }, tail)), None => None },
         3 => match <Option<AgentProcess> as Wire>::read(&t) { Some((goal, tail)) => Some((Kind::Counterexample { goal }, tail)), None => None },
         _ => None,
     } }
 }
 
-type CandidateWire = (Vec<char>, (Vec<char>, (bool, (bool, (Vec<Vec<char>>, (Vec<Hash>, (Vec<(u64,Vec<char>)>, (Vec<(i64,bool)>, (bool, (i64, u64))))))))));
+type CandidateWire = (Commit, (Commit, (bool, (bool, (Vec<Path>, (Vec<Hash>, (Vec<(u64,Intent)>, (Vec<(i64,bool)>, (bool, (i64, u64))))))))));
 impl Wire for Candidate {
     type Model = <CandidateWire as Wire>::Model;
     spec fn model(&self) -> Self::Model { (self.commit.model(), (self.base.model(), (self.accepted.model(), (self.proved.model(), (self.changed.model(), (self.out.model(), (self.intents.model(), (self.accepts.model(), (self.rejects_counterexamples.model(), (self.rank.model(), self.diff.model())))))))))) }
@@ -368,7 +428,7 @@ impl Wire for Candidate {
     fn read(w: &Vec<u64>) -> (r: Option<(Self, Vec<u64>)>) { match CandidateWire::read(w) { Some(((commit, (base, (accepted, (proved, (changed, (out, (intents, (accepts, (rejects_counterexamples, (rank, diff)))))))))), tail)) => Some((Self { commit, base, accepted, proved, changed, out, intents, accepts, rejects_counterexamples, rank, diff }, tail)), None => None } }
 }
 
-type SearchWire = (Kind, (Vec<char>, (usize, (Vec<Vec<char>>, (Vec<Vec<char>>, (Vec<Vec<char>>, (u64, Vec<Option<Candidate>>)))))));
+type SearchWire = (Kind, (Commit, (usize, (Vec<Path>, (Vec<Path>, (Vec<Path>, (u64, Vec<Option<Candidate>>)))))));
 impl Wire for Search {
     type Model = <SearchWire as Wire>::Model;
     spec fn model(&self) -> Self::Model { (self.kind.model(), (self.base.model(), (self.n.model(), (self.checks.model(), (self.tests.model(), (self.trusted.model(), (self.limit.model(), self.results.model()))))))) }
@@ -417,28 +477,29 @@ proof fn hashes_words(h: Vec<Hash>)
     assert(h.model() =~= h@);
     assert(h@.map_values(|x: Hash| seq![x.0]) =~= h@.map_values(|hash: Hash| hash.0).map_values(|x: u64| seq![x]));
 }
-proof fn texts_words(ts: Vec<Vec<char>>)
-    ensures <Vec<Vec<char>> as Wire>::words(ts.model()) == texts(ts@),
+proof fn texts_words(ts: Vec<Path>)
+    ensures <Vec<Path> as Wire>::words(ts.model()) == texts(ts@),
 {
-    assert forall|i: int| 0 <= i < ts.len() implies <Vec<char> as Wire>::words(ts@[i].model()) == text(ts@[i]@) by { text_words(ts@[i]); }
-    many_matches::<Vec<char>>(ts@, |t: Vec<char>| text(t@));
+    assert forall|i: int| 0 <= i < ts.len() implies <Path as Wire>::words(ts@[i].model()) == text(ts@[i].0@) by { text_words(ts@[i].0); }
+    many_matches::<Path>(ts@, |t: Path| text(t.0@));
 }
 proof fn kind_correct(k: Kind)
     ensures Kind::words(k.model()) == kind_words(k),
 {
     match k {
-        Kind::Queue { goal } | Kind::Code { goal } => { text_words(goal); },
+        Kind::Queue { goal } => { text_words(goal.0.0); },
+        Kind::Code { goal } => { text_words(goal.0); },
         Kind::Counterexample { goal } => {},
-        Kind::Compaction { goal, out } => { text_words(goal); hashes_words(out); },
+        Kind::Compaction { goal, out } => { text_words(goal.0); hashes_words(out); },
     }
 }
 #[verifier::rlimit(1000)]
 proof fn candidate_correct(c: Candidate)
     ensures Candidate::words(c.model()) == candidate_words(c),
 {
-    text_words(c.commit); text_words(c.base); texts_words(c.changed); hashes_words(c.out);
-    assert forall|i: int| 0 <= i < c.intents.len() implies <(u64,Vec<char>) as Wire>::words(c.intents@[i].model()) == seq![c.intents@[i].0] + text(c.intents@[i].1@) by { text_words(c.intents@[i].1); }
-    many_matches::<(u64,Vec<char>)>(c.intents@, |e: (u64,Vec<char>)| seq![e.0] + text(e.1@));
+    text_words(c.commit.0); text_words(c.base.0); texts_words(c.changed); hashes_words(c.out);
+    assert forall|i: int| 0 <= i < c.intents.len() implies <(u64,Intent) as Wire>::words(c.intents@[i].model()) == seq![c.intents@[i].0] + text(c.intents@[i].1.0@) by { text_words(c.intents@[i].1.0); }
+    many_matches::<(u64,Intent)>(c.intents@, |e: (u64,Intent)| seq![e.0] + text(e.1.0@));
     assert forall|i: int| 0 <= i < c.accepts.len() implies <(i64,bool) as Wire>::words(c.accepts@[i].model()) == seq![c.accepts@[i].0 as u64, bit(c.accepts@[i].1)] by {
         assert(seq![c.accepts@[i].0 as u64] + seq![bit(c.accepts@[i].1)] =~= seq![c.accepts@[i].0 as u64, bit(c.accepts@[i].1)]);
     }
@@ -453,7 +514,7 @@ proof fn result_correct(r: Option<Candidate>)
 proof fn search_correct(s: Search)
     ensures Search::words(s.model()) == encoded(s),
 {
-    kind_correct(s.kind); text_words(s.base); texts_words(s.checks); texts_words(s.tests); texts_words(s.trusted);
+    kind_correct(s.kind); text_words(s.base.0); texts_words(s.checks); texts_words(s.tests); texts_words(s.trusted);
     assert forall|i: int| 0 <= i < s.results.len() implies <Option<Candidate> as Wire>::words(s.results@[i].model()) == result_words(s.results@[i]) by { result_correct(s.results@[i]); }
     many_matches::<Option<Candidate>>(s.results@, |r: Option<Candidate>| result_words(r));
 }
@@ -475,15 +536,15 @@ fn equal_words(a: &Vec<u64>, b: &Vec<u64>) -> (r: bool)
 proof fn text_model(t: Vec<char>)
     ensures t.model() == t@,
 { assert(t.model() =~= t@); }
-proof fn text_list_model(a: Vec<Vec<char>>, b: Vec<Vec<char>>)
+proof fn text_list_model(a: Vec<Path>, b: Vec<Path>)
     requires a.model() == b.model(),
     ensures paths(a@) == paths(b@),
 {
     assert(a.model().len() == a.len()); assert(b.model().len() == b.len());
-    assert(a@.map_values(|x: Vec<char>| x@) =~= b@.map_values(|x: Vec<char>| x@)) by {
+    assert(a@.map_values(|x: Path| x@) =~= b@.map_values(|x: Path| x@)) by {
         assert forall|i: int| 0 <= i < a.len() implies a@[i]@ == b@[i]@ by {
             assert(a.model()[i] == a@[i].model()); assert(b.model()[i] == b@[i].model());
-            text_model(a@[i]); text_model(b@[i]);
+            text_model(a@[i].0); text_model(b@[i].0);
         }
     }
 }
@@ -491,9 +552,10 @@ proof fn kind_model(a: Kind, b: Kind)
     requires a.model() == b.model(), ensures a@ == b@,
 {
     match (a, b) {
-        (Kind::Queue { goal: a }, Kind::Queue { goal: b }) | (Kind::Code { goal: a }, Kind::Code { goal: b }) => { text_model(a); text_model(b); },
+        (Kind::Queue { goal: a }, Kind::Queue { goal: b }) => { text_model(a.0.0); text_model(b.0.0); },
+        (Kind::Code { goal: a }, Kind::Code { goal: b }) => { text_model(a.0); text_model(b.0); },
         (Kind::Compaction { goal: a, out: x }, Kind::Compaction { goal: b, out: y }) => {
-            text_model(a); text_model(b);
+            text_model(a.0); text_model(b.0);
             assert(x.model() == y.model()); assert(x.model() =~= x@); assert(y.model() =~= y@); assert(x@ =~= y@);
         },
         _ => {},
@@ -506,7 +568,7 @@ proof fn candidate_model(a: Candidate, b: Candidate)
     assert(a.commit.model() == b.commit.model()); assert(a.base.model() == b.base.model());
     assert(a.changed.model() == b.changed.model()); assert(a.out.model() == b.out.model());
     assert(a.intents.model() == b.intents.model()); assert(a.accepts.model() == b.accepts.model());
-    text_model(a.commit); text_model(b.commit); text_model(a.base); text_model(b.base);
+    text_model(a.commit.0); text_model(b.commit.0); text_model(a.base.0); text_model(b.base.0);
     text_list_model(a.changed, b.changed);
     assert(a.out.model() =~= a.out@); assert(b.out.model() =~= b.out@);
     assert(a.out@ =~= b.out@);
@@ -514,7 +576,7 @@ proof fn candidate_model(a: Candidate, b: Candidate)
     assert(a.accepts@ =~= b.accepts@);
     assert(a.intents.model().len() == a.intents.len()); assert(b.intents.model().len() == b.intents.len());
     assert(a.intents@.map_values(|e: (Cue,Intent)| (e.0 as nat, e.1@)) =~= b.intents@.map_values(|e: (Cue,Intent)| (e.0 as nat, e.1@))) by {
-        assert forall|i: int| 0 <= i < a.intents.len() implies (a.intents@[i].0 as nat, a.intents@[i].1@) == (b.intents@[i].0 as nat, b.intents@[i].1@) by { assert(a.intents.model()[i] == a.intents@[i].model()); assert(b.intents.model()[i] == b.intents@[i].model()); text_model(a.intents@[i].1); text_model(b.intents@[i].1); }
+        assert forall|i: int| 0 <= i < a.intents.len() implies (a.intents@[i].0 as nat, a.intents@[i].1@) == (b.intents@[i].0 as nat, b.intents@[i].1@) by { assert(a.intents.model()[i] == a.intents@[i].model()); assert(b.intents.model()[i] == b.intents@[i].model()); text_model(a.intents@[i].1.0); text_model(b.intents@[i].1.0); }
     }
 }
 #[verifier::rlimit(150)]
@@ -524,7 +586,7 @@ proof fn search_model(a: Search, b: Search)
     assert(a.kind.model() == b.kind.model()); assert(a.base.model() == b.base.model());
     assert(a.checks.model() == b.checks.model()); assert(a.tests.model() == b.tests.model()); assert(a.trusted.model() == b.trusted.model()); assert(a.results.model() == b.results.model());
     assert(a.results.model().len() == a.results.len()); assert(b.results.model().len() == b.results.len());
-    kind_model(a.kind, b.kind); text_model(a.base); text_model(b.base); text_list_model(a.checks, b.checks); text_list_model(a.tests, b.tests); text_list_model(a.trusted, b.trusted);
+    kind_model(a.kind, b.kind); text_model(a.base.0); text_model(b.base.0); text_list_model(a.checks, b.checks); text_list_model(a.tests, b.tests); text_list_model(a.trusted, b.trusted);
     assert forall|i: int| 0 <= i < a.results.len() implies a@.results[i] == b@.results[i] by {
         assert(a.results.model()[i] == a.results@[i].model()); assert(b.results.model()[i] == b.results@[i].model());
         match (a.results@[i], b.results@[i]) {
@@ -656,9 +718,9 @@ impl Json for Hash {
     spec fn json(&self) -> Seq<char> { string(crate::gates::decimal(self.0 as nat)) }
     fn emit(&self) -> (r: Vec<char>) { decimal(self.0).emit() }
 }
-impl Json for (u64, Vec<char>) {
-    spec fn json(&self) -> Seq<char> { crate::gates::array(seq![crate::gates::decimal(self.0 as nat), string(self.1@)]) }
-    fn emit(&self) -> (r: Vec<char>) { { let items = vec![decimal(self.0), self.1.emit()]; proof { assert(items@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::decimal(self.0 as nat), string(self.1@)]); } array(&items) } }
+impl Json for (u64, Intent) {
+    spec fn json(&self) -> Seq<char> { crate::gates::array(seq![crate::gates::decimal(self.0 as nat), string(self.1.0@)]) }
+    fn emit(&self) -> (r: Vec<char>) { { let items = vec![decimal(self.0), self.1.emit()]; proof { assert(items@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::decimal(self.0 as nat), string(self.1.0@)]); } array(&items) } }
 }
 impl Json for (i64, bool) {
     spec fn json(&self) -> Seq<char> { crate::gates::array(seq![crate::gates::signed(self.0 as int), boolean(self.1)]) }
@@ -673,7 +735,7 @@ let value2 = self.accepted.emit();
 let value2b = self.proved.emit();
 let value3 = emit_array(&self.changed);
 proof {
-    assert(self.changed@.map_values(|x: Vec<char>| x.json()) =~= self.changed@.map_values(|x: Vec<char>| string(x@)));
+    assert(self.changed@.map_values(|x: Path| x.json()) =~= self.changed@.map_values(|x: Path| string(x.0@)));
     assert(value3@ == strings(self.changed@));
 }
 let value4 = emit_array(&self.out);
@@ -683,8 +745,8 @@ proof {
 }
 let value5 = emit_array(&self.intents);
 proof {
-    assert(self.intents@.map_values(|x: (Cue,Intent)| x.json()) =~= self.intents@.map_values(|e: (Cue,Intent)| crate::gates::array(seq![crate::gates::decimal(e.0 as nat), string(e.1@)])));
-    assert(value5@ == crate::gates::array(self.intents@.map_values(|e: (Cue,Intent)| crate::gates::array(seq![crate::gates::decimal(e.0 as nat), string(e.1@)])))); }
+    assert(self.intents@.map_values(|x: (Cue,Intent)| x.json()) =~= self.intents@.map_values(|e: (Cue,Intent)| crate::gates::array(seq![crate::gates::decimal(e.0 as nat), string(e.1.0@)])));
+    assert(value5@ == crate::gates::array(self.intents@.map_values(|e: (Cue,Intent)| crate::gates::array(seq![crate::gates::decimal(e.0 as nat), string(e.1.0@)])))); }
 let value6 = emit_array(&self.accepts);
 proof {
     assert(self.accepts@.map_values(|x: (i64,bool)| x.json()) =~= self.accepts@.map_values(|e: (i64,bool)| crate::gates::array(seq![crate::gates::signed(e.0 as int), boolean(e.1)])));
@@ -694,7 +756,7 @@ let value7 = signed(self.rank);
 let value8 = decimal(self.diff);
 let fields = vec![field("commit", &value0), field("base", &value1), field("accepted", &value2), field("proved", &value2b), field("changed", &value3), field("out", &value4), field("intents", &value5), field("accepts", &value6), field("rejects_counterexamples", &value6b), field("rank", &value7), field("diff", &value8)];
 proof {
-assert(fields@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::field("commit"@, string(self.commit@)), crate::gates::field("base"@, string(self.base@)), crate::gates::field("accepted"@, boolean(self.accepted)), crate::gates::field("proved"@, boolean(self.proved)), crate::gates::field("changed"@, strings(self.changed@)), crate::gates::field("out"@, hash_strings(self.out@)), crate::gates::field("intents"@, crate::gates::array(self.intents@.map_values(|e: (Cue,Intent)| crate::gates::array(seq![crate::gates::decimal(e.0 as nat), string(e.1@)])))), crate::gates::field("accepts"@, crate::gates::array(self.accepts@.map_values(|e: (i64,bool)| crate::gates::array(seq![crate::gates::signed(e.0 as int), boolean(e.1)])))), crate::gates::field("rejects_counterexamples"@, boolean(self.rejects_counterexamples)), crate::gates::field("rank"@, crate::gates::signed(self.rank as int)), crate::gates::field("diff"@, crate::gates::decimal(self.diff as nat))]); }
+assert(fields@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::field("commit"@, string(self.commit.0@)), crate::gates::field("base"@, string(self.base.0@)), crate::gates::field("accepted"@, boolean(self.accepted)), crate::gates::field("proved"@, boolean(self.proved)), crate::gates::field("changed"@, strings(self.changed@)), crate::gates::field("out"@, hash_strings(self.out@)), crate::gates::field("intents"@, crate::gates::array(self.intents@.map_values(|e: (Cue,Intent)| crate::gates::array(seq![crate::gates::decimal(e.0 as nat), string(e.1.0@)])))), crate::gates::field("accepts"@, crate::gates::array(self.accepts@.map_values(|e: (i64,bool)| crate::gates::array(seq![crate::gates::signed(e.0 as int), boolean(e.1)])))), crate::gates::field("rejects_counterexamples"@, boolean(self.rejects_counterexamples)), crate::gates::field("rank"@, crate::gates::signed(self.rank as int)), crate::gates::field("diff"@, crate::gates::decimal(self.diff as nat))]); }
 object(&fields) }
 }
 impl Json for Option<Candidate> {
@@ -707,20 +769,20 @@ impl Json for Kind {
         Kind::Code { goal } => { let value0 = { let value0 = goal.emit();
 let fields = vec![field("goal", &value0)];
 proof {
-assert(fields@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::field("goal"@, string(goal@))]); }
+assert(fields@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::field("goal"@, string(goal.0@))]); }
 object(&fields) };
 let fields = vec![field("code", &value0)];
 proof {
-assert(fields@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::field("code"@, crate::gates::object(seq![crate::gates::field("goal"@, string(goal@))]))]); }
+assert(fields@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::field("code"@, crate::gates::object(seq![crate::gates::field("goal"@, string(goal.0@))]))]); }
 object(&fields) },
         Kind::Queue { goal } => { let value0 = { let value0 = goal.emit();
 let fields = vec![field("goal", &value0)];
 proof {
-assert(fields@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::field("goal"@, string(goal@))]); }
+assert(fields@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::field("goal"@, string(goal.0.0@))]); }
 object(&fields) };
 let fields = vec![field("queue", &value0)];
 proof {
-assert(fields@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::field("queue"@, crate::gates::object(seq![crate::gates::field("goal"@, string(goal@))]))]); }
+assert(fields@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::field("queue"@, crate::gates::object(seq![crate::gates::field("goal"@, string(goal.0.0@))]))]); }
 object(&fields) },
         Kind::Compaction { goal, out } => { let value0 = { let value0 = goal.emit();
 let value1 = emit_array(out);
@@ -730,11 +792,11 @@ proof {
 }
 let fields = vec![field("goal", &value0), field("out", &value1)];
 proof {
-assert(fields@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::field("goal"@, string(goal@)), crate::gates::field("out"@, hash_strings(out@))]); }
+assert(fields@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::field("goal"@, string(goal.0@)), crate::gates::field("out"@, hash_strings(out@))]); }
 object(&fields) };
 let fields = vec![field("compaction", &value0)];
 proof {
-assert(fields@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::field("compaction"@, crate::gates::object(seq![crate::gates::field("goal"@, string(goal@)), crate::gates::field("out"@, hash_strings(out@))]))]); }
+assert(fields@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::field("compaction"@, crate::gates::object(seq![crate::gates::field("goal"@, string(goal.0@)), crate::gates::field("out"@, hash_strings(out@))]))]); }
 object(&fields) },
         Kind::Counterexample { goal } => {
 let ghost g = match goal { Some(p) => crate::gates::object(seq![crate::gates::field("search"@, crate::gates::decimal(p.search as nat)), crate::gates::field("index"@, crate::gates::decimal(p.index as nat))]), None => seq!['n','u','l','l'] };
@@ -777,17 +839,17 @@ impl Encoding for Kernel {
 let value1 = s.base.emit();
 let value2 = decimal(s.n as u64);
 let value3 = emit_array(&s.checks);
-proof { assert(s.checks@.map_values(|x: Vec<char>| x.json()) =~= s.checks@.map_values(|x: Vec<char>| string(x@))); }
+proof { assert(s.checks@.map_values(|x: Path| x.json()) =~= s.checks@.map_values(|x: Path| string(x.0@))); }
 let value3b = emit_array(&s.tests);
-proof { assert(s.tests@.map_values(|x: Vec<char>| x.json()) =~= s.tests@.map_values(|x: Vec<char>| string(x@))); }
+proof { assert(s.tests@.map_values(|x: Path| x.json()) =~= s.tests@.map_values(|x: Path| string(x.0@))); }
 let value3c = emit_array(&s.trusted);
-proof { assert(s.trusted@.map_values(|x: Vec<char>| x.json()) =~= s.trusted@.map_values(|x: Vec<char>| string(x@))); }
+proof { assert(s.trusted@.map_values(|x: Path| x.json()) =~= s.trusted@.map_values(|x: Path| string(x.0@))); }
 let value4 = decimal(s.limit);
 let value5 = emit_array(&s.results);
 proof { assert(s.results@.map_values(|x: Option<Candidate>| x.json()) =~= s.results@.map_values(|r: Option<Candidate>| match r { Some(c) => candidate_json(c), None => seq!['n','u','l','l'] })); }
 let fields = vec![field("kind", &value0), field("base", &value1), field("n", &value2), field("checks", &value3), field("tests", &value3b), field("trusted", &value3c), field("limit", &value4), field("results", &value5)];
 proof {
-assert(fields@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::field("kind"@, kind_json(s.kind)), crate::gates::field("base"@, string(s.base@)), crate::gates::field("n"@, crate::gates::decimal(s.n as nat)), crate::gates::field("checks"@, strings(s.checks@)), crate::gates::field("tests"@, strings(s.tests@)), crate::gates::field("trusted"@, strings(s.trusted@)), crate::gates::field("limit"@, crate::gates::decimal(s.limit as nat)), crate::gates::field("results"@, crate::gates::array(s.results@.map_values(|r: Option<Candidate>| match r { Some(c) => candidate_json(c), None => seq!['n','u','l','l'] })))]); }
+assert(fields@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::field("kind"@, kind_json(s.kind)), crate::gates::field("base"@, string(s.base.0@)), crate::gates::field("n"@, crate::gates::decimal(s.n as nat)), crate::gates::field("checks"@, strings(s.checks@)), crate::gates::field("tests"@, strings(s.tests@)), crate::gates::field("trusted"@, strings(s.trusted@)), crate::gates::field("limit"@, crate::gates::decimal(s.limit as nat)), crate::gates::field("results"@, crate::gates::array(s.results@.map_values(|r: Option<Candidate>| match r { Some(c) => candidate_json(c), None => seq!['n','u','l','l'] })))]); }
 object(&fields) }
     proof fn injective(a: Search, b: Search) {
         search_correct(a); search_correct(b); a.valid(); b.valid();
@@ -806,9 +868,9 @@ mod tests {
     fn wire_rejects_damage_and_preserves_json_boundaries() {
         let s = Search {
             kind: Kind::Code { goal: "\0\"\\😀".chars().collect() },
-            base: vec![], n: 1, checks: vec![], tests: vec![], trusted: vec![], limit: u64::MAX,
+            base: Commit(vec![]), n: 1, checks: vec![], tests: vec![], trusted: vec![], limit: u64::MAX,
             results: vec![Some(Candidate {
-                commit: vec![], base: vec![], accepted: true, proved: true, changed: vec![],
+                commit: Commit(vec![]), base: Commit(vec![]), accepted: true, proved: true, changed: vec![],
                 out: vec![Hash(u64::MAX)], intents: vec![], accepts: vec![(i64::MIN, false)],
                 rejects_counterexamples: false, rank: i64::MIN, diff: u64::MAX,
             })],
