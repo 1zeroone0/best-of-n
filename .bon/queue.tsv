@@ -7,7 +7,6 @@ id	intent
 33	A counterexample's test counts toward no counterexample found only when it rejects something: a test that accepts every program shows nothing, as one that rejects every member shows nothing.
 34	bon shows, for each kind, how often an attempt is selected with no counterexample found, and so how often a run of k attempts ends blocked.
 35	bon shows how many searches each reason blocked: fewer than two verified candidates, disagreement, a counterexample found, too few verified tests, trunk moved.
-36	bon processes work on git's objects and the remote's trunk, never a working tree, and share the host's jobs among them.
 37	Checks run with a toolchain no agent process can write: root's all the way up, with a cargo home whose root agent cannot write.
 38	A counterexample's commit is exactly one new test, the one that was run on the members and the foils.
 39	A check directory holds exactly the commit's tree: no attribute of the candidate leaves a file out, and the build configuration a check reads is protected.
