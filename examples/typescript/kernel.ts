@@ -1,4 +1,4 @@
-// Generated from src/gates.rs, src/wasm.rs, src/projection.rs by bon types. Do not edit.
+// Generated from src/gates.rs, src/projection.rs by bon types. Do not edit.
 /** A git commit, by its hash. Its own type: a commit is never a path. */
 export type Commit = string;
 /** A path in a commit's tree. */
@@ -19,10 +19,6 @@ export type Kind = { queue: { goal: Transcript } } | { code: { goal: Commit } } 
 export interface Candidate { commit: Commit; base: Commit; accepted: boolean; proved: boolean; changed: Array<Path>; out: Array<Hash>; intents: Array<[Cue, Intent]>; accepts: Array<[number, boolean]>; accepts_foils: Array<[number, boolean]>; rejects_counterexamples: boolean; measured: boolean; added: Array<Path>; rank: number; diff: number }
 /** One search, once every agent process has returned: `results[i]` is what agent process i returned. */
 export interface Search { kind: Kind; base: Commit; n: number; checks: Array<Path>; tests: Array<Path>; trusted: Array<Path>; limit: number; results: Array<Candidate | null> }
-/** A gate's answer when it names no candidate. */
-export const NONE = -1;
-/** A gate's answer when the words are not a search (or name no such agent process). */
-export const NOT_A_SEARCH = -2;
 /** Everything bon shows, over the time range in `filter`. */
 export interface Projection { configured: boolean; repo: Repo; totals: Totals; processes: Array<BonProcess>; groups: Array<GoalTrace>; queue: Array<QueueLine> | null; proposals: Array<Proposal>; protected: Array<string>; filter: Filter; bounds: Bounds; spec: SpecOutline | null; system: SpecGraph | null; sbom: SbomFile | null }
 /** The repository and its trunk. */

@@ -4,8 +4,7 @@
 //! the files it names; it decides nothing.
 //!
 //! Color has one meaning, position on the chain: red needs attention, violet
-//! is settled. Everything else is ink, muted or faint. The palette is the
-//! page's (view/src/app.css), light and dark.
+//! is settled. Everything else is ink, muted or faint, light and dark.
 
 use std::io::IsTerminal;
 use std::sync::mpsc;
@@ -25,7 +24,7 @@ use crate::view;
 
 fn rgb(hex: u32) -> Color { Color::Rgb((hex >> 16) as u8, (hex >> 8) as u8, hex as u8) }
 
-/// The page's tokens. A tone is shown mixed toward ink, as the page lifts it.
+/// The view's tokens. A tone is shown mixed toward ink, lifted by `lift`.
 #[derive(Clone, Copy)]
 struct Palette { ink: u32, muted: u32, faint: u32, line: u32, hover: u32, lift: f32, tones: [u32; 7] }
 
@@ -135,7 +134,7 @@ enum Overlay {
     Compare { titles: (String, String), left: Vec<String>, right: Vec<String>, top: usize },
 }
 
-/// The time ranges r cycles through, as the page offers them.
+/// The time ranges r cycles through.
 const RANGES: [(&str, i64); 4] = [("all time", 0), ("24 hours", 86400), ("7 days", 7 * 86400), ("30 days", 30 * 86400)];
 
 struct App {
@@ -929,7 +928,7 @@ fn key(app: &mut App, k: KeyEvent) -> bool {
         loop { i += if down { 1 } else { -1 }; if i < 0 || i as usize >= list.len() { break; } if list[i as usize].focusable() { app.focus[ti] = i as usize; app.detail_top = 0; break; } }
     };
     if app.keys { app.keys = false; return true; }
-    // Typing after /: find, as the page's find box.
+    // Typing after /: find.
     if let Some(buf) = app.input.as_mut() {
         match k.code {
             KeyCode::Esc => app.input = None,

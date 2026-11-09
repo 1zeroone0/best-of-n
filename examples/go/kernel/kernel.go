@@ -1,4 +1,4 @@
-// Code generated from src/gates.rs, src/wasm.rs, src/projection.rs by bon types. DO NOT EDIT.
+// Code generated from src/gates.rs, src/projection.rs by bon types. DO NOT EDIT.
 
 package kernel
 
@@ -102,12 +102,6 @@ type Search struct {
 	Limit   uint64       `json:"limit"`
 	Results []*Candidate `json:"results"`
 }
-
-// A gate's answer when it names no candidate.
-const NONE = -1
-
-// A gate's answer when the words are not a search (or name no such agent process).
-const NOT_A_SEARCH = -2
 
 // Everything bon shows, over the time range in `filter`.
 type Projection struct {

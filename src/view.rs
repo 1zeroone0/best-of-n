@@ -1,69 +1,14 @@
-//! bon view: one read-only page on localhost over what is already on disk: what
-//! is running, what was pushed, the queue, the spec, and what it all cost. Trusted code;
-//! it decides nothing and stores nothing. The interface is TypeScript in
-//! view/src, compiled into view/dist and embedded here.
+//! The projection over what is already on disk: what is running, what was
+//! pushed, the queue, the spec, and what it all cost, as `bon` and the terminal
+//! view show it. Trusted code; it decides nothing and stores nothing.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use best_of_n::exec::Kernel;
 use best_of_n::gates::{Encoding, Gates};
 use serde_json::{json, Value};
-
-const INDEX: &str = include_str!("../view/dist/index.html");
-const APP: &str = include_str!("../view/dist/app.js");
-const STYLE: &str = include_str!("../view/dist/app.css");
-/// The verified gates, compiled to WebAssembly (`npm run gates` in view/ builds it).
-const GATES: &[u8] = include_bytes!("../view/dist/gates.wasm");
-
-pub fn serve(root: &str, port: u16, open: bool) -> Result<(), String> {
-    let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|e| format!("port {port}: {e}"))?;
-    let url = format!("http://localhost:{port}");
-    println!("bon view: {url}");
-    if open { let _ = Command::new("open").arg(&url).status(); }
-    let root = PathBuf::from(root);
-    for stream in listener.incoming().flatten() {
-        let root = root.clone();
-        std::thread::spawn(move || { let _ = respond(&root, stream); });
-    }
-    Ok(())
-}
-
-fn respond(root: &Path, mut stream: TcpStream) -> std::io::Result<()> {
-    let mut line = String::new();
-    BufReader::new(&stream).read_line(&mut line)?;
-    let target = line.split_whitespace().nth(1).unwrap_or("/");
-    let (path, query) = target.split_once('?').unwrap_or((target, ""));
-    let (status, kind, body) = match path {
-        "/gates.wasm" => ("200 OK", "application/wasm", GATES.to_vec()),
-        "/api/words" => match words(root, query) {
-            Some(b) => ("200 OK", "application/octet-stream", b),
-            None => ("404 Not Found", "text/plain", b"no such search".to_vec()),
-        },
-        "/" => ("200 OK", "text/html; charset=utf-8", INDEX.as_bytes().to_vec()),
-        "/app.js" => ("200 OK", "text/javascript; charset=utf-8", APP.as_bytes().to_vec()),
-        "/app.css" => ("200 OK", "text/css; charset=utf-8", STYLE.as_bytes().to_vec()),
-        "/api/state" => ("200 OK", "application/json", state(root, &Filter::query(query)).to_string().into_bytes()),
-        "/api/items" => match items(root, query) {
-            Some(v) => ("200 OK", "application/json", v.to_string().into_bytes()),
-            None => ("400 Bad Request", "text/plain", b"base and commit are hashes".to_vec()),
-        },
-        "/source" => match source(root, query) {
-            Some(html) => ("200 OK", "text/html; charset=utf-8", html.into_bytes()),
-            None => ("404 Not Found", "text/plain", b"not a tracked file".to_vec()),
-        },
-        "/api/log" => match log(root, query) {
-            Some(text) => ("200 OK", "text/plain; charset=utf-8", text.into_bytes()),
-            None => ("404 Not Found", "text/plain", b"no such log".to_vec()),
-        },
-        _ => ("404 Not Found", "text/plain", b"not found".to_vec()),
-    };
-    write!(stream, "HTTP/1.1 {status}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", body.len())?;
-    stream.write_all(&body)
-}
 
 fn git(root: &Path, args: &[&str]) -> String {
     super::git(root, args).unwrap_or_default()
@@ -103,22 +48,6 @@ fn read_words(p: &Path) -> Option<Vec<u64>> {
     Some(b.chunks(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect())
 }
 
-/// A search's words for the gates in WebAssembly, only from under .bon/traces:
-/// path=<pid>/<search>.
-fn words(root: &Path, query: &str) -> Option<Vec<u8>> {
-    let rel = query.strip_prefix("path=")?.replace("%2F", "/");
-    if rel.contains("..") { return None; }
-    std::fs::read(root.join(".bon/traces").join(rel).join("search.words")).ok()
-}
-
-/// A trace log, only from under .bon/traces.
-fn log(root: &Path, query: &str) -> Option<String> {
-    let rel = query.strip_prefix("path=")?.replace("%2F", "/");
-    if rel.contains("..") { return None; }
-    let p = root.join(".bon/traces").join(rel);
-    std::fs::read_to_string(p).ok()
-}
-
 /// Which bon processes the projection covers: those last active in
 /// [since, until] (unix seconds), whose pid, kind, goal, outcome or any commit
 /// contains `find`. Totals are over the same set.
@@ -126,20 +55,6 @@ fn log(root: &Path, query: &str) -> Option<String> {
 pub struct Filter { pub since: Option<u64>, pub until: Option<u64>, pub find: Option<String> }
 
 impl Filter {
-    /// From a query string: since=<unix>&until=<unix>&find=<text>.
-    pub fn query(q: &str) -> Filter {
-        let mut f = Filter::default();
-        for (k, v) in q.split('&').filter_map(|p| p.split_once('=')) {
-            let v = decode(v);
-            match k {
-                "since" => f.since = v.parse().ok(),
-                "until" => f.until = v.parse().ok(),
-                "find" if !v.is_empty() => f.find = Some(v.to_lowercase()),
-                _ => {}
-            }
-        }
-        f
-    }
     /// From arguments: --since YYYY-MM-DD, --until YYYY-MM-DD (UTC, whole days), --find TEXT.
     pub fn args(args: &[String]) -> Result<Filter, String> {
         let at = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
@@ -168,26 +83,6 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     era * 146097 + doe - 719468
-}
-
-/// Percent-decoding for a query value.
-fn decode(v: &str) -> String {
-    let b = v.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < b.len() {
-        match b[i] {
-            b'+' => { out.push(b' '); i += 1; }
-            b'%' if i + 2 < b.len() => {
-                match u8::from_str_radix(std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("zz"), 16) {
-                    Ok(x) => { out.push(x); i += 3; }
-                    Err(_) => { out.push(b'%'); i += 1; }
-                }
-            }
-            c => { out.push(c); i += 1; }
-        }
-    }
-    String::from_utf8_lossy(&out).to_string()
 }
 
 /// Where a log falls in an agent process's run, so logs read left to right:
@@ -542,7 +437,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
             "attempts": attempts(&processes), "ended": ended(&processes), "reasons": reasons(&processes),
         },
         "processes": processes,
-        // The range shown, and the range there is, so a page can offer it.
+        // The range shown, and the range there is, so a view can offer it.
         "filter": { "since": filter.since, "until": filter.until, "find": filter.find },
         "bounds": { "earliest": (earliest != u64::MAX).then_some(earliest), "latest": (latest > 0).then_some(latest) },
         "queue": queue,
@@ -875,12 +770,6 @@ fn calls(text: &str, prefix: &str, name: &str) -> bool {
         || !text[..at].chars().last().map_or(false, |c| c.is_alphanumeric() || c == '_' || c == '.' || c == ':'))
 }
 
-fn changed_lines_for(root: &Path, base: &str, paths: &[&str]) -> std::collections::HashMap<String, Vec<(usize, usize)>> {
-    let mut args = vec!["diff", "-U0", base, "--"];
-    args.extend_from_slice(paths);
-    hunks(&git(root, &args))
-}
-
 /// Each file's changed lines in a `git diff -U0`, as lines of the new version.
 fn hunks(diff: &str) -> std::collections::HashMap<String, Vec<(usize, usize)>> {
     let mut out: std::collections::HashMap<String, Vec<(usize, usize)>> = Default::default();
@@ -895,29 +784,6 @@ fn hunks(diff: &str) -> std::collections::HashMap<String, Vec<(usize, usize)>> {
         }
     }
     out
-}
-
-/// What one candidate changed against its base: each file, and each item (by file and
-/// name) whose lines in the candidate's version a hunk touches. A candidate's commit
-/// stays in the repository after its search, so this reads git, not the trace.
-fn items(root: &Path, query: &str) -> Option<Value> {
-    let (mut base, mut commit) = (String::new(), String::new());
-    for kv in query.split('&') {
-        match kv.split_once('=') { Some(("base", v)) => base = v.to_string(), Some(("commit", v)) => commit = v.to_string(), _ => {} }
-    }
-    let hex = |c: &str| c.len() >= 7 && c.len() <= 64 && c.chars().all(|x| x.is_ascii_hexdigit());
-    if !hex(&base) || !hex(&commit) { return None; }
-    let changed = hunks(&git(root, &["diff", "-U0", &base, &commit]));
-    let mut files: Vec<&String> = changed.keys().collect();
-    files.sort();
-    let mut out = Vec::new();
-    for f in &files {
-        let text = git(root, &["show", &format!("{commit}:{f}")]);
-        for item in fns(&text) {
-            if changed[*f].iter().any(|&(a, b)| a <= item.end && b >= item.start) { out.push(json!([f, item.name])); }
-        }
-    }
-    Some(json!({ "files": files, "items": out }))
 }
 
 /// The spec and how it reaches the code, found from the repository's own manifest
@@ -1165,56 +1031,4 @@ fn system(root: &Path, base: &str, manifest: &toml::Value) -> Value {
         .map(|(tf, t)| json!({ "name": t.name, "file": tf, "line": t.start, "doc": t.doc, "changed": hit(tf, t.start, t.end) })).collect();
     json!({ "nodes": spec_nodes, "edges": edges, "trusted": trusted,
         "counts": { "predicates": preds.len(), "private": private, "trusted": trusted_fns.len() } })
-}
-
-/// A tracked file as text, its lines numbered, `from`..`to` marked, and each line that
-/// differs from trunk on the remote marked: where an item of the System view points.
-/// Read from the working tree, like the view; only files git tracks.
-fn source(root: &Path, query: &str) -> Option<String> {
-    let mut path = String::new();
-    let (mut from, mut to) = (0usize, 0usize);
-    for kv in query.split('&') {
-        let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
-        let v = v.replace("%2F", "/").replace("%2f", "/");
-        match k { "path" => path = v, "from" => from = v.parse().unwrap_or(0), "to" => to = v.parse().unwrap_or(0), _ => {} }
-    }
-    if path.is_empty() || !git(root, &["ls-files", "--error-unmatch", "--", &path]).lines().any(|l| l == path) { return None; }
-    let text = std::fs::read_to_string(root.join(&path)).ok()?;
-    let manifest = std::fs::read_to_string(root.join(".bon/bon.toml")).ok().and_then(|t| t.parse::<toml::Value>().ok());
-    let remote = manifest.as_ref().and_then(|m| m.get("remote")).and_then(|v| v.as_str()).unwrap_or("origin").to_string();
-    let trunk = manifest.as_ref().and_then(|m| m.get("trunk")).and_then(|v| v.as_str()).unwrap_or("main").to_string();
-    let changed = changed_lines_of(root, &format!("{remote}/{trunk}"), &path);
-    let esc = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
-    let to = to.max(from);
-    let rows: String = text.lines().enumerate().map(|(i, l)| {
-        let n = i + 1;
-        let mut class = String::new();
-        if from > 0 && n >= from && n <= to { class.push_str(" on"); }
-        if changed.iter().any(|&(a, b)| n >= a && n <= b) { class.push_str(" diff"); }
-        format!("<tr id=\"L{n}\" class=\"{}\"><td class=\"n\"><a href=\"#L{n}\">{n}</a></td><td class=\"c\">{}</td></tr>", class.trim(), esc(l))
-    }).collect();
-    let graph = system(root, &format!("{remote}/{trunk}"), &manifest.clone().unwrap_or(toml::Value::Table(Default::default())));
-    let mut files: Vec<String> = graph["nodes"].as_array().into_iter().flatten().filter_map(|n| n["file"].as_str().map(String::from)).collect();
-    files.sort(); files.dedup();
-    let nav: String = files.iter().map(|f| format!("<a class=\"{}\" href=\"/source?path={f}\">{f}</a>", if *f == path { "here" } else { "" })).collect();
-    Some(format!(r#"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{p} · bon view</title><style>
-:root{{color-scheme:light dark;--bg:#F3EDE0;--surface:#FAF6EE;--ink:#1B1A18;--muted:#8F887C;--line:#DDD3C1;--on:rgba(51,37,138,.12);--onbar:#33258A;--diff:#93680A}}
-@media(prefers-color-scheme:dark){{:root{{--bg:#09090A;--surface:#111113;--ink:#EDEAE5;--muted:#6E6A64;--line:#24242A;--on:rgba(69,52,176,.28);--onbar:#6F5CE0;--diff:#D4A017}}}}
-body{{margin:0;background:var(--bg);color:var(--ink);font:13px/1.55 "SFMono-Regular",Consolas,monospace}}
-header{{position:sticky;top:0;z-index:1;display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;padding:10px 16px;background:var(--surface);border-bottom:1px solid var(--line);font-family:-apple-system,BlinkMacSystemFont,sans-serif}}
-header b{{font-size:15px;margin-right:8px}}header a{{color:var(--muted);text-decoration:none;font-size:12px}}header a.here{{color:var(--ink);font-weight:600}}header a:hover{{color:var(--ink)}}
-header .key{{margin-left:auto;color:var(--muted);font-size:12px}}header .key i{{display:inline-block;width:10px;height:10px;margin:0 4px 0 10px;vertical-align:-1px}}
-table{{border-collapse:collapse;width:100%}}td{{padding:0 12px;vertical-align:top}}
-td.n{{width:1%;text-align:right;color:var(--muted);user-select:none;border-left:3px solid transparent}}td.n a{{color:inherit;text-decoration:none}}
-td.c{{white-space:pre-wrap;overflow-wrap:anywhere}}
-tr.on td{{background:var(--on)}}tr.on td.n{{border-left-color:var(--onbar);color:var(--ink)}}
-tr.diff td.n{{border-left-color:var(--diff)}}tr:target td{{background:var(--on)}}
-</style></head><body><header><b>{p}</b>{nav}<span class="key"><i style="background:var(--onbar)"></i>the item<i style="background:var(--diff)"></i>differs from trunk</span></header><table>{rows}</table>
-<script>const t=document.getElementById('L{start}');if(t&&{start}>0)t.scrollIntoView({{block:'center'}});</script></body></html>"#,
-        p = esc(&path), nav = nav, rows = rows, start = from))
-}
-
-/// The lines of one file that differ from `base`, working tree included.
-fn changed_lines_of(root: &Path, base: &str, path: &str) -> Vec<(usize, usize)> {
-    changed_lines_for(root, base, &[path]).remove(path).unwrap_or_default()
 }

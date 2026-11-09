@@ -1,30 +1,26 @@
 # Examples
 
-These show one pattern: **the kernel decides, programs do effects.** They stand
-in until real programs exist in each language, and then they go away.
-
-## The pattern
+One pattern: **the kernel decides; programs do effects.**
 
 1. **The kernel** is Rust under Verus: the spec (`src/spec.rs`), each gate's
    contract (`src/gates.rs`) and the code that meets it (`src/exec.rs`),
-   proven. It chooses, validates and schedules. It does no I/O.
-2. **Its types are emitted.** `[programs] from` in `.bon/bon.toml` names the
-   Rust files whose types programs use; `[programs] types` names one output
-   file per language. `bon types` writes them, with each type's `///` sentence
-   as its comment; `bon types --check` is a test check, so an emitted file never
-   lags the kernel.
-3. **A program reads what the kernel emits** (one JSON object per value) as
-   those types, and does the effects: files, network, UI, tensors. It decides
-   nothing the kernel decides.
+   proven. It chooses, validates and schedules, and does no I/O.
+2. **It emits types and data.** `[programs]` in `.bon/bon.toml` names the Rust
+   files to emit from (`from`) and one types file per language (`types`);
+   `bon types` writes them, each type with its `///` sentence; `bon types
+   --check` is a test check, so a types file never lags the kernel. The data is
+   JSON, one object per line.
+3. **A program**, in its own language, imports its types file, reads that data
+   with its own toolchain, and does the effects: files, network, UI, tensors.
+   It decides nothing the kernel decides. bon embeds and runs nothing of it.
 
-The emitted files are generated: never edit them; change the Rust and run
-`bon types`.
+Types files are generated: never edit them; change the Rust and run `bon types`.
 
-| | emitted to | how the shapes come out |
-|---|---|---|
-| TypeScript | `view/src/kernel.ts` | interfaces; an enum is a union of one-key objects |
-| Go | `examples/go/kernel/kernel.go` | structs with JSON tags; an enum is a struct of optional pointers |
-| Python | `examples/python/kernel.py` | `TypedDict`s; an enum is a `TypedDict` with one key set |
+| | types file | how shapes come out | run | types checked by |
+|---|---|---|---|---|
+| Go | `go/kernel/kernel.go` | structs with JSON tags; an enum is a struct of optional pointers | `go run .` | the Go compiler |
+| Python | `python/kernel.py` | `TypedDict`s; an enum is a `TypedDict` with one key set | `python main.py` | mypy (optional) |
+| TypeScript | `typescript/kernel.ts` | interfaces; an enum is a union of one-key objects | `node main.ts` | `tsc --noEmit` (optional: Node only strips types) |
 
 In all three, a single-field Rust type (`Commit`, `Path`, `Intent`,
 `Transcript`) is an alias of its field, and `Hash` is a decimal string: an
@@ -40,6 +36,7 @@ Builds fixed searches, one of each kind, and prints for each its JSON (from the
 kernel's `emit`), its words, whether they round-trip, and what the gates
 `selected` and `found_on_trunk` return. It is also an agree check: the
 contracts fix this output exactly, so every verified candidate prints the same.
+Each program below reads its JSON lines and skips the rest.
 
 ## Go: `go/`
 
@@ -62,34 +59,15 @@ Reads each line as a `kernel.Search`, holds its candidates as a tensor (one row
 each: accepted, proved, rank, diff) and reports how many were accepted and their
 mean diff.
 
-## TypeScript
+## TypeScript: `typescript/`
 
-The same program, against `kernel.ts`:
-
-```ts
-import type { Kind, Search } from './kernel';
-
-declare const input: string; // what the kernel printed
-
-const kind = (k: Kind): string =>
-  'queue' in k ? `queue ${k.queue.goal}`
-  : 'code' in k ? `code ${k.code.goal}`
-  : 'compaction' in k ? `compaction ${k.compaction.goal}`
-  : 'foil' in k ? `foil on search ${k.foil.goal.search} candidate ${k.foil.goal.index}`
-  : k.counterexample.goal ? `counterexample on search ${k.counterexample.goal.search} candidate ${k.counterexample.goal.index}`
-  : 'counterexample on trunk';
-
-for (const line of input.split('\n').filter(l => l.startsWith('{'))) {
-  const s: Search = JSON.parse(line);
-  const returned = s.results.filter(c => c !== null);
-  console.log(`${kind(s.kind)}: ${returned.length} of ${s.n} returned, ${returned.filter(c => c.accepted).length} accepted`);
-}
+```sh
+cargo run -q --example kernel | node examples/typescript/main.ts
 ```
 
-`kernel.ts` also carries the gates' named answers (`NONE`, `NOT_A_SEARCH`) for
-a program that runs the gates as WebAssembly.
-
-## Not yet
-
-Go and Python use the types only. Running the gates compiled in, as a
-TypeScript program can through WebAssembly, is queue 28.
+Node (22.18 or later) runs `.ts` by stripping its types, so `main.ts` uses only
+erasable TypeScript and imports its types with `import type`. Reads each line as
+a `Search`, names its kind by which key `Kind` has, and counts the candidates
+returned and accepted. To check its types, with `typescript` and `@types/node`
+installed: `tsc --noEmit --strict --allowImportingTsExtensions --module nodenext
+--types node examples/typescript/main.ts`.

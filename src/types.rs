@@ -5,7 +5,7 @@
 //! ```toml
 //! [programs]
 //! from = ["src/gates.rs"]
-//! types = { typescript = "ui/src/kernel.ts", go = "programs/kernel/kernel.go", python = "programs/kernel.py" }
+//! types = { typescript = "programs/kernel.ts", go = "programs/kernel/kernel.go", python = "programs/kernel.py" }
 //! ```
 //!
 //! It emits every unindented `pub type`, `pub struct`, `pub enum` and

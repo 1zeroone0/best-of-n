@@ -19,7 +19,7 @@ const USAGE: &str = "usage:
   bon counterexample      search trunk for a behavior the spec forbids; if found, a code search carries its test
   bon init                create a manifest and queue in this git repository
   bon queue               turn each new transcript into a proposal for the queue
-  bon view [--port N]     one live page of the same
+  bon view                the same in the terminal view, as `bon` opens it in a terminal
   bon background [--plist] the stalest of compaction and counterexample, on spare capacity
   bon setup [--dry-run] [--for <user>]
                           create user agent and group bon, and let <user> (default: you) run commands as agent;
@@ -103,10 +103,7 @@ fn dispatch(root: &str, args: &[String]) -> Result<(), String> {
             println!("{}", serde_json::to_string_pretty(&view::state(std::path::Path::new(&root), &view::Filter::args(args)?)).unwrap_or_default());
             Ok(())
         }
-        Some("view") => {
-            let port = args.iter().position(|a| a == "--port").and_then(|i| args.get(i + 1)).and_then(|p| p.parse().ok()).unwrap_or(4747);
-            view::serve(&root, port, !args.iter().any(|a| a == "--no-open"))
-        }
+        Some("view") => tui::run(&root, view::Filter::args(args)?),
         Some("queue") => queue(&root),
         Some("setup") => {
             let dry_run = args.iter().any(|a| a == "--dry-run");
@@ -433,7 +430,7 @@ fn init(root: &str) -> Result<(), String> {
     }
     println!("created .bon/bon.toml and .bon/queue.tsv");
     println!("next: configure .bon/bon.toml; commit and push .bon/ and .gitignore to trunk ({remote}/{trunk})");
-    println!("then run bon and bon view");
+    println!("then run bon");
     println!("bon code needs trunk's checks to reject trunk (a spec change); otherwise run bon counterexample or bon compaction");
     Ok(())
 }

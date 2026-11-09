@@ -8,7 +8,7 @@ repository = "https://github.com/1zeroone0/best-of-n"
 readme = "README.md"
 keywords = ["agents", "verification", "verus", "search", "build"]
 categories = ["development-tools"]
-exclude = ["view/fixtures/", "view/node_modules/", "/.bon/", "/assets/", "/examples/python/.venv/"]
+exclude = ["/.bon/", "/assets/", "/examples/python/.venv/"]
 
 [[bin]]
 name = "bon"
@@ -21,9 +21,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
 sha2 = "0.10"
-
-# The terminal view: native only; the gates in WebAssembly never draw.
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 ratatui = "0.30"
 
 [package.metadata.verus]

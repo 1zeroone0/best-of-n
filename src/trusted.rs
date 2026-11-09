@@ -1,6 +1,6 @@
 //! Trusted code. Every function the verified code calls from here is
 //! `#[verifier::external_body]`: Verus does not check it. The TCB is this file,
-//! the entry points (main.rs, view.rs, wasm.rs), plus what they run: git, sudo, tar, chmod, the harnesses (`claude`, `codex`)
+//! the entry points (main.rs, view.rs), plus what they run: git, sudo, tar, chmod, the harnesses (`claude`, `codex`)
 //! and the checks the manifest declares.
 //!
 //! It observes and reports facts; it decides nothing. Every decision is a gate.
@@ -1795,11 +1795,11 @@ mod tests {
         // queue 24: prune keeps only what is named; everything else is gone.
         let d = std::env::temp_dir().join(format!("bon-prune-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
-        for f in ["src/spec.rs", "src/exec.rs", "tests/c_1.rs", "Cargo.toml", ".bon/bon.toml", "view/src/main.ts"] {
+        for f in ["src/spec.rs", "src/exec.rs", "tests/c_1.rs", "Cargo.toml", ".bon/bon.toml", "examples/go/main.go"] {
             let p = d.join(f); std::fs::create_dir_all(p.parent().unwrap()).unwrap(); std::fs::write(p, "x").unwrap();
         }
         prune(&d, &["src/spec.rs".into(), "tests/".into(), "Cargo.toml".into(), ".bon/".into()]);
-        let left: Vec<bool> = ["src/spec.rs", "src/exec.rs", "tests/c_1.rs", "Cargo.toml", ".bon/bon.toml", "view/src/main.ts"].iter().map(|f| d.join(f).exists()).collect();
+        let left: Vec<bool> = ["src/spec.rs", "src/exec.rs", "tests/c_1.rs", "Cargo.toml", ".bon/bon.toml", "examples/go/main.go"].iter().map(|f| d.join(f).exists()).collect();
         assert_eq!(left, [true, false, true, true, true, false]);
         let _ = std::fs::remove_dir_all(&d);
     }

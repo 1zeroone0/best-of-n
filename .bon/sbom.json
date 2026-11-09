@@ -2540,10 +2540,6 @@
       },
       {
         "name": "bon:trusted-file",
-        "value": "src/wasm.rs"
-      },
-      {
-        "name": "bon:trusted-file",
         "value": "src/types.rs"
       },
       {

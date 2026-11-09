@@ -44,7 +44,6 @@ bon
 | `bon types [--check]` | the types programs are built on, in TypeScript, Go and Python |
 | `bon sbom --check` | fail when what bon trusts changed, or a proof is skipped outside it |
 | `bon check` | every check on the working tree, as candidates are judged; whose fix a failure is |
-| `bon view` | the same on a page |
 
 **You decide** the spec and the checks; the [queue](.bon/queue.tsv) holds what
 is wanted and not yet in the spec. **Search decides** the rest, as the POSIX

@@ -1,4 +1,4 @@
-# Generated from src/gates.rs, src/wasm.rs, src/projection.rs by bon types. Do not edit.
+# Generated from src/gates.rs, src/projection.rs by bon types. Do not edit.
 from __future__ import annotations
 
 from typing import TypedDict
@@ -87,12 +87,6 @@ class Search(TypedDict):
     trusted: list[Path]
     limit: int
     results: list[Candidate | None]
-
-# A gate's answer when it names no candidate.
-NONE = -1
-
-# A gate's answer when the words are not a search (or name no such agent process).
-NOT_A_SEARCH = -2
 
 # Everything bon shows, over the time range in `filter`.
 class Projection(TypedDict):

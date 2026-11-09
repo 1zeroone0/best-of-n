@@ -1,5 +1,5 @@
 //! The bon process: the drivers that hold the tokens and pass every decision
-//! through a gate. Not compiled for WebAssembly; the gates in exec.rs are.
+//! through a gate.
 
 use vstd::prelude::*;
 use crate::spec;

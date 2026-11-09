@@ -184,7 +184,7 @@ at a time.
 
 | when | run |
 |---|---|
-| see everything | `bon` in a terminal (the view: Project, Spec, Queue, Traces); piped, it prints text; `bon view` on a page |
+| see everything | `bon` in a terminal (the view: Project, Spec, Queue, Traces); piped, it prints text |
 | the spec, its vocabulary and how it reaches the code | `bon spec`, or `bon spec NAME` for one item |
 | the kernel's types changed | `bon types`; `bon types --check` is a test |
 | the spec changed and trunk's checks reject it | `bon code` |
