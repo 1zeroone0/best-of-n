@@ -253,7 +253,13 @@ fn search(
 /// selected candidate is pushed once one clears. When a test splits the
 /// candidates, the best such test lands on trunk, and the next attempt runs
 /// wider from that head, until the attempts run out.
+#[verifier::rlimit(100)]
+#[verifier::spinoff_prover]
 pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
+    hide(spec::reason);
+    hide(spec::blocked);
+    hide(spec::selected);
+    hide(spec::not_found);
     let mut head = trusted::head(root)?;
     let m = trusted::manifest(root, &head)?;
     trusted::on_trunk(&m)?;
@@ -315,10 +321,14 @@ pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
         }
         match selected(&s0) {
             None => {
-                trusted::record_blocked(&m, "fewer than two verified candidates, or they disagree");
+                if let Some(reason) = blocked(&s0, None, None) {
+                    proof { spec::reason_is_blocked(s0@, None, None); }
+                    trusted::record_blocked(&m, reason, Ghost(s0@), Ghost(s0@), Ghost(s0@));
+                }
                 index = index + 1;
             }
             Some(i) => {
+                assert(spec::verified_at(s0@, i as int)) by { reveal(spec::selected); }
                 trusted::record_selected(&m, i);
                 let ghost before1 = t.searches.value();
                 let sf = search(&m, index + 1, a, Kind::Foil { goal: AgentProcess { search: index, index: i } },
@@ -343,16 +353,20 @@ pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
                     }
                 }
                 if not_found(&s1, &s0, &sf) {
+                    assert(spec::allowed(s0@, i as int, s1@, sf@));
+                    assert(exists|k: int| spec::allowed(s0@, k, s1@, sf@));
                     let now = trusted::head(root)?;
                     if !eq(&now.0, &head.0) {
-                        trusted::record_blocked(&m, "trunk moved");
+                        assert(spec::blocked(spec::Blocked::TrunkMoved, s0@, s1@, sf@)) by { reveal(spec::blocked); }
+                        trusted::record_blocked(&m, spec::Blocked::TrunkMoved, Ghost(s0@), Ghost(s1@), Ghost(sf@));
                         return Err("blocked: trunk moved during the search; run it again".into());
                     }
                     proof {
                         t.instance.push(index as int, i as int, index as int + 2, index as int + 1, &mut t.trunk, &mut t.authors, &t.searches);
                     }
                     if let Err(e) = trusted::push(&m, &candidate(&s0, i).commit) {
-                        trusted::record_blocked(&m, &e);
+                        assert(spec::blocked(spec::Blocked::Refused, s0@, s1@, sf@)) by { reveal(spec::blocked); }
+                        trusted::record_blocked(&m, spec::Blocked::Refused, Ghost(s0@), Ghost(s1@), Ghost(sf@));
                         return Err(e);
                     }
                     trusted::record_push(&m, index, i, index + 2, index + 1, Ghost(t.searches.value()));
@@ -360,18 +374,23 @@ pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
                 }
                 match landing(&s1, &s0) {
                     Some(j) => {
+                        assert(exists|k: int| spec::lands_on(s1@, s0@, k));
                         proof {
                             t.instance.land(index as int + 2, j as int, &mut t.trunk, &mut t.authors, &t.searches);
                         }
                         if let Err(e) = trusted::land(&m, &s1, j, Some(&s0)) {
-                            trusted::record_blocked(&m, &e);
+                            assert(spec::blocked(spec::Blocked::Refused, s0@, s1@, sf@)) by { reveal(spec::blocked); }
+                            trusted::record_blocked(&m, spec::Blocked::Refused, Ghost(s0@), Ghost(s1@), Ghost(sf@));
                             return Err(e);
                         }
                         trusted::record_land(&m, index + 2, j, Ghost(t.searches.value()));
                         head = Commit(candidate(&s1, j).commit.0.clone());
                     }
                     None => {
-                        trusted::record_blocked(&m, "fewer than two verified tests, and none splits the candidates");
+                        if let Some(reason) = blocked(&s0, Some(&s1), Some(&sf)) {
+                            proof { spec::reason_is_blocked(s0@, Some(s1@), Some(sf@)); }
+                            trusted::record_blocked(&m, reason, Ghost(s0@), Ghost(s1@), Ghost(sf@));
+                        }
                     }
                 }
                 index = index + 3;

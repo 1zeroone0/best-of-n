@@ -233,6 +233,7 @@ pub fn selected(s: &Search) -> (r: Option<usize>)
     ensures
         r matches Some(i) ==> spec::selected(s@, i as int),
         r is None ==> forall|i: int| !spec::selected(s@, i),
+        r is None ==> !spec::agree(s@),
 {
     let v = verified_each(s);
     let ghost sv = s@;
@@ -422,6 +423,7 @@ fn accepts_in(pairs: &Vec<(i64, bool)>, j: Option<usize>) -> (r: Option<bool>)
 }
 
 /// The test rejects at least one accepted, unproved program within authority.
+#[verifier::rlimit(100)]
 fn discriminates(c: &Candidate, f: &Search) -> (r: bool)
     requires f.results.len() == f.n,
     ensures r == spec::discriminates(c@, f@),
@@ -450,6 +452,7 @@ fn discriminates(c: &Candidate, f: &Search) -> (r: bool)
 }
 
 /// c's test splits t's members.
+#[verifier::rlimit(100)]
 fn splits(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
     requires t.results.len() == t.n, vt.len() == t.n,
         forall|j: int| 0 <= j < t.n ==> vt[j] == spec::verified_at(t@, j),
@@ -596,6 +599,86 @@ pub fn not_found(x: &Search, t: &Search, f: &Search) -> (r: bool)
     count == 2
 }
 
+/// Whether a complete search has two verified candidates.
+fn two_verified(s: &Search) -> (r: bool)
+    requires s.results.len() == s.n,
+    ensures r == spec::two_verified(s@),
+{
+    let v = verified_each(s);
+    let mut first: Option<usize> = None;
+    let mut i = 0;
+    while i < v.len()
+        invariant
+            v.len() == s.n, 0 <= i <= v.len(),
+            forall|j: int| 0 <= j < s.n ==> v[j] == spec::verified_at(s@, j),
+            first is None ==> forall|j: int| 0 <= j < i ==> !v[j],
+            first matches Some(f) ==> f < i && v[f as int]
+                && forall|j: int| 0 <= j < i && v[j] ==> j == f,
+        decreases v.len() - i,
+    {
+        if v[i] {
+            match first {
+                Some(_f) => { assert(spec::verified_at(s@, _f as int) && spec::verified_at(s@, i as int)); return true; }
+                None => first = Some(i),
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+/// The kernel's reason for a completed block.
+#[verifier::rlimit(100)]
+pub fn blocked(t: &Search, counterexample: Option<&Search>, f: Option<&Search>) -> (r: Option<spec::Blocked>)
+    requires t.results.len() == t.n,
+        counterexample matches Some(c) ==> c.results.len() == c.n,
+        f matches Some(c) ==> c.results.len() == c.n,
+    ensures r == spec::reason(t@, match counterexample { Some(c) => Some(c@), None => None },
+        match f { Some(c) => Some(c@), None => None }),
+{
+    proof { complete(t); }
+    match counterexample {
+        None => {
+            if !two_verified(t) { return Some(spec::Blocked::TooFewVerified); }
+            if selected(t).is_none() { return Some(spec::Blocked::Disagree); }
+            None
+        }
+        Some(x) => {
+            proof { complete(x); }
+            if landing(x, t).is_some() { return None; }
+            if !two_verified(x) { return Some(spec::Blocked::TooFewTests); }
+            let vx = verified_each(x);
+            let vt = verified_each(t);
+            let mut i = 0;
+            while i < vx.len()
+                invariant
+                    x.results.len() == x.n, t.results.len() == t.n,
+                    counterexample matches Some(c) && c@ == x@,
+                    spec::complete(x@), !spec::found(x@, t@), spec::two_verified(x@),
+                    vx.len() == x.n, vt.len() == t.n, 0 <= i <= vx.len(),
+                    forall|j: int| 0 <= j < x.n ==> vx[j] == spec::verified_at(x@, j),
+                    forall|j: int| 0 <= j < t.n ==> vt[j] == spec::verified_at(t@, j),
+                    forall|j: int| 0 <= j < i && spec::verified_at(x@, j) ==> !spec::rejects_every(spec::at(x@, j), t@),
+                decreases vx.len() - i,
+            {
+                if vx[i] && rejects_every(t, &vt, candidate(x, i)) {
+                    assert(spec::verified_at(x@, i as int) && spec::rejects_every(spec::at(x@, i as int), t@));
+                    assert(exists|j: int| spec::verified_at(x@, j) && spec::rejects_every(spec::at(x@, j), t@));
+                    return Some(spec::Blocked::RejectsEvery);
+                }
+                i += 1;
+            }
+            match f {
+                Some(f) => {
+                    proof { complete(f); }
+                    if !not_found(x, t, f) { Some(spec::Blocked::Undiscriminating) } else { None }
+                }
+                None => None,
+            }
+        }
+    }
+}
+
 // ── landing ─────────────────────────────────────────────
 
 #[verifier::rlimit(400)]
@@ -604,6 +687,7 @@ pub fn landing(x: &Search, t: &Search) -> (r: Option<usize>)
     ensures
         r matches Some(i) ==> spec::lands_on(x@, t@, i as int),
         r is None ==> forall|i: int| !spec::lands_on(x@, t@, i),
+        r is None ==> !spec::found(x@, t@),
 {
     let ghost xv = x@;
     let ghost tv = t@;
@@ -656,6 +740,10 @@ pub fn landing(x: &Search, t: &Search) -> (r: Option<usize>)
             Some(b)
         }
         None => {
+            assert forall|k: int| spec::verified_at(xv, k) implies !spec::splits(spec::at(xv, k), tv) by {
+                assert(0 <= k < x.n);
+                assert(!spec::splits_at(xv, tv, k));
+            }
             assert forall|k: int| !spec::lands_on(xv, tv, k) by {
                 if spec::lands_on(xv, tv, k) { assert(0 <= k < x.n); }
             }
@@ -1097,6 +1185,7 @@ pub fn eq(a: &Vec<char>, b: &Vec<char>) -> (r: bool)
 pub struct Kernel;
 
 impl Gates for Kernel {
+    fn blocked(t: &Search, x: Option<&Search>, f: Option<&Search>) -> (r: Option<spec::Blocked>) { blocked(t, x, f) }
     fn isolated(checks: Permission, transcripts: Permission, working_directory: Permission, repository: Permission, working_directories: Permission) -> (r: bool) {
         isolated(checks, transcripts, working_directory, repository, working_directories)
     }
