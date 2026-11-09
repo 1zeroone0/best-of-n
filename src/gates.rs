@@ -399,7 +399,7 @@ pub trait Gates {
             r matches Some(i) ==> spec::selected(search@, i as int),
             r is None ==> forall|i: int| !spec::selected(search@, i);
 
-    /// No verified test of counterexample splits tested.
+    /// No verified test of counterexample splits tested or rejects every member of it.
     fn not_found(counterexample: &Search, tested: &Search) -> (r: bool)
         requires counterexample.results.len() == counterexample.n, tested.results.len() == tested.n,
         ensures r == spec::not_found(counterexample@, tested@);

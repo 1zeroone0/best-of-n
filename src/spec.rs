@@ -265,19 +265,29 @@ pub open spec fn splits(candidate: Candidate, tested: Search) -> bool {
              && candidate.accepts[j1] == candidate.accepts[j2])
 }
 
+/// Counterexample: candidate, a test, rejects every member of tested. It
+/// rejects what a correct implementation would accept, or tested is wrong
+/// throughout; either way it does not show that nothing was found.
+pub open spec fn rejects_every(candidate: Candidate, tested: Search) -> bool {
+    forall|j: int| member(tested, j) ==> candidate.accepts.contains_key(j) && !candidate.accepts[j]
+}
+
 /// Counterexample: some verified test of counterexample splits tested.
 pub open spec fn found(counterexample: Search, tested: Search) -> bool {
     complete(counterexample) && exists|i: int| verified_at(counterexample, i) && splits(at(counterexample, i), tested)
 }
 
 /// Counterexample: every agent process of counterexample returned, at least two
-/// of its tests are verified, and none splits tested: no counterexample was
-/// found. With fewer than two verified tests, nothing was looked for: neither
-/// `found` nor `not_found`, so nothing it tested may be pushed.
+/// of its tests are verified, and none splits tested or rejects every member of
+/// it: no counterexample was found. With fewer than two verified tests, nothing
+/// was looked for; a test that rejects every member does not split them, but
+/// is no sign that nothing is wrong. Either way, neither `found` nor
+/// `not_found`, so nothing it tested may be pushed.
 pub open spec fn not_found(counterexample: Search, tested: Search) -> bool {
     complete(counterexample)
     && (exists|i: int, j: int| i != j && verified_at(counterexample, i) && verified_at(counterexample, j))
-    && forall|i: int| verified_at(counterexample, i) ==> !splits(at(counterexample, i), tested)
+    && forall|i: int| verified_at(counterexample, i) ==>
+        !splits(at(counterexample, i), tested) && !rejects_every(at(counterexample, i), tested)
 }
 
 /// Counterexample on trunk: counterexample's verified test i rejects trunk's head.
