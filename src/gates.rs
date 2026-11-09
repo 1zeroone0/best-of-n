@@ -195,9 +195,8 @@ pub open spec fn observed(checks: Permission, transcripts: Permission, working_d
 
 // ── encoding ────────────────────────────────────────────
 //
-// How the kernel writes a search to a trace and reads it back, compiled into
-// the bon process and into the gates in WebAssembly alike: words (u64), each
-// list led by its length.
+// How the kernel writes a search to a trace and reads it back: words (u64),
+// each list led by its length.
 
 /// A char as a word. Reading one back uses char::from_u32. (TCB: Rust std)
 pub assume_specification[ core::char::from_u32 ](i: u32) -> (r: Option<char>)
@@ -262,7 +261,8 @@ pub open spec fn encoded(search: Search) -> Seq<u64> {
 // ── emission ────────────────────────────────────────────
 //
 // What programs read: a search as JSON text, in the spec's names. Hashes are
-// strings, since a JSON number loses u64 precision in a browser.
+// strings, since a JSON number loses u64 precision in readers that parse it as
+// a float (JavaScript's, and many others').
 
 /// number in decimal.
 pub open spec fn decimal(number: nat) -> Seq<char>
