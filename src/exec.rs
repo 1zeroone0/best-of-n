@@ -120,7 +120,7 @@ fn authority_contains(kind: &Kind, checks: &Vec<Path>, tests: &Vec<Path>, truste
             assert(q@ =~= spec::queue_path().0);
             eq(&p.0, &q)
         }
-        Kind::Code { .. } => !protected(checks, trusted, p) && !under(tests, p),
+        Kind::Code { .. } | Kind::Foil { .. } => !protected(checks, trusted, p) && !under(tests, p),
         Kind::Compaction { .. } => !protected(checks, trusted, p),
         Kind::Counterexample { .. } => !protected(checks, trusted, p) && under(tests, p),
     }
@@ -134,6 +134,13 @@ pub fn verified(s: &Search, c: &Candidate) -> (r: bool)
         Kind::Compaction { .. } => { if !c.rejects_counterexamples { return false; } },
         _ => {},
     }
+    changed_within_authority(s, c)
+}
+
+/// Every changed path is within the search's authority.
+fn changed_within_authority(s: &Search, c: &Candidate) -> (r: bool)
+    ensures r == (forall|p: spec::Path| c@.changed.contains(p) ==> s@.authority.contains(p)),
+{
     let mut i = 0;
     while i < c.changed.len()
         invariant
@@ -164,7 +171,6 @@ pub fn verified(s: &Search, c: &Candidate) -> (r: bool)
     }
     true
 }
-
 
 // ── selected ────────────────────────────────────────────
 
@@ -384,16 +390,26 @@ pub fn accepts_on(c: &Candidate, j: Option<usize>) -> (r: Option<bool>)
         r matches Some(b) ==> c@.accepts.contains_key(key(j)) && c@.accepts[key(j)] == b,
         r is None ==> !c@.accepts.contains_key(key(j)),
 {
-    let ghost s = c.accepts@.map_values(|e: (i64, bool)| (e.0 as int, e.1));
+    accepts_in(&c.accepts, j)
+}
+
+/// The first reported value for an index.
+fn accepts_in(pairs: &Vec<(i64, bool)>, j: Option<usize>) -> (r: Option<bool>)
+    ensures
+        r matches Some(b) ==> first_by_key(pairs@.map_values(|e: (i64, bool)| (e.0 as int, e.1))).contains_key(key(j))
+            && first_by_key(pairs@.map_values(|e: (i64, bool)| (e.0 as int, e.1)))[key(j)] == b,
+        r is None ==> !first_by_key(pairs@.map_values(|e: (i64, bool)| (e.0 as int, e.1))).contains_key(key(j)),
+{
+    let ghost s = pairs@.map_values(|e: (i64, bool)| (e.0 as int, e.1));
     let mut i = 0;
-    while i < c.accepts.len()
+    while i < pairs.len()
         invariant
-            0 <= i <= c.accepts.len(),
-            s == c.accepts@.map_values(|e: (i64, bool)| (e.0 as int, e.1)),
+            0 <= i <= pairs.len(),
+            s == pairs@.map_values(|e: (i64, bool)| (e.0 as int, e.1)),
             forall|m: int| 0 <= m < i ==> s[m].0 != key(j),
-        decreases c.accepts.len() - i,
+        decreases pairs.len() - i,
     {
-        let (k, b) = c.accepts[i];
+        let (k, b) = pairs[i];
         let hit = match j { Some(j) => (k as i128) == (j as i128), None => k == -1 };
         if hit {
             proof { first_by_key_at(s, key(j), i as int); }
@@ -403,6 +419,34 @@ pub fn accepts_on(c: &Candidate, j: Option<usize>) -> (r: Option<bool>)
     }
     proof { first_by_key_absent(s, key(j)); }
     None
+}
+
+/// The test rejects at least one accepted, unproved program within authority.
+fn discriminates(c: &Candidate, f: &Search) -> (r: bool)
+    requires f.results.len() == f.n,
+    ensures r == spec::discriminates(c@, f@),
+{
+    let mut j = 0;
+    while j < f.n
+        invariant f.results.len() == f.n, 0 <= j <= f.n,
+            forall|k: int| 0 <= k < j ==> !(spec::foil(f@, k)
+                && c@.accepts_foils.contains_key(k) && !c@.accepts_foils[k]),
+        decreases f.n - j,
+    {
+        match &f.results[j] {
+            Some(program) => {
+                if program.accepted && !program.proved && changed_within_authority(f, program) && accepts_in(&c.accepts_foils, Some(j)) == Some(false) {
+                    assert(spec::foil(f@, j as int));
+                    return true;
+                }
+            }
+            None => {}
+        }
+        j += 1;
+    }
+    assert forall|k: int| spec::foil(f@, k) implies
+        !(c@.accepts_foils.contains_key(k) && !c@.accepts_foils[k]) by {}
+    false
 }
 
 /// c's test splits t's members.
@@ -472,6 +516,7 @@ fn splits(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
 }
 
 /// c's test rejects every member of t.
+#[verifier::rlimit(100)]
 fn rejects_every(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
     requires t.results.len() == t.n, vt.len() == t.n,
         forall|j: int| 0 <= j < t.n ==> vt[j] == spec::verified_at(t@, j),
@@ -505,14 +550,16 @@ fn rejects_every(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
 }
 
 #[verifier::rlimit(100)]
-pub fn not_found(x: &Search, t: &Search) -> (r: bool)
-    requires x.results.len() == x.n, t.results.len() == t.n,
-    ensures r == spec::not_found(x@, t@),
+pub fn not_found(x: &Search, t: &Search, f: &Search) -> (r: bool)
+    requires x.results.len() == x.n, t.results.len() == t.n, f.results.len() == f.n,
+    ensures r == spec::not_found(x@, t@, f@),
 {
+    hide(spec::discriminates);
     let ghost xv = x@;
     assert(spec::complete(xv)) by {
         assert forall|i: int| 0 <= i < x.n implies xv.results.contains_key(i) by {}
     }
+    assert(spec::complete(f@)) by { assert forall|j: int| 0 <= j < f.n implies f@.results.contains_key(j) by {} }
     let vx = verified_each(x);
     let vt = verified_each(t);
     let mut count: usize = 0;
@@ -523,17 +570,17 @@ pub fn not_found(x: &Search, t: &Search) -> (r: bool)
             t.results.len() == t.n, vt.len() == t.n,
             forall|m: int| 0 <= m < x.n ==> vx[m] == spec::verified_at(xv, m),
             forall|m: int| 0 <= m < t.n ==> vt[m] == spec::verified_at(t@, m),
-            spec::complete(xv), count <= 2,
-            count == 0 ==> forall|m: int| 0 <= m < i ==> !vx[m],
-            count == 1 ==> exists|a: int| 0 <= a < i && vx[a]
-                && forall|b: int| 0 <= b < i && vx[b] ==> a == b,
-            count == 2 ==> exists|a: int, b: int| 0 <= a < i && 0 <= b < i && a != b && vx[a] && vx[b],
+            spec::complete(xv), spec::complete(f@), f.results.len() == f.n, count <= 2,
+            count == 0 ==> forall|m: int| 0 <= m < i ==> !(vx[m] && spec::discriminates(spec::at(xv, m), f@)),
+            count == 1 ==> exists|a: int| 0 <= a < i && vx[a] && spec::discriminates(spec::at(xv, a), f@)
+                && forall|b: int| 0 <= b < i && vx[b] && spec::discriminates(spec::at(xv, b), f@) ==> a == b,
+            count == 2 ==> exists|a: int, b: int| 0 <= a < i && 0 <= b < i && a != b && vx[a] && spec::discriminates(spec::at(xv, a), f@) && vx[b] && spec::discriminates(spec::at(xv, b), f@),
             forall|m: int| 0 <= m < i && spec::verified_at(xv, m) ==> !spec::splits(spec::at(xv, m), t@) && !spec::rejects_every(spec::at(xv, m), t@),
         decreases vx.len() - i,
     {
         if vx[i] {
-            if count < 2 { count += 1; }
             let c = candidate(x, i);
+            if discriminates(c, f) && count < 2 { count += 1; }
             if splits(t, &vt, c) || rejects_every(t, &vt, c) {
                 assert(spec::verified_at(xv, i as int));
                 return false;
@@ -1055,7 +1102,7 @@ impl Gates for Kernel {
     }
     fn verified(s: &Search, c: &Candidate) -> (r: bool) { verified(s, c) }
     fn selected(s: &Search) -> (r: Option<usize>) { selected(s) }
-    fn not_found(x: &Search, t: &Search) -> (r: bool) { not_found(x, t) }
+    fn not_found(x: &Search, t: &Search, f: &Search) -> (r: bool) { not_found(x, t, f) }
     fn found_on_trunk(x: &Search) -> (r: Option<usize>) { found_on_trunk(x) }
     fn lands_on(x: &Search, t: &Search) -> (r: Option<usize>) { landing(x, t) }
     fn proposed(s: &Search) -> (r: Vec<(Cue, Intent)>) { proposed(s) }

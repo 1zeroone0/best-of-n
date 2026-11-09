@@ -70,7 +70,7 @@ fn clone_paths(paths: &Vec<Path>) -> (r: Vec<Path>)
 #[allow(unused_variables)]
 fn search(
     m: &trusted::Manifest, index: usize, a: usize, kind: Kind, start: Commit, checks: &Vec<Path>, tests: &Vec<Path>, trusted: &Vec<Path>,
-    l: u64, limit: u64, spent: &mut u64, target: Option<&Search>,
+    l: u64, limit: u64, spent: &mut u64, target: Option<&Search>, foils: Option<&Search>,
     Ghost(observed): Ghost<Map<Object, Permission>>, Tracked(t): Tracked<&mut Tokens>,
 ) -> (r: Result<Search, String>)
     requires
@@ -84,10 +84,17 @@ fn search(
         old(t).limit.value() == limit as nat,
         old(t).spent.value() == *old(spent) as nat,
         old(t).reserved.value() == 0,
-        start@ == old(t).trunk.value().last(),
+        start@ == match kind@ {
+            spec::Kind::Foil { goal } => spec::at(old(t).searches.value()[goal.search], goal.index).commit,
+            _ => old(t).trunk.value().last(),
+        },
         kind@ matches spec::Kind::Code { goal } ==> goal == old(t).trunk.value().last(),
         kind@ matches spec::Kind::Compaction { goal, .. } ==> goal == old(t).trunk.value().last(),
         kind@ matches spec::Kind::Counterexample { goal: Some(p) } ==>
+            0 <= p.search < old(t).searches.value().len()
+            && spec::selected(old(t).searches.value()[p.search], p.index)
+            && old(t).searches.value()[p.search].base == old(t).trunk.value().last(),
+        kind@ matches spec::Kind::Foil { goal: p } ==>
             0 <= p.search < old(t).searches.value().len()
             && spec::selected(old(t).searches.value()[p.search], p.index)
             && old(t).searches.value()[p.search].base == old(t).trunk.value().last(),
@@ -103,7 +110,7 @@ fn search(
         r matches Ok(s) ==> {
             &&& s.results.len() == s.n
             &&& s@.kind == kind@
-            &&& s@.base == old(t).trunk.value().last()
+            &&& s@.base == start@
             &&& final(t).searches.value() == old(t).searches.value().push(s@)
             &&& spec::complete(s@)
             &&& final(t).reserved.value() == 0
@@ -122,7 +129,7 @@ fn search(
     trusted::record_grant(m, &kind, n, l, Ghost(t.searches.value()));
     let started = trusted::clock();
     let spent_before = *spent;
-    let mut results = trusted::run(m, &kind, a, &start, target);
+    let mut results = trusted::run(m, &kind, a, &start, target, foils);
     if results.len() != n {
         return Err("trusted code returned the wrong number of agent processes".into());
     }
@@ -288,17 +295,17 @@ pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
             t.tests.value() == paths(tests@),
             t.trusted.value() == paths(trusted@),
             t.limit.value() == limit as nat,
-            index <= 2 * a,
+            index <= 3 * a,
         decreases attempts - a,
     {
-        if index > usize::MAX - 2 { return Err("too many searches".into()); }
+        if index > usize::MAX - 3 { return Err("too many searches".into()); }
         let kind = if compaction {
             Kind::Compaction { goal: Commit(head.0.clone()), out: trusted::agree_outputs(&m, &head)? }
         } else {
             Kind::Code { goal: Commit(head.0.clone()) }
         };
         let ghost before = t.searches.value();
-        let s0 = search(&m, index, a, kind, Commit(head.0.clone()), &checks, &tests, &trusted, l, limit, &mut spent, None,
+        let s0 = search(&m, index, a, kind, Commit(head.0.clone()), &checks, &tests, &trusted, l, limit, &mut spent, None, None,
                         Ghost(observed), Tracked(&mut t))?;
         proof {
             assert(t.searches.value()[index as int] == s0@);
@@ -314,49 +321,60 @@ pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
             Some(i) => {
                 trusted::record_selected(&m, i);
                 let ghost before1 = t.searches.value();
-                let s1 = search(&m, index + 1, a, Kind::Counterexample { goal: Some(AgentProcess { search: index, index: i }) },
-                                Commit(head.0.clone()), &checks, &tests, &trusted, l, limit, &mut spent, Some(&s0),
+                let sf = search(&m, index + 1, a, Kind::Foil { goal: AgentProcess { search: index, index: i } },
+                                Commit(candidate(&s0, i).commit.0.clone()), &checks, &tests, &trusted, l, limit, &mut spent, Some(&s0), None,
                                 Ghost(observed), Tracked(&mut t))?;
                 proof {
                     assert(t.searches.value()[index as int] == s0@);
-                    assert(t.searches.value()[index as int + 1] == s1@);
                     assert forall|k: int| 0 <= k < t.searches.value().len() implies spec::complete(#[trigger] t.searches.value()[k]) by {
                         if k <= index { assert(t.searches.value()[k] == before1[k]); }
                     }
                 }
-                if not_found(&s1, &s0) {
+                let ghost before2 = t.searches.value();
+                let s1 = search(&m, index + 2, a, Kind::Counterexample { goal: Some(AgentProcess { search: index, index: i }) },
+                                Commit(head.0.clone()), &checks, &tests, &trusted, l, limit, &mut spent, Some(&s0), Some(&sf),
+                                Ghost(observed), Tracked(&mut t))?;
+                proof {
+                    assert(t.searches.value()[index as int] == s0@);
+                    assert(t.searches.value()[index as int + 2] == s1@);
+                    assert(t.searches.value()[index as int + 1] == sf@);
+                    assert forall|k: int| 0 <= k < t.searches.value().len() implies spec::complete(#[trigger] t.searches.value()[k]) by {
+                        if k <= index + 1 { assert(t.searches.value()[k] == before2[k]); }
+                    }
+                }
+                if not_found(&s1, &s0, &sf) {
                     let now = trusted::head(root)?;
                     if !eq(&now.0, &head.0) {
                         trusted::record_blocked(&m, "trunk moved");
                         return Err("blocked: trunk moved during the search; run it again".into());
                     }
                     proof {
-                        t.instance.push(index as int, i as int, index as int + 1, &mut t.trunk, &mut t.authors, &t.searches);
+                        t.instance.push(index as int, i as int, index as int + 2, index as int + 1, &mut t.trunk, &mut t.authors, &t.searches);
                     }
                     if let Err(e) = trusted::push(&m, &candidate(&s0, i).commit) {
                         trusted::record_blocked(&m, &e);
                         return Err(e);
                     }
-                    trusted::record_push(&m, index, i, index + 1, Ghost(t.searches.value()));
+                    trusted::record_push(&m, index, i, index + 2, index + 1, Ghost(t.searches.value()));
                     return Ok(());
                 }
                 match landing(&s1, &s0) {
                     Some(j) => {
                         proof {
-                            t.instance.land(index as int + 1, j as int, &mut t.trunk, &mut t.authors, &t.searches);
+                            t.instance.land(index as int + 2, j as int, &mut t.trunk, &mut t.authors, &t.searches);
                         }
                         if let Err(e) = trusted::land(&m, &s1, j, Some(&s0)) {
                             trusted::record_blocked(&m, &e);
                             return Err(e);
                         }
-                        trusted::record_land(&m, index + 1, j, Ghost(t.searches.value()));
+                        trusted::record_land(&m, index + 2, j, Ghost(t.searches.value()));
                         head = Commit(candidate(&s1, j).commit.0.clone());
                     }
                     None => {
                         trusted::record_blocked(&m, "fewer than two verified tests, and none splits the candidates");
                     }
                 }
-                index = index + 2;
+                index = index + 3;
             }
         }
         a = a + 1;
@@ -392,7 +410,7 @@ pub fn counterexample(root: &str) -> (r: Result<bool, String>) {
     let mut spent: u64 = 0;
     trusted::record_initialize(&m, &head, limit);
     let s = search(&m, 0, 0, Kind::Counterexample { goal: None }, Commit(head.0.clone()), &checks, &tests, &trusted, l, limit, &mut spent,
-                   None, Ghost(observed), Tracked(&mut t))?;
+                   None, None, Ghost(observed), Tracked(&mut t))?;
     match found_on_trunk(&s) {
         Some(i) => {
             trusted::record_selected(&m, i);
@@ -454,7 +472,7 @@ pub fn queue(root: &str, transcripts: &Vec<Transcript>) -> (r: Result<Vec<(Vec<(
     {
         let ghost before = t.searches.value();
         let s = search(&m, k, 0, Kind::Queue { goal: Transcript(Path(transcripts[k].0.0.clone())) }, Commit(head.0.clone()), &checks, &tests, &trusted, l, limit, &mut spent,
-                       None, Ghost(observed), Tracked(&mut t))?;
+                       None, None, Ghost(observed), Tracked(&mut t))?;
         proof {
             assert forall|j: int| 0 <= j < t.searches.value().len() implies spec::complete(#[trigger] t.searches.value()[j]) by {
                 if j < k { assert(t.searches.value()[j] == before[j]); }
