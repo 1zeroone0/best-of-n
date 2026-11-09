@@ -1,12 +1,12 @@
 # What reaching this trunk cost, from bon's traces; bon rewrites it after each push.
 # cost = generation (what the models charged) + time (engineer's, at each search's rate).
-cost = 276.32
-generation = 49.78
-time = 226.55
-per_verified_candidate = 1.79
+cost = 341.39
+generation = 58.15
+time = 283.23
+per_verified_candidate = 2.08
 per_push = 22.62
-generation_per_verified_candidate = 0.32
+generation_per_verified_candidate = 0.35
 generation_per_push = 4.03
 pushes = 12
-verified = 154
-candidates = 172
+verified = 164
+candidates = 182
