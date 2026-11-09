@@ -223,7 +223,9 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
             for (gi, g) in groups.into_iter().enumerate() {
                 let d = if g.running { today } else { day(g.time, app.off) };
                 if last_day != Some(d) { if last_day.is_some() { out.push(Row::text(Line::default())); } out.push(header(&day_label(d, today))); last_day = Some(d); }
-                let tone = pal.tone(outcome_tone(&g.outcome));
+                // A row where the kernel disagrees with the trace needs attention: red.
+                let differs = g.processes.iter().flat_map(|b| &b.searches).any(|s| disagreement(s).is_some());
+                let tone = pal.tone(if differs { Tone::Red } else { outcome_tone(&g.outcome) });
                 let cost = money(g.push.as_ref().and_then(|p| p.cost).or(Some(g.cost)));
                 let label = if g.outcome == "not found" { "none found".to_string() } else { g.outcome.clone() };
                 // Three forms by width: 96+ everything; 76+ without "who", arrows tight;
@@ -445,6 +447,7 @@ fn detail(app: &App, width: u16) -> Text<'static> {
                     let facts: Vec<String> = [(!s.params.base.is_empty()).then(|| format!("base {}", short(&s.params.base))), s.params.limit.map(|l| format!("limit {}", money(Some(l)))), (!kernel.is_empty()).then(|| kernel.to_string())].into_iter().flatten().collect();
                     if !facts.is_empty() { t.push(Line::from(Span::styled(format!("    {}", facts.join(" · ")), pal.faint()))); }
                     if !s.params.authority.is_empty() { t.extend(hanging(&format!("may change {}", s.params.authority), 4, width as usize, pal.faint())); }
+                    if let Some(d) = disagreement(s) { t.extend(hanging(&d, 4, width as usize, pal.tone(Tone::Red))); }
                     if s.blocked.is_some() { for l in why_blocked(s) { t.extend(hanging(&l, 4, width as usize, pal.tone(Tone::Yellow))); } }
                     if !s.candidates.is_empty() {
                         t.push(Line::from(Span::styled(format!("    {}  {}  {}  {}  {}  {}", fit("#", 4), fit("commit", 8), fit("verified", 9), fit("rank", 5), fit("lines", 10), "gen"), pal.faint())));
@@ -603,6 +606,15 @@ fn detail(app: &App, width: u16) -> Text<'static> {
         Tab::Project => {}
     }
     Text::from(t)
+}
+
+/// Where the kernel, re-deriving a search from its words, disagrees with what the trace recorded.
+fn disagreement(s: &SearchTrace) -> Option<String> {
+    if s.kernel != "derived" { return None; }
+    match (s.selected, s.recorded_selected) {
+        (k, Some(t)) if k != Some(t) => Some(format!("the kernel selects {}, the trace recorded #{t}", k.map_or("none".to_string(), |k| format!("#{k}")))),
+        _ => None,
+    }
 }
 
 /// The verified candidates of a search, grouped by their agree output.
@@ -1082,6 +1094,15 @@ mod tests {
     fn search(kind: &str, outs: &[(bool, u64)]) -> SearchTrace {
         serde_json::from_value(serde_json::json!({ "kind": kind, "blocked": "blocked: fewer than two verified candidates, or they disagree",
             "candidates": outs.iter().enumerate().map(|(i, (v, o))| serde_json::json!({ "index": i, "accepted": true, "verified": v, "out": [o] })).collect::<Vec<_>>() })).unwrap()
+    }
+
+    #[test]
+    fn the_view_marks_where_the_kernel_disagrees_with_the_trace() {
+        // queue 29: the kernel re-derives the selection from the words; the trace recorded its own.
+        let s = |kernel: &str, sel: Option<u64>, rec: Option<u64>| -> SearchTrace { serde_json::from_value(serde_json::json!({ "kernel": kernel, "selected": sel, "recorded_selected": rec })).unwrap() };
+        assert_eq!(disagreement(&s("derived", Some(1), Some(2))).as_deref(), Some("the kernel selects #1, the trace recorded #2"));
+        assert!(disagreement(&s("derived", Some(1), Some(1))).is_none());
+        assert!(disagreement(&s("unreadable", Some(1), Some(2))).is_none());
     }
 
     #[test]

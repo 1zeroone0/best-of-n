@@ -586,6 +586,38 @@ fn harnesses(config: &Config, kind: &Kind) -> Vec<Harness> {
 #[verifier::external]
 fn at(h: &Harness, a: usize) -> usize { h.n.get(a).or(h.n.last()).copied().unwrap_or(0) }
 
+/// How many agent processes run at once: the host's `jobs`, at least one, never
+/// more than the search has. Width stays what bon.toml says. (queue 26)
+fn workers(jobs: usize, width: usize) -> usize { jobs.max(1).min(width) }
+
+/// Whether a harness's own status command says it is logged in, from its exit and output.
+fn logged_in(harness: &str, ok: bool, out: &str) -> bool {
+    match harness {
+        "claude" => out.contains("\"loggedIn\": true") || out.contains("\"loggedIn\":true"),
+        _ => ok && out.contains("Logged in"),
+    }
+}
+
+/// Before a search: each harness bon.toml names is logged in as agent, checked
+/// the way bon runs it. If one is not, the command that fixes it. (queue 32)
+#[verifier::external_body]
+pub fn harnesses_logged_in(m: &Manifest) -> (r: Result<(), String>) {
+    let mut names: Vec<&str> = m.config.harness.iter().chain(m.config.counterexample.harness.iter()).map(|h| h.name.as_str()).collect();
+    names.sort(); names.dedup();
+    for name in names {
+        let argv: Vec<String> = match name { "claude" => vec!["claude".into(), "auth".into(), "status".into()], _ => vec!["codex".into(), "login".into(), "status".into()] };
+        let (ok, out) = match as_agent(&m.config, std::path::Path::new("/tmp"), &[], &argv).output() {
+            Ok(o) => (o.status.success(), String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr)),
+            Err(e) => (false, e.to_string()),
+        };
+        if !logged_in(name, ok, &out) {
+            let fix = match name { "claude" => "sudo -u agent -i claude", _ => "sudo -u agent -i codex login" };
+            return Err(format!("{name} is not logged in as agent; run: {fix}"));
+        }
+    }
+    Ok(())
+}
+
 /// How many agent processes a search of this kind runs on attempt `a`.
 #[verifier::external_body]
 pub fn width(m: &Manifest, kind: &Kind, a: usize) -> usize {
@@ -728,7 +760,7 @@ pub fn run(m: &Manifest, kind: &Kind, a: usize, start: &Commit, target: Option<&
     let next = std::sync::atomic::AtomicUsize::new(0);
     let out: Vec<std::sync::Mutex<(Option<Candidate>, u64)>> = slots.iter().map(|_| std::sync::Mutex::new((None, 0))).collect();
     std::thread::scope(|scope| {
-        for _ in 0..m.config.jobs.max(1).min(slots.len()) {
+        for _ in 0..workers(m.config.jobs, slots.len()) {
             scope.spawn(|| loop {
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let Some(h) = slots.get(i) else { break };
@@ -1451,6 +1483,45 @@ mod tests {
         assert_eq!(tested_tree(&on(Some(crate::gates::AgentProcess { search: 0, index: 1 })), Some(&tested), "head"), "selected");
         // On trunk: trunk's head.
         assert_eq!(tested_tree(&on(None), None, "head"), "head");
+    }
+
+    #[test]
+    fn a_blocked_search_reruns_as_wide_as_the_width_list_says() {
+        // queue 16: attempt a runs n[a] agent processes, the last width after the list ends;
+        // the attempts are the longest list's length.
+        let m = Manifest { config: config(), root: PathBuf::from(".") };
+        let code = Kind::Code { goal: vec![] };
+        assert_eq!((width(&m, &code, 0), width(&m, &code, 1), width(&m, &code, 5)), (2, 4, 4));
+        assert_eq!(attempts(&m), 2);
+    }
+
+    #[test]
+    fn the_host_s_jobs_caps_how_many_run_at_once() {
+        // queue 26: never more than jobs at once, at least one, and width is unchanged.
+        assert_eq!((workers(4, 12), workers(16, 12), workers(0, 8), workers(3, 0)), (4, 12, 1, 0));
+    }
+
+    #[test]
+    fn a_counterexample_writer_sees_the_spec_and_the_checks_never_the_code() {
+        // queue 24: prune keeps only what is named; everything else is gone.
+        let d = std::env::temp_dir().join(format!("bon-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        for f in ["src/spec.rs", "src/exec.rs", "tests/c_1.rs", "Cargo.toml", ".bon/bon.toml", "view/src/main.ts"] {
+            let p = d.join(f); std::fs::create_dir_all(p.parent().unwrap()).unwrap(); std::fs::write(p, "x").unwrap();
+        }
+        prune(&d, &["src/spec.rs".into(), "tests/".into(), "Cargo.toml".into(), ".bon/".into()]);
+        let left: Vec<bool> = ["src/spec.rs", "src/exec.rs", "tests/c_1.rs", "Cargo.toml", ".bon/bon.toml", "view/src/main.ts"].iter().map(|f| d.join(f).exists()).collect();
+        assert_eq!(left, [true, false, true, true, true, false]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_harness_is_logged_in_only_when_its_status_says_so() {
+        // queue 32.
+        assert!(logged_in("claude", true, "{\n  \"loggedIn\": true,\n}"));
+        assert!(!logged_in("claude", true, "{\n  \"loggedIn\": false\n}"));
+        assert!(logged_in("codex", true, "Logged in using ChatGPT"));
+        assert!(!logged_in("codex", false, "Not logged in"));
     }
 
     #[test]

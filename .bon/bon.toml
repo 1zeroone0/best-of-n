@@ -31,6 +31,8 @@ build = "cargo test -q --no-run --test counterexample"
 run = "cargo test -q --test counterexample"
 # Where the counterexamples' tests live on trunk: code may not change them; compaction may.
 tests = ["tests/"]
+# What a counterexample's writer sees besides the checks and those tests: never the code (queue 24).
+visible = ["Cargo.toml", "Cargo.lock"]
 
 [sbom]
 name = "best-of-n"

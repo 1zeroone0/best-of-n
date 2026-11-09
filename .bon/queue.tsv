@@ -1,11 +1,6 @@
 id	intent
 14	Each trace records, for every agent process, its harness, model, tokens, cost and time, and for every check its time and exit status, so that cost per verified candidate = (Σ_c (g(c) + k(c)) + r·t) / v, with r the rate in bon.toml and t the search's wall time.
 15	A push's cost is everything run to reach it: the generation and time cost of every search of every bon process of its kind since the last push of that kind.
-16	A blocked search reruns, as wide as bon.toml's width list says for that attempt, until the attempts or a limit run out; only that goes to engineer.
 20	A skill ships with the CLI for the model engineer talks to: how to work at the spec level and when to run bon, read from the bon.toml, queue and spec of the repo it runs in; agent processes never see it.
-24	Counterexample tests are written blind: the agent process writing one sees the spec and the checks, never a candidate's code.
-26	The host file's jobs caps how many agent processes run at once; width stays what bon.toml says.
 27	Background work, compaction and counterexample searches on trunk, runs only on spare capacity, stalest first, staleness being trunk commits since that kind last ran.
-28	The kernel is the spec, the gates and their implementation, in Rust and Verus; programs, in TypeScript or Go, are built from the types the kernel emits and run its gates compiled in, and add no trusted code beyond their entry points.
-29	bon and bon view show one projection of the traces: what is running, what was pushed, the queue and what it cost, over any time range; the page re-derives each selection with the kernel's gates in WebAssembly and marks any disagreement with the trace.
-32	Before a search, bon checks that each harness it will run is logged in as agent, the way it runs it, and refuses to start with the command that fixes it.
+28	Programs in Go and Python run the kernel's gates compiled in, as the page does in WebAssembly, and add no trusted code beyond their entry points.

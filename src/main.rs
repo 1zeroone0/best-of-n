@@ -40,6 +40,11 @@ fn main() {
         Err(e) => fail(&format!("not in a git repository: {e}")),
     };
     let command = args.first().map(String::as_str).unwrap_or("");
+    // Before a search: every harness it may run is logged in as agent, or the command that fixes it.
+    if SEARCHES.contains(&command) {
+        let checked = best_of_n::trusted::head(&root).and_then(|h| best_of_n::trusted::manifest(&root, &h)).and_then(|m| best_of_n::trusted::harnesses_logged_in(&m));
+        if let Err(e) = checked { fail(&e) }
+    }
     if SEARCHES.contains(&command) && command != "background" { running(&root); }
     let result = dispatch(&root, &args);
     // Only commands that grant capabilities make directories under /tmp/bon, so
