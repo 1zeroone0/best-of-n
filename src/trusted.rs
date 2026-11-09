@@ -588,9 +588,11 @@ fn at(h: &Harness, a: usize) -> usize { h.n.get(a).or(h.n.last()).copied().unwra
 
 /// How many agent processes run at once: the host's `jobs`, at least one, never
 /// more than the search has. Width stays what bon.toml says. (queue 26)
+#[verifier::external]
 fn workers(jobs: usize, width: usize) -> usize { jobs.max(1).min(width) }
 
 /// Whether a harness's own status command says it is logged in, from its exit and output.
+#[verifier::external]
 fn logged_in(harness: &str, ok: bool, out: &str) -> bool {
     match harness {
         "claude" => out.contains("\"loggedIn\": true") || out.contains("\"loggedIn\":true"),
