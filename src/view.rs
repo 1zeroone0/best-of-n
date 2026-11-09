@@ -537,12 +537,19 @@ fn reasons(processes: &[Value]) -> Vec<Value> {
 }
 
 /// The columns of the outcomes table.
-pub const OUTCOME_COLUMNS: [&str; 7] = ["Outcomes", "Attempts", "Pushed", "p", "Blocked", "Expected", "Exited"];
+pub const OUTCOME_COLUMNS: [&str; 7] = ["Outcomes", "Attempts", "Pushed", "p", "Ended blocked", "Expected", "Exited"];
+
+/// A reason attempts blocked, in words, with its count: `Too few verified (1)`.
+pub fn reason_count(r: &crate::projection::Reason) -> String {
+    let mut w = r.reason.replace('_', " ");
+    if let Some(f) = w.get_mut(0..1) { f.make_ascii_uppercase(); }
+    format!("{w} ({})", r.count)
+}
 
 /// Attempts and how bon processes ended, by kind: one row per kind, and one
 /// per width under it when the kind ran at more than one. Attempts, pushed
-/// and p count attempts; blocked and exited count bon processes; expected is
-/// how many of them (1-p)^k predicts would block.
+/// and p count attempts; ended blocked and exited count bon processes;
+/// expected is how many of them (1-p)^k predicts would end blocked.
 pub fn outcome_table(t: &crate::projection::Totals) -> Vec<[String; 7]> {
     let mut out = Vec::new();
     let p = |a: u64, s: u64| if a > 0 { format!("{:.2}", s as f64 / a as f64) } else { "—".into() };
@@ -571,8 +578,8 @@ pub fn outcome_lines(t: &crate::projection::Totals) -> Vec<String> {
         for i in 1..7 { l += &format!("  {:>1$}", r[i], w[i]); }
         l.trim_end().to_string()
     }).collect();
-    let reasons = t.reasons.iter().map(|r| format!("{} {}", r.reason, r.count)).collect::<Vec<_>>();
-    if !reasons.is_empty() { lines.push(format!("Blocked by  {}", reasons.join(" · "))); }
+    let reasons = t.reasons.iter().map(reason_count).collect::<Vec<_>>();
+    if !reasons.is_empty() { lines.push(format!("Attempts blocked by  {}", reasons.join(" · "))); }
     lines
 }
 
