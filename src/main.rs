@@ -621,9 +621,10 @@ fn timestamp(ms: u64) -> String {
     format!("{:02}:{:02}:{:02}.{:03}", ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000)
 }
 
-/// Create user agent and group bon, put engineer and agent in bon, and let
-/// engineer run commands as agent (never as root) with no password. Each step
-/// runs with sudo and is printed first.
+/// Create user agent and group bon, put engineer and agent in bon, let
+/// engineer run commands as agent (never as root) with no password, and install
+/// the toolchain checks judge with under /opt/bon. Each step runs with sudo and
+/// is printed first.
 fn setup(dry_run: bool, user: Option<String>) -> Result<(), String> {
     let runner = std::env::var("USER").map_err(|_| "USER is not set")?;
     let me = user.unwrap_or(runner.clone());
@@ -653,6 +654,24 @@ fn setup(dry_run: bool, user: Option<String>) -> Result<(), String> {
     // bon remakes it after a reboot clears /tmp.
     steps.push(vec!["sh".into(), "-c".into(), format!(
         "mkdir -p {d} && chown {me} {d} && chmod 0711 {d}", d = best_of_n::trusted::WORKING_DIRECTORIES)]);
+    // The toolchain checks judge with, where no agent process can write it: a copy
+    // of the one this user runs (rustup's home, cargo's proxies, Verus), root's all
+    // the way up, with a cargo home whose root is root's and only its caches agent's.
+    if !std::path::Path::new("/opt/bon").exists() {
+        let home = std::env::var("HOME").map_err(|_| "HOME is not set")?;
+        let rustup = std::env::var("RUSTUP_HOME").unwrap_or(format!("{home}/.rustup"));
+        let cargo = std::env::var("CARGO_HOME").unwrap_or(format!("{home}/.cargo"));
+        let verus = Command::new("sh").args(["-c", "dirname \"$(realpath \"$(command -v verus)\")\""]).output()
+            .ok().filter(|o| o.status.success()).map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .filter(|d| !d.is_empty()).ok_or("verus is not on PATH: install it first")?;
+        steps.push(vec!["sh".into(), "-c".into(), format!(
+            "set -e; mkdir -p /opt/bon/rustup /opt/bon/cargo/bin /opt/bon/verus /opt/bon/cargo-home/registry /opt/bon/cargo-home/git; \
+             cp -cR {rustup}/settings.toml {rustup}/toolchains {rustup}/update-hashes /opt/bon/rustup/; \
+             mkdir -p /opt/bon/rustup/downloads /opt/bon/rustup/tmp; cp -cR {cargo}/bin/. /opt/bon/cargo/bin/; cp -cR {verus}/. /opt/bon/verus/; \
+             touch /opt/bon/cargo-home/.global-cache /opt/bon/cargo-home/.package-cache /opt/bon/cargo-home/.package-cache-mutate; \
+             chown -R root:wheel /opt/bon; chmod -R go-w,a+rX /opt/bon; \
+             chown -R agent:bon /opt/bon/cargo-home/registry /opt/bon/cargo-home/git /opt/bon/cargo-home/.global-cache /opt/bon/cargo-home/.package-cache /opt/bon/cargo-home/.package-cache-mutate")]);
+    }
     // The host file: written once, then edited by hand (with sudo) as models and prices change.
     if !std::path::Path::new(best_of_n::trusted::HOST).exists() {
         let draft = std::env::temp_dir().join(format!("bon-host-{}.toml", std::process::id()));
@@ -688,8 +707,13 @@ const HOST_TEMPLATE: &str = r#"# bon's host file: facts about this host, not abo
 # search stays what each repository's bon.toml says.
 jobs = 7
 
-# PATH for agent processes and checks. Nothing else is inherited.
-path = ["/Users/agent/.local/bin", "/Users/agent/.cargo/bin", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+# PATH for agent processes and checks. Nothing else is inherited. Checks drop
+# every entry under agent's home: they run only what no agent process can write.
+path = ["/opt/bon/cargo/bin", "/opt/bon/verus", "/opt/homebrew/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin", "/Users/agent/.local/bin"]
+
+# The toolchain checks judge with, installed by bon setup: root's all the way up.
+rustup_home = "/opt/bon/rustup"
+cargo_home = "/opt/bon/cargo-home"
 
 # Dollars per million tokens, API list prices, by canonical model id. Keep only
 # the models in use. cache_write is the shorter TTL (Claude 5m, OpenAI 30m),
