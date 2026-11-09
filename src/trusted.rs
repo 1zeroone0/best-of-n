@@ -317,7 +317,9 @@ fn repository_name(root: &std::path::Path) -> String {
 /// directory is engineer's, group bon, mode 2750: agent may enter it, not add
 /// to it.
 fn scratch(name: &str) -> PathBuf {
-    let base = PathBuf::from(WORKING_DIRECTORIES);
+    // bon runs as engineer; only a candidate's tests run bon's code as agent,
+    // which cannot write the host's working directories: they get agent's own.
+    let base = if is_agent() { std::env::temp_dir().join("bon") } else { PathBuf::from(WORKING_DIRECTORIES) };
     if !base.exists() {
         let _ = std::fs::create_dir_all(&base);
     }
@@ -1646,8 +1648,12 @@ fn rejects_every_counterexample(m: &Manifest, commit: &str, start: &str, build: 
                     if !has() { return Err(format!("{test}: its evidence {evidence} cannot be read")); }
                 }
                 // test_on materializes with fresh mtimes, so the shared build sees each tree as changed.
-                if test_on(m, evidence, &bytes, build, &config.counterexample.run, &trace.join(format!("counterexample-{k}-{e}"))) {
-                    return Err(format!("{test}: accepts its evidence {evidence}"));
+                // A verdict, or none: a test that cannot be set up, built or run on its
+                // evidence has not shown it still rejects it, so compaction fails closed.
+                match verdict(m, evidence, &bytes, build, &trace.join(format!("counterexample-{k}-{e}"))) {
+                    Some(false) => {}
+                    Some(true) => return Err(format!("{test}: accepts its evidence {evidence}")),
+                    None => return Err(format!("{test}: no verdict on its evidence {evidence}")),
                 }
             }
         }
@@ -2103,7 +2109,7 @@ mod tests {
         git(&work, &["reset", "-q", "--hard", &base]).unwrap();
         let candidate = |commit: &str, changed: Vec<Path>, accepts: Vec<(i64, bool)>| Candidate {
             commit: text(commit), base: text(&base), accepted: true, proved: true, changed, out: vec![], intents: vec![],
-            accepts, accepts_foils: vec![], rejects_counterexamples: false, rank: 0, diff: 1,
+            accepts, accepts_foils: vec![], measured: false, added: vec![], rejects_counterexamples: false, rank: 0, diff: 1,
         };
         let search = |kind: Kind, c: Candidate| Search {
             kind, base: text(&base), n: 1, checks: vec![], tests: vec![text("tests/")], trusted: vec![], limit: 1, results: vec![Some(c)],
