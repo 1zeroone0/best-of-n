@@ -302,22 +302,76 @@ fn writable_dir(d: &std::path::Path) -> Result<(), String> {
     if ok { Ok(()) } else { Err(format!("cannot make {} writable by group bon", d.display())) }
 }
 
-/// Write `commit`'s tree into `dir`, owned by engineer, group bon. (TCB: git, tar)
+/// Write `commit`'s tree into `dir`, owned by engineer, group bon. (TCB: git)
 fn materialize(root: &std::path::Path, commit: &str, dir: &std::path::Path) -> Result<(), String> {
     let _ = std::fs::remove_dir_all(dir);
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    let mut archive = Command::new("git").args(["archive", "--format=tar", commit]).current_dir(root)
-        .stdout(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
-    // -m: each file gets the time it was extracted, not its commit's. Cargo
-    // tracks a package's own sources by path and mtime, so files older than a
-    // build directory's artifacts (one shared across the commits a test runs on)
-    // read as unchanged, and the test runs on the last commit built.
-    let tar = Command::new("tar").arg("-x").arg("-m").arg("-C").arg(dir)
-        .stdin(archive.stdout.take().unwrap()).status().map_err(|e| e.to_string())?;
-    if !archive.wait().map_err(|e| e.to_string())?.success() || !tar.success() {
-        return Err(format!("materialize {commit}"));
-    }
+    extract(root, commit, &[], dir)?;
     sh(dir, "chgrp", &["-R", "bon", "."])?;
+    Ok(())
+}
+
+/// One entry of a tree: its mode, object and path.
+type Entry = (Vec<u8>, String, Vec<u8>);
+
+/// Write the files of `commit`'s tree under `paths` (all of it, when empty)
+/// into `dir`: exactly what `git ls-tree -r` lists, byte for byte. No attribute
+/// applies (export-ignore, export-subst, eol, filters), so no candidate leaves
+/// a file out of its own check directory. Each file gets the time it is
+/// written, not its commit's: cargo tracks a package's own sources by path and
+/// mtime, so files older than a build directory's artifacts (one shared across
+/// the commits a test runs on) would read as unchanged. (TCB: git)
+fn extract(root: &std::path::Path, commit: &str, paths: &[&str], dir: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    let bad = || format!("materialize {commit}");
+    let mut args = vec!["ls-tree", "-r", "-z", "--full-tree", commit, "--"];
+    args.extend_from_slice(paths);
+    let out = Command::new("git").args(&args).current_dir(root).stdin(Stdio::null()).output().map_err(|e| e.to_string())?;
+    if !out.status.success() { return Err(format!("{}: {}", bad(), String::from_utf8_lossy(&out.stderr).trim())); }
+    let mut entries: Vec<Entry> = Vec::new();
+    for e in out.stdout.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+        let tab = e.iter().position(|b| *b == b'\t').ok_or_else(bad)?;
+        let head = String::from_utf8_lossy(&e[..tab]).to_string();
+        let [mode, _, object] = head.split(' ').collect::<Vec<_>>()[..] else { return Err(bad()) };
+        let path = e[tab + 1..].to_vec();
+        if path.starts_with(b"/") || path.split(|b| *b == b'/').any(|c| c.is_empty() || c == b"." || c == b"..") {
+            return Err(format!("{}: path {}", bad(), String::from_utf8_lossy(&path)));
+        }
+        entries.push((mode.as_bytes().to_vec(), object.to_string(), path));
+    }
+    let target = |p: &[u8]| dir.join(std::ffi::OsStr::from_bytes(p));
+    // A submodule is an empty directory, as git leaves it.
+    let (modules, blobs): (Vec<&Entry>, Vec<&Entry>) = entries.iter().partition(|(m, _, _)| m.as_slice() == b"160000");
+    for (_, _, path) in modules { std::fs::create_dir_all(target(path)).map_err(|e| e.to_string())?; }
+    let mut cat = Command::new("git").args(["cat-file", "--batch"]).current_dir(root)
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+    let mut input = cat.stdin.take().ok_or("cat-file: no stdin")?;
+    let ids: String = blobs.iter().map(|(_, o, _)| format!("{o}\n")).collect();
+    let writer = std::thread::spawn(move || input.write_all(ids.as_bytes()));
+    let mut output = std::io::BufReader::new(cat.stdout.take().ok_or("cat-file: no stdout")?);
+    for (mode, object, path) in blobs {
+        // `<object> blob <size>\n<bytes>\n`
+        let mut header = Vec::new();
+        std::io::BufRead::read_until(&mut output, b'\n', &mut header).map_err(|e| e.to_string())?;
+        let header = String::from_utf8_lossy(&header).to_string();
+        let size: usize = header.trim_end().rsplit(' ').next().and_then(|n| n.parse().ok())
+            .filter(|_| header.starts_with(&format!("{object} blob "))).ok_or_else(|| format!("{}: {}", bad(), header.trim()))?;
+        let mut bytes = vec![0u8; size + 1];
+        output.read_exact(&mut bytes).map_err(|e| e.to_string())?;
+        bytes.truncate(size);
+        let t = target(path);
+        if let Some(parent) = t.parent() { std::fs::create_dir_all(parent).map_err(|e| e.to_string())?; }
+        if mode.as_slice() == b"120000" {
+            std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(&bytes), &t).map_err(|e| e.to_string())?;
+        } else {
+            std::fs::write(&t, &bytes).map_err(|e| e.to_string())?;
+            let bits = if mode.as_slice() == b"100755" { 0o755 } else { 0o644 };
+            std::fs::set_permissions(&t, std::fs::Permissions::from_mode(bits)).map_err(|e| e.to_string())?;
+        }
+    }
+    let _ = writer.join();
+    if !cat.wait().map_err(|e| e.to_string())?.success() { return Err(bad()); }
     Ok(())
 }
 
@@ -335,10 +389,10 @@ fn working_directory_except(root: &std::path::Path, config: &Config, commit: &st
     materialize(root, commit, dir)?;
     sh(dir, "chmod", &["-R", "g+rwX", "."])?;
     sh(dir, "find", &[".", "-type", "d", "-exec", "chmod", "g+s", "{}", "+"])?;
-    // The checks, the transcripts and .bon/: agent may read them, never change them.
+    // The checks, their build configuration, the transcripts and .bon/: agent may read them, never change them.
     let transcripts = config.transcripts.clone().unwrap_or("transcripts".into());
-    let bon = BON.to_string();
-    for p in config.checks.paths.iter().chain([&transcripts, &bon]).chain(more.iter()) {
+    let fixed: Vec<String> = BUILD.iter().map(|p| p.to_string()).chain([transcripts, BON.to_string()]).collect();
+    for p in config.checks.paths.iter().chain(fixed.iter()).chain(more.iter()) {
         if writable.is_some_and(|w| w.starts_with(p.trim_end_matches('/'))) { continue; }
         let target = dir.join(p.trim_end_matches('/'));
         if !target.exists() { continue; }
@@ -639,8 +693,11 @@ pub fn limit(m: &Manifest) -> u64 { micro(m.config.limit) }
 #[verifier::external_body]
 pub fn agent_process_limit(m: &Manifest) -> u64 { micro(m.config.agent_process.limit) }
 
+/// The checks' paths and the build configuration they read: no search may change them.
 #[verifier::external_body]
-pub fn checks(m: &Manifest) -> Vec<Path> { m.config.checks.paths.iter().map(|p| p.chars().collect()).collect() }
+pub fn checks(m: &Manifest) -> Vec<Path> {
+    m.config.checks.paths.iter().map(|p| p.as_str()).chain(BUILD).map(|p| p.chars().collect()).collect()
+}
 
 /// The paths holding the counterexamples' tests.
 #[verifier::external_body]
@@ -1152,6 +1209,9 @@ pub const BON: &str = ".bon";
 pub const MANIFEST: &str = ".bon/bon.toml";
 pub const QUEUE: &str = ".bon/queue.tsv";
 pub const SBOM: &str = ".bon/sbom.json";
+/// The build configuration cargo reads beside Cargo.toml: a check runs what it
+/// says, so it is protected like a check.
+pub const BUILD: [&str; 2] = [".cargo/", "build.rs"];
 
 /// One agent process: generate, capture, observe. Its log goes under `trace`.
 #[allow(clippy::too_many_arguments)]
@@ -1414,10 +1474,7 @@ fn rejects_every_counterexample(m: &Manifest, commit: &str, build: &std::path::P
             // The candidate's tests, over the evidence's code.
             for t in &config.counterexample.tests {
                 let _ = std::fs::remove_dir_all(dir.join(t.trim_end_matches('/')));
-                let mut archive = match Command::new("git").args(["archive", "--format=tar", commit, "--", t]).current_dir(&m.root)
-                    .stdout(Stdio::piped()).stderr(Stdio::null()).spawn() { Ok(a) => a, Err(_) => return false };
-                let _ = Command::new("tar").arg("-x").arg("-C").arg(&dir).stdin(archive.stdout.take().unwrap()).status();
-                let _ = archive.wait();
+                if extract(&m.root, commit, &[t.as_str()], &dir).is_err() { return false; }
             }
             let _ = Command::new("chgrp").args(["-R", "bon"]).arg(&dir).status();
             let _ = Command::new("chmod").args(["-R", "a-w,g+rX"]).arg(&dir).status();
@@ -1585,6 +1642,49 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[test]
+    fn a_check_directory_holds_exactly_the_commits_tree() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("bon-tree-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("tests")).unwrap();
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        git(&d, &["init", "-q"]).unwrap();
+        // The candidate's own attributes would leave its tests out and rewrite its sources.
+        std::fs::write(d.join(".gitattributes"), "tests/** export-ignore\n*.rs export-subst ident\n*.txt eol=crlf\n").unwrap();
+        std::fs::write(d.join("tests/trunk.rs"), "#[test] fn t() {} // $Format:%H$\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), "// $Format:%H$ $Id$\n").unwrap();
+        std::fs::write(d.join("notes.txt"), "a\nb\n").unwrap();
+        std::fs::write(d.join("run.sh"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(d.join("run.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink("src/lib.rs", d.join("link")).unwrap();
+        git(&d, &["add", "."]).unwrap();
+        git(&d, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "c"]).unwrap();
+        let dir = d.join("out");
+        // chgrp bon fails on a host without group bon; the files are written first.
+        let _ = materialize(&d, "HEAD", &dir);
+        let listed = git(&d, &["ls-tree", "-r", "HEAD"]).unwrap();
+        assert_eq!(listed.lines().count(), 6);
+        for l in listed.lines() {
+            let (head, path) = l.split_once('\t').unwrap();
+            let f: Vec<&str> = head.split(' ').collect();
+            let blob = Command::new("git").args(["cat-file", "blob", f[2]]).current_dir(&d).output().unwrap().stdout;
+            let p = dir.join(path);
+            let bytes = if f[0] == "120000" { std::fs::read_link(&p).unwrap().to_string_lossy().as_bytes().to_vec() } else { std::fs::read(&p).unwrap() };
+            assert_eq!(bytes, blob, "{path}");
+            if f[0] == "100755" { assert!(std::fs::metadata(&p).unwrap().permissions().mode() & 0o111 != 0); }
+        }
+        // Nothing beyond the tree.
+        let found = Command::new("find").args([".", "-type", "f", "-o", "-type", "l"]).current_dir(&dir).output().unwrap().stdout;
+        assert_eq!(String::from_utf8_lossy(&found).lines().count(), 6);
+        // A candidate's tests over other code: only the paths asked for.
+        let only = d.join("only");
+        std::fs::create_dir_all(&only).unwrap();
+        extract(&d, "HEAD", &["tests/"], &only).unwrap();
+        assert!(only.join("tests/trunk.rs").exists() && !only.join("src").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     use super::*;
 
     #[test]
@@ -1616,6 +1716,13 @@ mod tests {
         assert_eq!(parse_cue("00:01:02.345"), Some(62_345));
         assert_eq!(parse_cue("01:00:00.000"), Some(3_600_000));
         assert_eq!(parse_cue("nope"), None);
+    }
+
+    #[test]
+    fn the_build_configuration_a_check_reads_is_protected() {
+        let m = Manifest { config: config(), root: PathBuf::from("/nonexistent") };
+        let c: Vec<String> = checks(&m).iter().map(|p| p.iter().collect()).collect();
+        assert_eq!(c, vec!["checks/", ".cargo/", "build.rs"]);
     }
 
     fn config() -> Config {
