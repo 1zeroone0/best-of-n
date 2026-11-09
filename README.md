@@ -51,6 +51,24 @@ user `agent`, which can read the checks and write only its own working
 directory. Every search's record goes to a private git remote of its own,
 never this repository.
 
+## What is proven, and what is trusted
+
+- **Proven, by Verus:** every gate returns exactly what its spec predicate says
+  (`ensures r == …`), and the spec's invariants hold after every transition: every
+  commit bon puts on trunk is a selected, uncontradicted candidate or a test that
+  showed a forbidden behavior, and nothing spends past its limit. Specs and proofs
+  are erased; the binary runs only the code they were proved about.
+- **Trusted, not proven:** what bon observes: whether the tests and Verus accepted a
+  candidate, what git says changed, what the harnesses cost; plus Rust's standard
+  library, git, the toolchain, and Verus and Z3 themselves. It is listed in
+  `.bon/sbom.json`, and no search may change it.
+- **Next to Rust's types:** types keep a commit from passing as a path; Verus proves
+  what a type cannot say, such as "this is the one candidate the spec selects".
+- **Next to Lean:** Lean checks a proof term in a small kernel, about a model of the
+  program; Verus proves the Rust that runs, trusting an SMT solver to do it.
+
+`bon spec` shows each gate's contract as written and everything that reaches it.
+
 ## Where things are
 
 | | |

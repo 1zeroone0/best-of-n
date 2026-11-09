@@ -364,6 +364,12 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
             let mut kinds: Vec<(String, usize)> = Vec::new();
             for g in p.groups.iter().filter(|g| g.outcome == "pushed") { match kinds.iter_mut().find(|(k, _)| *k == g.kind) { Some(e) => e.1 += 1, None => kinds.push((g.kind.clone(), 1)) } }
             out.push(line("pushes", vec![Span::styled(format!("{}", t.pushes), pal.strong()), Span::styled(format!("   {}", kinds.iter().map(|(k, n)| format!("{k} {n}")).collect::<Vec<_>>().join(" · ")), pal.muted())]));
+            // Spec strength, measured by search: searches whose verified candidates all printed the same.
+            let measured: Vec<usize> = p.processes.iter().flat_map(|b| &b.searches).filter(|s| s.kind != "counterexample" && s.verified >= 2).map(|s| groups(s).len()).collect();
+            if !measured.is_empty() {
+                let pinned = measured.iter().filter(|n| **n == 1).count();
+                out.push(line("spec strength", vec![Span::styled(format!("{pinned} of {}", measured.len()), pal.strong()), Span::styled(" searches had one output: the spec pinned the behavior down", pal.muted())]));
+            }
             out.push(Row::text(Line::default()));
             out.push(header("trunk"));
             let repo = &p.repo;
@@ -436,6 +442,8 @@ fn detail(app: &App, width: u16) -> Text<'static> {
                     // Fit the pane: duration and cost right-aligned at its edge.
                     let what = format!("{} ", fit(&format!("search {}  {}", s.search, s.kind), 24));
                     let how_w = (width as usize).saturating_sub(4 + 25 + 5 + 9).max(10);
+                    // Spec strength, measured: how many distinct agree outputs the verified candidates had.
+                    let outputs = (s.kind != "counterexample" && s.verified > 0).then(|| { let n = groups(s).len(); format!("{n} output{}", if n == 1 { "" } else { "s" }) });
                     let how = fit(&format!("{} → {} verified{}", s.width.max(s.returned), s.verified, s.selected.map_or(String::new(), |i| format!(" → #{i}"))), how_w);
                     t.push(Line::from(vec![
                         Span::styled("  ● ", pal.tone(stone)),
@@ -444,7 +452,7 @@ fn detail(app: &App, width: u16) -> Text<'static> {
                         Span::styled(format!("{:>5}", s.seconds.map_or(String::new(), took)), pal.faint()),
                         Span::styled(format!("{:>9}", s.cost.map_or(String::new(), |c| money(Some(c)))), pal.ink()),
                     ]));
-                    let facts: Vec<String> = [(!s.params.base.is_empty()).then(|| format!("base {}", short(&s.params.base))), s.params.limit.map(|l| format!("limit {}", money(Some(l)))), (!kernel.is_empty()).then(|| kernel.to_string())].into_iter().flatten().collect();
+                    let facts: Vec<String> = [outputs, (!s.params.base.is_empty()).then(|| format!("base {}", short(&s.params.base))), s.params.limit.map(|l| format!("limit {}", money(Some(l)))), (!kernel.is_empty()).then(|| kernel.to_string())].into_iter().flatten().collect();
                     if !facts.is_empty() { t.push(Line::from(Span::styled(format!("    {}", facts.join(" · ")), pal.faint()))); }
                     if !s.params.authority.is_empty() { t.extend(hanging(&format!("may change {}", s.params.authority), 4, width as usize, pal.faint())); }
                     if let Some(d) = disagreement(s) { t.extend(hanging(&d, 4, width as usize, pal.tone(Tone::Red))); }
@@ -1103,6 +1111,15 @@ mod tests {
         assert_eq!(disagreement(&s("derived", Some(1), Some(2))).as_deref(), Some("the kernel selects #1, the trace recorded #2"));
         assert!(disagreement(&s("derived", Some(1), Some(1))).is_none());
         assert!(disagreement(&s("unreadable", Some(1), Some(2))).is_none());
+    }
+
+    #[test]
+    fn every_search_shows_how_many_outputs_its_verified_candidates_had() {
+        // Spec strength, measured: one output, the spec pinned the behavior down.
+        let s = |outs: &[u64]| -> SearchTrace { serde_json::from_value(serde_json::json!({ "kind": "code",
+            "candidates": outs.iter().enumerate().map(|(i, o)| serde_json::json!({ "index": i, "accepted": true, "verified": true, "out": [o] })).collect::<Vec<_>>() })).unwrap() };
+        assert_eq!(groups(&s(&[7, 7, 7])).len(), 1);
+        assert_eq!(groups(&s(&[7, 8, 7])).len(), 2);
     }
 
     #[test]
