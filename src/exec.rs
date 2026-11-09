@@ -92,6 +92,67 @@ fn under(checks: &Vec<Path>, p: &Path) -> (r: bool)
     false
 }
 
+/// Exact path membership.
+fn contains_path(list: &Vec<Path>, p: &Path) -> (r: bool)
+    ensures r == paths(list@).contains(p@),
+{
+    let mut i = 0;
+    while i < list.len()
+        invariant 0 <= i <= list.len(), forall|j: int| 0 <= j < i ==> list@[j]@ != p@,
+        decreases list.len() - i,
+    {
+        if eq(&list[i].0, &p.0) {
+            assert(list@.map_values(|q: Path| q@)[i as int] == p@);
+            return true;
+        }
+        i += 1;
+    }
+    proof {
+        if paths(list@).contains(p@) {
+            let m = list@.map_values(|q: Path| q@);
+            let j = choose|j: int| 0 <= j < m.len() && m[j] == p@;
+            assert(list@[j]@ == p@);
+        }
+    }
+    false
+}
+
+/// A counterexample changes exactly one new path.
+fn one_added(c: &Candidate) -> (r: bool)
+    ensures r == (exists|p: spec::Path| c@.changed == set![p] && c@.added.contains(p)),
+{
+    if c.changed.len() == 0 {
+        assert(paths(c.changed@) =~= Set::empty());
+        assert forall|p: spec::Path| c@.changed != set![p] by { assert(set![p].contains(p)); }
+        return false;
+    }
+    let p = &c.changed[0];
+    assert(c.changed@.map_values(|q: Path| q@)[0] == p@);
+    assert(c@.changed.contains(p@));
+    if !contains_path(&c.added, p) { return false; }
+    let mut i = 1;
+    while i < c.changed.len()
+        invariant 1 <= i <= c.changed.len(), c@.added.contains(p@), c@.changed.contains(p@),
+            forall|j: int| 0 <= j < i ==> c.changed@[j]@ == p@,
+        decreases c.changed.len() - i,
+    {
+        if !eq(&c.changed[i].0, &p.0) {
+            assert(c.changed@.map_values(|q: Path| q@)[i as int] == c.changed@[i as int]@);
+            assert(c@.changed.contains(c.changed@[i as int]@));
+            return false;
+        }
+        i += 1;
+    }
+    assert(c@.changed =~= set![p@]) by {
+        assert forall|q: spec::Path| c@.changed.contains(q) implies q == p@ by {
+            let m = c.changed@.map_values(|q: Path| q@);
+            let j = choose|j: int| 0 <= j < m.len() && m[j] == q;
+            assert(c.changed@[j]@ == p@);
+        }
+    }
+    true
+}
+
 /// bon's directory, as text.
 fn bon_path() -> (r: Vec<char>)
     ensures r@ == spec::bon_path().0,
@@ -120,7 +181,8 @@ fn authority_contains(kind: &Kind, checks: &Vec<Path>, tests: &Vec<Path>, truste
             assert(q@ =~= spec::queue_path().0);
             eq(&p.0, &q)
         }
-        Kind::Code { .. } | Kind::Foil { .. } => !protected(checks, trusted, p) && !under(tests, p),
+        Kind::Code { .. } => !protected(checks, trusted, p) && !under(tests, p),
+        Kind::Foil { changed, .. } => !protected(checks, trusted, p) && !under(tests, p) && contains_path(changed, p),
         Kind::Compaction { .. } => !protected(checks, trusted, p),
         Kind::Counterexample { .. } => !protected(checks, trusted, p) && under(tests, p),
     }
@@ -131,7 +193,9 @@ pub fn verified(s: &Search, c: &Candidate) -> (r: bool)
 {
     if !c.accepted || (!c.proved && !matches!(&s.kind, Kind::Counterexample { .. })) { return false; }
     match &s.kind {
-        Kind::Compaction { .. } => { if !c.rejects_counterexamples { return false; } },
+        Kind::Compaction { .. } => { if !c.rejects_counterexamples || !c.measured { return false; } },
+        Kind::Code { .. } => { if !c.measured { return false; } },
+        Kind::Counterexample { .. } => { if !one_added(c) { return false; } },
         _ => {},
     }
     changed_within_authority(s, c)
@@ -201,7 +265,11 @@ pub fn verified_each(s: &Search) -> (v: Vec<bool>)
 fn eq_out(a: &Vec<Hash>, b: &Vec<Hash>) -> (r: bool)
     ensures r == (hashes(a@) == hashes(b@)),
 {
-    if a.len() != b.len() { return false; }
+    if a.len() != b.len() {
+        assert(hashes(a@).len() == a.len());
+        assert(hashes(b@).len() == b.len());
+        return false;
+    }
     let mut i = 0;
     while i < a.len()
         invariant a.len() == b.len(), 0 <= i <= a.len(),
@@ -465,10 +533,7 @@ fn splits(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
     match &t.kind {
         Kind::Compaction { .. } => {
             match accepts_on(c, None) {
-                None => {
-                    assert(spec::member(tv, -1));
-                    return true;
-                }
+                None => {}
                 Some(b) => { value = Some(b); proof { w = -1; } }
             }
         }
@@ -479,18 +544,14 @@ fn splits(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
         invariant
             tv == t@, tp == c@.accepts, vt.len() == t.n, 0 <= j <= vt.len(),
             forall|m: int| 0 <= m < t.n ==> vt[m] == spec::verified_at(tv, m),
-            value is None ==> !(tv.kind is Compaction) && forall|m: int| 0 <= m < j ==> !vt[m],
-            value matches Some(v) ==> forall|m: int| spec::member(tv, m) && m < j ==>
-                tp.contains_key(m) && tp[m] == v,
+            value is None ==> forall|m: int| spec::member(tv, m) && m < j ==> !tp.contains_key(m),
+            value matches Some(v) ==> forall|m: int| spec::member(tv, m) && m < j && tp.contains_key(m) ==> tp[m] == v,
             value matches Some(v) ==> spec::member(tv, w) && w < j && tp.contains_key(w) && tp[w] == v,
         decreases vt.len() - j,
     {
         if vt[j] {
             match accepts_on(c, Some(j)) {
-                None => {
-                    assert(spec::member(tv, j as int));
-                    return true;
-                }
+                None => {}
                 Some(b) => {
                     match value {
                         Some(v) => {
@@ -510,8 +571,8 @@ fn splits(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
         j += 1;
     }
     proof {
-        assert forall|j1: int, j2: int| spec::member(tv, j1) && spec::member(tv, j2) implies
-            tp.contains_key(j1) && tp.contains_key(j2) && tp[j1] == tp[j2] by {
+        assert forall|j1: int, j2: int| spec::member(tv, j1) && spec::member(tv, j2) && tp.contains_key(j1) && tp.contains_key(j2) implies
+            tp[j1] == tp[j2] by {
             assert(j1 < t.n && j2 < t.n);
         }
     }
@@ -552,6 +613,36 @@ fn rejects_every(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
     true
 }
 
+/// A result exists for every tested member.
+fn judges(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
+    requires t.results.len() == t.n, vt.len() == t.n,
+        forall|j: int| 0 <= j < t.n ==> vt[j] == spec::verified_at(t@, j),
+    ensures r == spec::judges(c@, t@),
+{
+    if matches!(&t.kind, Kind::Compaction { .. }) && accepts_on(c, None).is_none() {
+        assert(spec::member(t@, -1));
+        return false;
+    }
+    let mut j = 0;
+    while j < vt.len()
+        invariant t.results.len() == t.n, vt.len() == t.n, 0 <= j <= vt.len(),
+            forall|m: int| 0 <= m < t.n ==> vt[m] == spec::verified_at(t@, m),
+            t@.kind is Compaction ==> c@.accepts.contains_key(-1),
+            forall|m: int| 0 <= m < j && vt[m] ==> c@.accepts.contains_key(m),
+        decreases vt.len() - j,
+    {
+        if vt[j] && accepts_on(c, Some(j)).is_none() {
+            assert(spec::member(t@, j as int));
+            return false;
+        }
+        j += 1;
+    }
+    assert forall|m: int| spec::member(t@, m) implies c@.accepts.contains_key(m) by {
+        if m != -1 { assert(0 <= m < t.n); }
+    }
+    true
+}
+
 #[verifier::rlimit(100)]
 pub fn not_found(x: &Search, t: &Search, f: &Search) -> (r: bool)
     requires x.results.len() == x.n, t.results.len() == t.n, f.results.len() == f.n,
@@ -574,16 +665,16 @@ pub fn not_found(x: &Search, t: &Search, f: &Search) -> (r: bool)
             forall|m: int| 0 <= m < x.n ==> vx[m] == spec::verified_at(xv, m),
             forall|m: int| 0 <= m < t.n ==> vt[m] == spec::verified_at(t@, m),
             spec::complete(xv), spec::complete(f@), f.results.len() == f.n, count <= 2,
-            count == 0 ==> forall|m: int| 0 <= m < i ==> !(vx[m] && spec::discriminates(spec::at(xv, m), f@)),
-            count == 1 ==> exists|a: int| 0 <= a < i && vx[a] && spec::discriminates(spec::at(xv, a), f@)
-                && forall|b: int| 0 <= b < i && vx[b] && spec::discriminates(spec::at(xv, b), f@) ==> a == b,
-            count == 2 ==> exists|a: int, b: int| 0 <= a < i && 0 <= b < i && a != b && vx[a] && spec::discriminates(spec::at(xv, a), f@) && vx[b] && spec::discriminates(spec::at(xv, b), f@),
+            count == 0 ==> forall|m: int| 0 <= m < i ==> !(vx[m] && spec::judges(spec::at(xv, m), t@) && spec::discriminates(spec::at(xv, m), f@)),
+            count == 1 ==> exists|a: int| 0 <= a < i && vx[a] && spec::judges(spec::at(xv, a), t@) && spec::discriminates(spec::at(xv, a), f@)
+                && forall|b: int| 0 <= b < i && vx[b] && spec::judges(spec::at(xv, b), t@) && spec::discriminates(spec::at(xv, b), f@) ==> a == b,
+            count == 2 ==> exists|a: int, b: int| 0 <= a < i && 0 <= b < i && a != b && vx[a] && spec::judges(spec::at(xv, a), t@) && spec::discriminates(spec::at(xv, a), f@) && vx[b] && spec::judges(spec::at(xv, b), t@) && spec::discriminates(spec::at(xv, b), f@),
             forall|m: int| 0 <= m < i && spec::verified_at(xv, m) ==> !spec::splits(spec::at(xv, m), t@) && !spec::rejects_every(spec::at(xv, m), t@),
         decreases vx.len() - i,
     {
         if vx[i] {
             let c = candidate(x, i);
-            if discriminates(c, f) && count < 2 { count += 1; }
+            if judges(t, &vt, c) && discriminates(c, f) && count < 2 { count += 1; }
             if splits(t, &vt, c) || rejects_every(t, &vt, c) {
                 assert(spec::verified_at(xv, i as int));
                 return false;

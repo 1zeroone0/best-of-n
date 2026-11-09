@@ -85,7 +85,7 @@ fn search(
         old(t).spent.value() == *old(spent) as nat,
         old(t).reserved.value() == 0,
         start@ == match kind@ {
-            spec::Kind::Foil { goal } => spec::at(old(t).searches.value()[goal.search], goal.index).commit,
+            spec::Kind::Foil { goal, .. } => spec::at(old(t).searches.value()[goal.search], goal.index).commit,
             _ => old(t).trunk.value().last(),
         },
         kind@ matches spec::Kind::Code { goal } ==> goal == old(t).trunk.value().last(),
@@ -94,10 +94,11 @@ fn search(
             0 <= p.search < old(t).searches.value().len()
             && spec::selected(old(t).searches.value()[p.search], p.index)
             && old(t).searches.value()[p.search].base == old(t).trunk.value().last(),
-        kind@ matches spec::Kind::Foil { goal: p } ==>
+        kind@ matches spec::Kind::Foil { goal: p, changed } ==>
             0 <= p.search < old(t).searches.value().len()
             && spec::selected(old(t).searches.value()[p.search], p.index)
-            && old(t).searches.value()[p.search].base == old(t).trunk.value().last(),
+            && old(t).searches.value()[p.search].base == old(t).trunk.value().last()
+            && changed == spec::at(old(t).searches.value()[p.search], p.index).changed,
     ensures
         final(t).wf(),
         final(t).instance == old(t).instance,
@@ -256,6 +257,8 @@ fn search(
 #[verifier::rlimit(100)]
 #[verifier::spinoff_prover]
 pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
+    hide(spec::verified);
+    hide(spec::authority);
     hide(spec::reason);
     hide(spec::blocked);
     hide(spec::selected);
@@ -331,7 +334,7 @@ pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
                 assert(spec::verified_at(s0@, i as int)) by { reveal(spec::selected); }
                 trusted::record_selected(&m, i);
                 let ghost before1 = t.searches.value();
-                let sf = search(&m, index + 1, a, Kind::Foil { goal: AgentProcess { search: index, index: i } },
+                let sf = search(&m, index + 1, a, Kind::Foil { goal: AgentProcess { search: index, index: i }, changed: clone_paths(&candidate(&s0, i).changed) },
                                 Commit(candidate(&s0, i).commit.0.clone()), &checks, &tests, &trusted, l, limit, &mut spent, Some(&s0), None,
                                 Ghost(observed), Tracked(&mut t))?;
                 proof {
