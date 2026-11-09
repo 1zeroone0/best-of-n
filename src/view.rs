@@ -3,6 +3,7 @@
 //! it decides nothing and stores nothing. The interface is TypeScript in
 //! view/src, compiled into view/dist and embedded here.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -258,7 +259,9 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
     let mut last_push: Option<Value> = None;
     let (mut earliest, mut latest) = (u64::MAX, 0u64);
     for (pid, dir) in pids.into_iter() {
-        let running = Command::new("ps").args(["-p", &pid.to_string()]).stdout(std::process::Stdio::null())
+        // This bon process, reading its own traces after a push (for cost.toml),
+        // has ended its work: only another live process is running.
+        let running = pid != u64::from(std::process::id()) && Command::new("ps").args(["-p", &pid.to_string()]).stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
         let transitions: Vec<String> = std::fs::read_to_string(dir.join("transitions")).unwrap_or_default()
             .lines().map(String::from).collect();
@@ -480,12 +483,21 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
         }
     }
     groups.reverse();
-    // A push's cost is everything run to reach it: every bon process in its
-    // effort, the ones that exited or were blocked first included.
+    // A push's cost is everything run to reach it: every bon process of its
+    // kind since the last push of that kind, whatever ran in between, the ones
+    // that exited or were blocked first included.
+    let mut since: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    let mut reached: Vec<f64> = vec![0.0; groups.len()];
+    for (k, g) in groups.iter().enumerate().rev() {
+        let kind = g["kind"].as_str().unwrap_or_default().to_string();
+        let total = since.entry(kind).or_insert(0.0);
+        *total += g["cost"].as_f64().unwrap_or(0.0);
+        if g["outcome"] == "pushed" { reached[k] = *total; *total = 0.0; }
+    }
     let mut push_costs = Vec::new();
-    for g in groups.iter_mut() {
+    for (k, g) in groups.iter_mut().enumerate() {
         if g["outcome"] == "pushed" && g["push"].is_object() {
-            let cost = g["cost"].as_f64().unwrap_or(0.0);
+            let cost = reached[k];
             // The foil and counterexample searches that found none on the selection;
             // everything before them is what reaching the selection cost.
             let ce: f64 = g["processes"][0]["searches"].as_array().map_or(0.0, |x| x.iter().rev()
@@ -527,6 +539,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
             "per_push": (!push_costs.is_empty()).then(|| push_costs.iter().sum::<f64>() / push_costs.len() as f64),
             "pushes": push_costs.len(),
             "verified": verified_all, "candidates": candidates_all,
+            "attempts": attempts(&processes), "ended": ended(&processes), "reasons": reasons(&processes),
         },
         "processes": processes,
         // The range shown, and the range there is, so a page can offer it.
@@ -558,6 +571,93 @@ fn sbom(root: &Path) -> Value {
     }
 }
 
+/// A process's attempts: its code and compaction searches, by width.
+fn main_searches(p: &Value) -> Vec<&Value> {
+    p["searches"].as_array().map_or(Vec::new(), |s| s.iter().filter(|s| matches!(s["kind"].as_str(), Some("code" | "compaction"))).collect())
+}
+
+/// Attempts by kind and width. An attempt counts once it ran to an end: a
+/// later attempt followed it, or its bon process pushed or blocked.
+fn attempts(processes: &[Value]) -> Vec<Value> {
+    let mut by: BTreeMap<(String, u64), (u64, u64)> = BTreeMap::new();
+    for p in processes {
+        let outcome = p["outcome"].as_str().unwrap_or_default();
+        let main = main_searches(p);
+        for (k, s) in main.iter().enumerate() {
+            let last = k + 1 == main.len();
+            if last && !matches!(outcome, "pushed" | "blocked") { continue; }
+            let e = by.entry((s["kind"].as_str().unwrap_or_default().to_string(), s["width"].as_u64().unwrap_or(0))).or_default();
+            e.0 += 1;
+            if last && outcome == "pushed" { e.1 += 1; }
+        }
+    }
+    by.into_iter().map(|((kind, width), (attempts, pushed))| json!({ "kind": kind, "width": width, "attempts": attempts, "pushed": pushed })).collect()
+}
+
+/// How bon processes ended, by kind, and the share (1-p)^k predicts blocked.
+fn ended(processes: &[Value]) -> Vec<Value> {
+    let mut by: BTreeMap<String, (u64, u64, u64, Vec<u64>)> = BTreeMap::new();
+    for p in processes {
+        let main = main_searches(p);
+        let Some(kind) = main.first().and_then(|s| s["kind"].as_str()) else { continue };
+        let e = by.entry(kind.to_string()).or_default();
+        match p["outcome"].as_str() {
+            Some("pushed") => { e.0 += 1; e.3.push(main.len() as u64); }
+            Some("blocked") => { e.1 += 1; e.3.push(main.len() as u64); }
+            Some("running") => {}
+            _ => e.2 += 1,
+        }
+    }
+    let rows = attempts(processes);
+    by.into_iter().map(|(kind, (pushed, blocked, exited, ks))| {
+        let (a, s) = rows.iter().filter(|r| r["kind"] == kind.as_str())
+            .fold((0, 0), |(a, s), r| (a + r["attempts"].as_u64().unwrap_or(0), s + r["pushed"].as_u64().unwrap_or(0)));
+        let p = (a > 0).then(|| s as f64 / a as f64);
+        let expected = p.filter(|_| !ks.is_empty()).map(|p| ks.iter().map(|k| (1.0 - p).powi(*k as i32)).sum::<f64>() / ks.len() as f64);
+        json!({ "kind": kind, "pushed": pushed, "blocked": blocked, "exited": exited, "expected": expected })
+    }).collect()
+}
+
+/// How many attempts each reason blocked: the word after "blocked: " in the
+/// trace, or "unrecorded" for a trace from before reasons were words.
+fn reasons(processes: &[Value]) -> Vec<Value> {
+    let mut by: BTreeMap<String, u64> = BTreeMap::new();
+    for p in processes {
+        for t in p["transitions"].as_array().into_iter().flatten().filter_map(|t| t.as_str()) {
+            let Some(rest) = t.strip_prefix("blocked: ") else { continue };
+            let word = rest.split_once(": ").map(|(w, _)| w).filter(|w| w.chars().all(|c| c.is_ascii_lowercase() || c == '_')).unwrap_or("unrecorded");
+            *by.entry(word.to_string()).or_default() += 1;
+        }
+    }
+    by.into_iter().map(|(reason, count)| json!({ "reason": reason, "count": count })).collect()
+}
+
+/// Attempts, how bon processes ended, and why attempts blocked: measured, each
+/// with the count it is measured over.
+pub fn outcome_lines(t: &crate::projection::Totals) -> Vec<String> {
+    let mut lines = Vec::new();
+    for e in &t.ended {
+        let rows: Vec<_> = t.attempts.iter().filter(|r| r.kind == e.kind).collect();
+        let (a, s) = rows.iter().fold((0, 0), |(a, s), r| (a + r.attempts, s + r.pushed));
+        let widths = rows.iter().map(|r| format!("width {}: {} of {}", r.width, r.pushed, r.attempts)).collect::<Vec<_>>().join(", ");
+        let p = if a > 0 { format!(", p {:.2}", s as f64 / a as f64) } else { String::new() };
+        lines.push(format!("{}: {s} of {a} attempts pushed{p} ({widths})", e.kind));
+        let concluded = e.pushed + e.blocked;
+        let measured = if concluded > 0 { format!("{:.0}%", 100.0 * e.blocked as f64 / concluded as f64) } else { "—".into() };
+        let expected = e.expected.map_or("—".into(), |x| format!("{:.0}%", 100.0 * x));
+        lines.push(format!("  bon processes: {} pushed, {} blocked, {} exited; blocked {measured} of {concluded}, (1-p)^k predicts {expected}",
+            e.pushed, e.blocked, e.exited));
+    }
+    let reasons = t.reasons.iter().map(|r| format!("{} {}", r.reason, r.count)).collect::<Vec<_>>();
+    if !reasons.is_empty() { lines.push(format!("blocked by: {}", reasons.join(", "))); }
+    lines
+}
+
+fn outcomes(t: &Value) -> String {
+    let lines = serde_json::from_value::<crate::projection::Totals>(t.clone()).map(|t| outcome_lines(&t)).unwrap_or_default();
+    if lines.is_empty() { String::new() } else { lines.join("\n") + "\n\n" }
+}
+
 /// The projection as text, for `bon`.
 pub fn text(s: &Value) -> String {
     if s["configured"] != true { return "no .bon/bon.toml at trunk's head: run bon init\n".into(); }
@@ -568,6 +668,7 @@ pub fn text(s: &Value) -> String {
     out.push_str(&format!("{} · trunk {} {} · {} cost · {} per verified candidate · {} per push\n\n",
         r["name"].as_str().unwrap_or(""), r["trunk"].as_str().unwrap_or(""), &r["head"].as_str().unwrap_or("")[..7.min(r["head"].as_str().unwrap_or("").len())],
         opt(&t["cost"]), opt(&t["per_verified_candidate"]), opt(&t["per_push"])));
+    out.push_str(&outcomes(t));
     let f = &s["filter"];
     if !f["since"].is_null() || !f["until"].is_null() || !f["find"].is_null() {
         out.push_str(&format!("only bon processes{}{}{}\n\n",

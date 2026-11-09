@@ -77,6 +77,47 @@ pub struct Totals {
     pub pushes: u64,
     pub verified: u64,
     pub candidates: u64,
+    /// Attempts by kind and width, and how many of them pushed.
+    pub attempts: Vec<Attempts>,
+    /// How bon processes ended, by kind.
+    pub ended: Vec<Ended>,
+    /// How many attempts each reason blocked, by its word in the trace.
+    pub reasons: Vec<Reason>,
+}
+
+/// Attempts of one kind at one width: how many ran to an end, and how many
+/// of those pushed. An attempt is a code or compaction search with the
+/// counterexample (and foil) search on its selection.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Attempts {
+    pub kind: String,
+    pub width: u64,
+    pub attempts: u64,
+    pub pushed: u64,
+}
+
+/// How the bon processes of one kind ended. Exited: stopped short of a final
+/// transition (killed, interrupted, an error), which is not a block. `expected`
+/// is the share (1-p)^k predicts would end blocked, p being this kind's
+/// measured success per attempt and k the attempts each process made.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Ended {
+    pub kind: String,
+    pub pushed: u64,
+    pub blocked: u64,
+    pub exited: u64,
+    pub expected: Option<f64>,
+}
+
+/// A reason a search blocked, and how many attempts it blocked. Traces from
+/// before reasons were recorded count under "unrecorded".
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Reason {
+    pub reason: String,
+    pub count: u64,
 }
 
 /// Where a goal came from: the goal, the commit and its subject.

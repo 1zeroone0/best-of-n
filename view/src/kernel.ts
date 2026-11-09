@@ -31,7 +31,13 @@ export interface LastPush { commit: string | null; time: number | null }
 /** Commits on trunk since bon last pushed, and who made them. */
 export interface SincePush { commits: number; authors: Array<string> }
 /** What everything in range cost, and what came of it. */
-export interface Totals { cost: number; generation: number; time_cost: number; pushed: number; not_pushed: number; in_flight: number; rate: number | null; per_verified_candidate: number | null; per_push: number | null; pushes: number; verified: number; candidates: number }
+export interface Totals { cost: number; generation: number; time_cost: number; pushed: number; not_pushed: number; in_flight: number; rate: number | null; per_verified_candidate: number | null; per_push: number | null; pushes: number; verified: number; candidates: number; attempts: Array<Attempts>; ended: Array<Ended>; reasons: Array<Reason> }
+/** Attempts of one kind at one width: how many ran to an end, and how many of those pushed. An attempt is a code or compaction search with the counterexample (and foil) search on its selection. */
+export interface Attempts { kind: string; width: number; attempts: number; pushed: number }
+/** How the bon processes of one kind ended. Exited: stopped short of a final transition (killed, interrupted, an error), which is not a block. `expected` is the share (1-p)^k predicts would end blocked, p being this kind's measured success per attempt and k the attempts each process made. */
+export interface Ended { kind: string; pushed: number; blocked: number; exited: number; expected: number | null }
+/** A reason a search blocked, and how many attempts it blocked. Traces from before reasons were recorded count under "unrecorded". */
+export interface Reason { reason: string; count: number }
 /** Where a goal came from: the goal, the commit and its subject. */
 export interface About { goal: string; from: string; subject: string }
 /** What a push cost, and the commit it pushed. */

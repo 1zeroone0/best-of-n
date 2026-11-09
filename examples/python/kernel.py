@@ -148,6 +148,38 @@ class Totals(TypedDict):
     pushes: int
     verified: int
     candidates: int
+    # Attempts by kind and width, and how many of them pushed.
+    attempts: list[Attempts]
+    # How bon processes ended, by kind.
+    ended: list[Ended]
+    # How many attempts each reason blocked, by its word in the trace.
+    reasons: list[Reason]
+
+# Attempts of one kind at one width: how many ran to an end, and how many
+# of those pushed. An attempt is a code or compaction search with the
+# counterexample (and foil) search on its selection.
+class Attempts(TypedDict):
+    kind: str
+    width: int
+    attempts: int
+    pushed: int
+
+# How the bon processes of one kind ended. Exited: stopped short of a final
+# transition (killed, interrupted, an error), which is not a block. `expected`
+# is the share (1-p)^k predicts would end blocked, p being this kind's
+# measured success per attempt and k the attempts each process made.
+class Ended(TypedDict):
+    kind: str
+    pushed: int
+    blocked: int
+    exited: int
+    expected: float | None
+
+# A reason a search blocked, and how many attempts it blocked. Traces from
+# before reasons were recorded count under "unrecorded".
+class Reason(TypedDict):
+    reason: str
+    count: int
 
 # Where a goal came from: the goal, the commit and its subject.
 About = TypedDict("About", {"goal": str, "from": str, "subject": str})

@@ -103,7 +103,8 @@ The repository holds the words; this skill does not repeat them.
   transitions and invariants are the nouns. What is in it is done.
 - `.bon/queue.tsv`: `id<TAB>intent`, what was asked for and is not in the
   spec yet. Writing an intent into the spec deletes its line. Ids are never
-  reused.
+  reused: a new id is one more than any the queue has held (`bon check` fails
+  on a retired id and names the next).
 - `.bon/bon.toml`, the manifest: checks (`paths`, `test`, `verify`, `agree`,
   `rank`), harnesses and width lists `n`, limits, `rate`, `[counterexample]`
   (`path`, `build`, `run`, `tests`, `visible`), trunk.
@@ -248,7 +249,9 @@ search command to the private remote the manifest names in `traces`.
   `accepted`, `proved`, `changed`, `diff`, `rank`, `out`, `accepts`,
   `rejects_counterexamples`).
 - `.bon/traces/<pid>/pushes.jsonl`: each push's `commit`, `searches`,
-  `generation_dollars`, `time_dollars` and `cost`: what it took to reach trunk.
+  `generation_dollars`, `time_dollars` and `process_cost`: what this bon
+  process spent. A push's cost (every bon process of its kind since the last
+  push of that kind) is the view's, in `.bon/cost.toml` and `bon`.
 - `.bon/traces/counterexamples.jsonl`: each counterexample's `test` on trunk
   and its `evidence`; a candidate kept as evidence is
   `.bon/traces/<pid>/<search>/<index>/candidate.bundle`.

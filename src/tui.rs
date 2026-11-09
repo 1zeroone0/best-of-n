@@ -219,6 +219,13 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
     let header = |t: &str| Row::text(Line::from(Span::styled(format!(" {t}"), pal.faint().add_modifier(Modifier::BOLD))));
     match app.tab {
         Tab::Traces => {
+            // Attempts and how bon processes ended, measured, above the processes themselves.
+            let lines = view::outcome_lines(&p.totals);
+            if !lines.is_empty() {
+                out.push(header("attempts"));
+                for l in lines { out.push(Row::text(Line::from(Span::styled(format!(" {l}"), pal.muted())))); }
+                out.push(Row::text(Line::default()));
+            }
             let today = day(p.repo.now, app.off);
             let mut last_day = None;
             let mut groups: Vec<&GoalTrace> = p.groups.iter().collect();

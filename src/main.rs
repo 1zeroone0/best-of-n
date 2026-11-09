@@ -201,6 +201,12 @@ fn check(root: &str) -> Result<(), String> {
     let commit = snapshot(r)?;
     let m = best_of_n::trusted::manifest(root, &commit.chars().collect())?;
     let manifest: toml::Value = toml::from_str(&git(r, &["show", &format!("{commit}:.bon/bon.toml")])?).map_err(|e| e.to_string())?;
+    let queue = std::fs::read_to_string(r.join(".bon/queue.tsv")).unwrap_or_default();
+    let reused = reused_ids(&git(r, &["log", "-p", "--reverse", "--format=commit %h", "--", ".bon/queue.tsv"]).unwrap_or_default(), &queue);
+    if !reused.is_empty() {
+        for (id, commit) in &reused { println!("  FAIL .bon/queue.tsv: id {id} was retired in {commit}; ids are never reused"); }
+        return Err(format!("renumber from {}: one more than any id the queue has held", next_id(r)));
+    }
     println!("checking the working tree ({}) as agent, the way candidates are judged", &commit[..8]);
     let results = best_of_n::trusted::check(&m, &commit.chars().collect())?;
     let mut failed = false;
@@ -514,6 +520,29 @@ fn queue(root: &str) -> Result<(), String> {
 }
 
 /// One more than the largest id the queue has ever held, in any commit.
+/// The ids in `queue` that an earlier commit retired: removed with no line of
+/// the same id added in that commit (an edit keeps its id; a retirement does
+/// not). `log` is `git log -p --reverse --format="commit %h" -- .bon/queue.tsv`.
+fn reused_ids(log: &str, queue: &str) -> Vec<(u64, String)> {
+    let id = |l: &str| l.split('\t').next()?.parse::<u64>().ok();
+    let mut retired: std::collections::HashMap<u64, String> = std::collections::HashMap::new();
+    let mut flush = |commit: &str, removed: &mut Vec<u64>, added: &mut Vec<u64>| {
+        for r in removed.drain(..) { if !added.contains(&r) { retired.insert(r, commit.to_string()); } }
+        added.clear();
+    };
+    let (mut commit, mut removed, mut added) = (String::new(), Vec::new(), Vec::new());
+    for l in log.lines() {
+        if let Some(c) = l.strip_prefix("commit ") { flush(&commit, &mut removed, &mut added); commit = c.to_string(); }
+        else if l.starts_with("---") || l.starts_with("+++") { continue; }
+        else if let Some(x) = l.strip_prefix('-').and_then(id) { removed.push(x); }
+        else if let Some(x) = l.strip_prefix('+').and_then(id) { added.push(x); }
+    }
+    flush(&commit, &mut removed, &mut added);
+    let mut out: Vec<(u64, String)> = queue.lines().filter_map(id).filter_map(|i| retired.get(&i).map(|c| (i, c.clone()))).collect();
+    out.sort();
+    out
+}
+
 fn next_id(root: &Path) -> u64 {
     git(root, &["log", "-p", "--format=", "--", ".bon/queue.tsv"]).unwrap_or_default().lines()
         .filter_map(|l| l.trim_start_matches(['+', '-', ' ']).split('\t').next()?.parse::<u64>().ok())
@@ -800,6 +829,16 @@ fn sbom(root: &str, check: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_retired_queue_id_is_never_reused_and_an_edit_keeps_its_id() {
+        // 1 and 2 added; 2 reworded (an edit); 1 written into the spec (retired).
+        let log = "commit a\n+++ b/.bon/queue.tsv\n+1\tone\n+2\ttwo\n\
+                   commit b\n--- a/.bon/queue.tsv\n-2\ttwo\n+2\ttwo, narrowed\n\
+                   commit c\n-1\tone\n";
+        assert!(reused_ids(log, "id\tintent\n2\ttwo, narrowed\n3\tthree\n").is_empty());
+        assert_eq!(reused_ids(log, "id\tintent\n1\tsomething else\n"), vec![(1, "c".to_string())]);
+    }
 
     #[test]
     fn bon_check_says_whose_errors_they_are() {
