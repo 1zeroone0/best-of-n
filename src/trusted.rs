@@ -1258,16 +1258,9 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
     };
     let commit = commit_of(&tree)?;
     let changes = |commit: &str| -> Result<(Vec<Path>, u64), String> {
-        let numstat = git(root, &["diff-tree", "-r", "--numstat", "--no-renames", start, commit])?;
-        let mut changed = Vec::new();
-        let mut diff = 0u64;
-        for l in numstat.lines() {
-            let f: Vec<&str> = l.splitn(3, '\t').collect();
-            if f.len() < 3 { continue; }
-            diff += f[0].parse::<u64>().unwrap_or(1) + f[1].parse::<u64>().unwrap_or(1);
-            changed.push(f[2].chars().collect::<Path>());
-        }
-        Ok((changed, diff))
+        let files = numstat(root, start, commit)?;
+        let diff = files.iter().map(|(a, r, _)| a + r).sum();
+        Ok((files.into_iter().map(|(_, _, p)| p.chars().collect::<Path>()).collect(), diff))
     };
     let (mut changed, mut diff) = changes(&commit)?;
     let mut commit = commit;
@@ -1438,13 +1431,20 @@ fn rejects_every_counterexample(m: &Manifest, commit: &str, build: &std::path::P
     true
 }
 
-/// Lines added and removed from `base` to `commit`, as git counts them.
+/// Each file changed from `base` to `commit`: lines added, lines removed, and
+/// its path as git stores it, never quoted. A binary file counts one line each way.
+fn numstat(root: &std::path::Path, base: &str, commit: &str) -> Result<Vec<(u64, u64, String)>, String> {
+    let out = git(root, &["diff-tree", "-r", "-z", "--numstat", "--no-renames", base, commit])?;
+    Ok(out.split('\0').filter_map(|record| {
+        let f: Vec<&str> = record.splitn(3, '\t').collect();
+        if f.len() < 3 { return None; }
+        Some((f[0].parse().unwrap_or(1), f[1].parse().unwrap_or(1), f[2].to_string()))
+    }).collect())
+}
+
+/// Lines added and removed from `base` to `commit`, as `numstat` counts them.
 pub fn added_removed(root: &std::path::Path, base: &str, commit: &str) -> (u64, u64) {
-    git(root, &["diff", "--numstat", "--no-renames", base, commit]).unwrap_or_default().lines().fold((0, 0), |(a, r), l| {
-        let f: Vec<&str> = l.splitn(3, '\t').collect();
-        if f.len() < 3 { return (a, r); }
-        (a + f[0].parse::<u64>().unwrap_or(0), r + f[1].parse::<u64>().unwrap_or(0))
-    })
+    numstat(root, base, commit).unwrap_or_default().iter().fold((0, 0), |(a, r), (x, y, _)| (a + x, r + y))
 }
 
 /// The paths `commit` adds to `base`, as git stores them (NUL-delimited).
@@ -1586,6 +1586,30 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn changed_paths_are_read_as_git_stores_them() {
+        let d = std::env::temp_dir().join(format!("bon-numstat-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("tests")).unwrap();
+        let g = |args: &[&str]| git(&d, &[&["-c", "user.name=t", "-c", "user.email=t@t"], args].concat()).unwrap();
+        g(&["init", "-q", "-b", "main"]);
+        g(&["commit", "-q", "--allow-empty", "-m", "base"]);
+        let base = g(&["rev-parse", "HEAD"]);
+        std::fs::write(d.join("tests/é.rs"), "a\nb\n").unwrap();
+        std::fs::write(d.join("a\tb.rs"), "c\n").unwrap();
+        std::fs::write(d.join("blob"), [0u8, 1, 2]).unwrap();
+        g(&["add", "-A"]);
+        g(&["commit", "-q", "-m", "files"]);
+        let head = g(&["rev-parse", "HEAD"]);
+        let files = numstat(&d, &base, &head).unwrap();
+        let paths: Vec<&str> = files.iter().map(|(_, _, p)| p.as_str()).collect();
+        assert_eq!(paths, ["a\tb.rs", "blob", "tests/é.rs"]);
+        // A binary file counts one line each way, here and in added_removed.
+        assert_eq!(files.iter().map(|(a, r, _)| (*a, *r)).collect::<Vec<_>>(), [(1, 0), (1, 1), (2, 0)]);
+        assert_eq!(added_removed(&d, &base, &head), (4, 1));
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn cues() {
