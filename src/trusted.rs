@@ -228,10 +228,17 @@ fn as_agent(config: &Config, dir: &std::path::Path, env: &[(&str, String)], argv
     as_agent_on(config, &config.path, dir, env, argv)
 }
 
+/// Whether this process already runs as agent.
+fn is_agent() -> bool {
+    Command::new("id").arg("-un").output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "agent")
+}
+
 /// as_agent, with PATH path.
 fn as_agent_on(config: &Config, path: &[String], dir: &std::path::Path, env: &[(&str, String)], argv: &[String]) -> Command {
-    let mut c = Command::new("sudo");
-    c.args(["-n", "-u", "agent", "env", "-i"]);
+    // Already agent (a candidate's tests run as agent): the same cleared
+    // environment, without sudo, which agent may not use.
+    let mut c = if is_agent() { Command::new("env") } else { let mut c = Command::new("sudo"); c.args(["-n", "-u", "agent", "env"]); c };
+    c.arg("-i");
     c.arg(format!("PATH={}", path.join(":")));
     c.arg(format!("HOME={AGENT_HOME}"));
     c.arg("LANG=en_US.UTF-8");
@@ -273,7 +280,8 @@ fn supervise(mut c: Command, stdin: Option<String>, time: Duration, log: &std::p
         // The command is its own process group, and agent's: agent signals the
         // whole group (sudo, root's, is spared), so nothing it started outlives it.
         let group = format!("-{}", child.id());
-        let signal = |s: &str| { let _ = Command::new("sudo").args(["-n", "-u", "agent", "/bin/kill", s, "--", &group])
+        let signal = |s: &str| { let _ = (if is_agent() { let mut c = Command::new("/bin/kill"); c.args([s, "--", &group]); c }
+                                          else { let mut c = Command::new("sudo"); c.args(["-n", "-u", "agent", "/bin/kill", s, "--", &group]); c })
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status(); };
         signal("-TERM");
         let grace = Instant::now();
