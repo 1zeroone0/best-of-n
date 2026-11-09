@@ -27,7 +27,8 @@ const USAGE: &str = "usage:
   bon sbom [--check]      write .bon/sbom.json, or fail if it differs from this machine
   bon types [--check]     write the types programs are built on, or fail if one is stale
   bon spec [NAME]         the spec's vocabulary and how it reaches the code, or one item
-  bon check               every check on the working tree, as agent, the way candidates are judged";
+  bon check               every check on the working tree, as agent, the way candidates are judged
+  bon cost                write .bon/cost.toml, what reaching trunk cost (bon does after each push)";
 
 /// The commands that grant capabilities.
 const SEARCHES: [&str; 5] = ["code", "compaction", "counterexample", "queue", "background"];
@@ -52,7 +53,12 @@ fn main() {
         if let Err(e) = checked { fail(&e) }
     }
     if SEARCHES.contains(&command) && command != "background" { running(&root); }
+    let before = git(Path::new(&root), &["rev-parse", "HEAD"]).unwrap_or_default();
     let result = dispatch(&root, &args);
+    // A push or a landed test moved trunk: the cost file follows it, as its own commit.
+    if SEARCHES.contains(&command) && result.is_ok() && git(Path::new(&root), &["rev-parse", "HEAD"]).is_ok_and(|h| h != before) {
+        if let Err(e) = record_cost(Path::new(&root)) { eprintln!("bon: .bon/cost.toml not updated: {e}"); }
+    }
     // Only commands that grant capabilities make directories under /tmp/bon, so
     // only they clean up; bon run inside a check (help, sbom) never touches it.
     if SEARCHES.contains(&command) {
@@ -105,6 +111,8 @@ fn dispatch(root: &str, args: &[String]) -> Result<(), String> {
         Some("types") => types::run(&root, args.get(1).map(String::as_str) == Some("--check")),
         Some("spec") => { print!("{}", tui::spec_text(&root, args.get(1).map(String::as_str), 100)?); Ok(()) }
         Some("check") => check(&root),
+        Some("cost") => { let p = projection::read(Path::new(&root), &view::Filter::default())?; let t = cost_toml(&p);
+            std::fs::write(Path::new(&root).join(".bon/cost.toml"), &t).map_err(|e| e.to_string())?; print!("{t}"); Ok(()) }
         Some("help" | "-h" | "--help") => { println!("{USAGE}"); Ok(()) }
         None if tui::wanted() => tui::run(&root, view::Filter::args(args)?),
         None => status(&root, args),
@@ -217,6 +225,40 @@ fn check(root: &str) -> Result<(), String> {
 
 /// Whether trunk's gates differ from the ones this bon was built from.
 fn stale(trunk_gates: &str) -> bool { trunk_gates.trim_end() != include_str!("gates.rs").trim_end() }
+
+/// .bon/cost.toml: the totals at the top of bon's view, always these keys in
+/// this order. Generation stands on its own beside the total, which engineer's
+/// time at the rate otherwise outweighs.
+fn cost_toml(p: &projection::Projection) -> String {
+    let t = &p.totals;
+    let pushed: Vec<&projection::GoalTrace> = p.groups.iter().filter(|g| g.outcome == "pushed").collect();
+    let generation_per_push = (!pushed.is_empty()).then(|| pushed.iter().map(|g| g.generation).sum::<f64>() / pushed.len() as f64);
+    let generation_per_verified = (t.verified > 0).then(|| t.generation / t.verified as f64);
+    let money = |v: Option<f64>| v.map_or("nan".to_string(), |v| format!("{v:.2}"));
+    format!("# What reaching this trunk cost, from bon's traces; bon rewrites it after each push.\n\
+# cost = generation (what the models charged) + time (engineer's, at each search's rate).\n\
+cost = {}\ngeneration = {}\ntime = {}\nper_verified_candidate = {}\nper_push = {}\n\
+generation_per_verified_candidate = {}\ngeneration_per_push = {}\npushes = {}\nverified = {}\ncandidates = {}\n",
+        money(Some(t.cost)), money(Some(t.generation)), money(Some(t.time_cost)), money(t.per_verified_candidate), money(t.per_push),
+        money(generation_per_verified), money(generation_per_push), t.pushes, t.verified, t.candidates)
+}
+
+/// After a push: write .bon/cost.toml, commit it as engineer, and push it to
+/// the remote's trunk the push went to.
+fn record_cost(root: &Path) -> Result<(), String> {
+    let p = projection::read(root, &view::Filter::default())?;
+    let text = cost_toml(&p);
+    std::fs::write(root.join(".bon/cost.toml"), &text).map_err(|e| e.to_string())?;
+    let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(root.join(".bon/bon.toml")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let remote = manifest.get("remote").and_then(|v| v.as_str()).unwrap_or("origin");
+    let trunk = manifest.get("trunk").and_then(|v| v.as_str()).unwrap_or("main");
+    let head = git(root, &["rev-parse", "--short", "HEAD"])?;
+    git(root, &["add", ".bon/cost.toml"])?;
+    if git(root, &["diff", "--cached", "--quiet"]).is_ok() { return Ok(()); }
+    git(root, &["commit", "-q", "-m", &format!("cost: ${:.2} to reach {head}", p.totals.cost), "--", ".bon/cost.toml"])?;
+    git(root, &["push", "-q", remote, &format!("HEAD:{trunk}")])?;
+    Ok(())
+}
 
 /// Mark this repository as having a bon command running, for bon background.
 fn running(root: &str) {
@@ -766,6 +808,19 @@ mod tests {
         let manifest: toml::Value = toml::from_str("[checks]\npaths = [\"src/spec.rs\"]\n[sbom]\ntrusted = [\"src/main.rs\", \"src/view.rs\"]").unwrap();
         assert!(protected(&manifest, "src/main.rs") && protected(&manifest, "src/spec.rs") && protected(&manifest, ".bon/bon.toml"));
         assert!(!protected(&manifest, "src/encoding.rs"));
+    }
+
+    #[test]
+    fn the_cost_file_is_the_view_s_totals_in_a_fixed_order() {
+        let p: projection::Projection = serde_json::from_value(serde_json::json!({
+            "totals": { "cost": 100.0, "generation": 20.0, "time_cost": 80.0, "per_verified_candidate": 2.0, "per_push": 50.0, "pushes": 2, "verified": 50, "candidates": 60 },
+            "groups": [{ "outcome": "pushed", "generation": 8.0 }, { "outcome": "pushed", "generation": 4.0 }, { "outcome": "blocked", "generation": 8.0 }]
+        })).unwrap();
+        let t = cost_toml(&p);
+        let keys: Vec<&str> = t.lines().filter(|l| !l.starts_with('#')).map(|l| l.split(" = ").next().unwrap()).collect();
+        assert_eq!(keys, ["cost", "generation", "time", "per_verified_candidate", "per_push", "generation_per_verified_candidate", "generation_per_push", "pushes", "verified", "candidates"]);
+        assert!(t.contains("generation_per_verified_candidate = 0.40") && t.contains("generation_per_push = 6.00"), "{t}");
+        assert!(toml::from_str::<toml::Value>(&t).is_ok());
     }
 
     #[test]

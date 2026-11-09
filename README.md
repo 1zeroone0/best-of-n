@@ -81,4 +81,5 @@ never this repository.
 | [`src/tui.rs`](src/tui.rs), [`src/projection.rs`](src/projection.rs) | the view, and what it shows as types |
 | [`examples/`](examples/) | programs on the emitted types: Go, Python with PyTorch |
 | [`.bon/`](.bon/) | the manifest, the queue, the SBOM |
+| [`.bon/cost.toml`](.bon/cost.toml) | what reaching this trunk cost, rewritten after each push |
 | [`skills/bon/`](skills/bon/SKILL.md) | how your model runs bon |
