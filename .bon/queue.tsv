@@ -1,9 +1,5 @@
 id	intent
 14	Each trace records, for every agent process, its harness, model, tokens, cost and time, and for every check its time and exit status, so that cost per verified candidate = (Σ_c (g(c) + k(c)) + r·t) / v, with r the rate in bon.toml and t the search's wall time.
-15	A push's cost is everything run to reach it: the generation and time cost of every search of every bon process of its kind since the last push of that kind.
 20	A skill ships with the CLI for the model engineer talks to: how to work at the spec level and when to run bon, read from the bon.toml, queue and spec of the repo it runs in; agent processes never see it.
 27	Background work, compaction and counterexample searches on trunk, runs only on spare capacity, stalest first, staleness being trunk commits since that kind last ran.
 28	Programs may run the kernel's gates compiled in, in any language, with no trusted code beyond their entry points.
-33	A counterexample's test counts toward no counterexample found only when it rejects something: a test that accepts every program shows nothing, as one that rejects every member shows nothing.
-34	bon shows, for each kind, how often an attempt is selected with no counterexample found, and so how often a run of k attempts ends blocked.
-35	bon shows how many searches each reason blocked: fewer than two verified candidates, disagreement, a counterexample found, too few verified tests, trunk moved.
