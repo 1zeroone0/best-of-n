@@ -76,6 +76,11 @@ pub enum Kind {
     /// or compaction search, whose push it clears or blocks; or, when None,
     /// trunk's head. A test that shows the behavior lands on trunk (`land`).
     Counterexample { goal: Option<AgentProcess> },
+    /// The goal is the selected candidate of a code or compaction search:
+    /// candidates change it into a program trunk's tests accept and Verus
+    /// rejects, a foil. A counterexample's test counts toward `not_found` only
+    /// when it rejects a foil. Never pushed.
+    Foil { goal: AgentProcess },
 }
 
 /// One generated change, as trusted code observed it after its agent process exited.
@@ -96,6 +101,9 @@ pub struct Candidate {
     /// commit: the goal search's candidates by index, and trunk's head (or a
     /// compaction's goal) as index -1. (TCB: trusted code ran it)
     pub accepts: Map<int, bool>,
+    /// Counterexample: whether this candidate's test accepts each foil, by its
+    /// index in the foil search. (TCB: trusted code ran it)
+    pub accepts_foils: Map<int, bool>,
     /// Compaction: this candidate's tests reject every counterexample on
     /// trunk. (TCB: trusted code ran them)
     pub rejects_counterexamples: bool,
@@ -161,7 +169,7 @@ pub open spec fn protected(checks: Set<Path>, trusted: Set<Path>, path: Path) ->
 pub open spec fn authority(kind: Kind, checks: Set<Path>, tests: Set<Path>, trusted: Set<Path>) -> ISet<Path> {
     match kind {
         Kind::Queue { .. } => ISet::new(|path: Path| path == queue_path()),
-        Kind::Code { .. } => ISet::new(|path: Path| !protected(checks, trusted, path) && !under(tests, path)),
+        Kind::Code { .. } | Kind::Foil { .. } => ISet::new(|path: Path| !protected(checks, trusted, path) && !under(tests, path)),
         Kind::Compaction { .. } => ISet::new(|path: Path| !protected(checks, trusted, path)),
         Kind::Counterexample { .. } => ISet::new(|path: Path| !protected(checks, trusted, path) && under(tests, path)),
     }
@@ -231,11 +239,14 @@ pub open spec fn agree(search: Search) -> bool {
     }
 }
 
-/// Candidate i of the tested search may be pushed: a counterexample search on it found none.
+/// Candidate i of the tested search may be pushed: a counterexample search on
+/// it found none, measured against a foil search on it.
 pub open spec fn pushable(searches: Seq<Search>, tested_index: int, i: int) -> bool {
-    exists|counterexample_index: int| 0 <= counterexample_index < searches.len()
+    exists|counterexample_index: int, foil_index: int|
+        0 <= counterexample_index < searches.len() && 0 <= foil_index < searches.len()
         && searches[counterexample_index].kind == (Kind::Counterexample { goal: Some(AgentProcess { search: tested_index, index: i }) })
-        && not_found(searches[counterexample_index], searches[tested_index])
+        && searches[foil_index].kind == (Kind::Foil { goal: AgentProcess { search: tested_index, index: i } })
+        && not_found(searches[counterexample_index], searches[tested_index], searches[foil_index])
 }
 
 /// a at index ai outranks b at index bi: rank, then smaller diff, then earlier.
@@ -272,20 +283,39 @@ pub open spec fn rejects_every(candidate: Candidate, tested: Search) -> bool {
     forall|j: int| member(tested, j) ==> candidate.accepts.contains_key(j) && !candidate.accepts[j]
 }
 
+/// Foil: index j of foils holds a program trunk's tests accept and Verus
+/// rejects, within the search's authority: a behavior the spec forbids that
+/// trunk's tests miss.
+pub open spec fn foil(foils: Search, j: int) -> bool {
+    0 <= j < foils.n && foils.results.contains_key(j) && foils.results[j] is Some
+    && accepted(at(foils, j)) && !at(foils, j).proved
+    && forall|path: Path| at(foils, j).changed.contains(path) ==> foils.authority.contains(path)
+}
+
+/// Counterexample: candidate, a test, rejects some foil, so it can tell a
+/// program the spec forbids from one it allows. A test that accepts every
+/// program shows nothing.
+pub open spec fn discriminates(candidate: Candidate, foils: Search) -> bool {
+    exists|j: int| foil(foils, j) && candidate.accepts_foils.contains_key(j) && !candidate.accepts_foils[j]
+}
+
 /// Counterexample: some verified test of counterexample splits tested.
 pub open spec fn found(counterexample: Search, tested: Search) -> bool {
     complete(counterexample) && exists|i: int| verified_at(counterexample, i) && splits(at(counterexample, i), tested)
 }
 
-/// Counterexample: every agent process of counterexample returned, at least two
-/// of its tests are verified, and none splits tested or rejects every member of
-/// it: no counterexample was found. With fewer than two verified tests, nothing
-/// was looked for; a test that rejects every member does not split them, but
-/// is no sign that nothing is wrong. Either way, neither `found` nor
-/// `not_found`, so nothing it tested may be pushed.
-pub open spec fn not_found(counterexample: Search, tested: Search) -> bool {
-    complete(counterexample)
-    && (exists|i: int, j: int| i != j && verified_at(counterexample, i) && verified_at(counterexample, j))
+/// Counterexample: every agent process of counterexample and of foils
+/// returned, at least two verified tests reject a foil, and no verified test
+/// splits tested or rejects every member of it: no counterexample was found.
+/// Fewer than two tests that reject a foil means nothing was looked for; a
+/// test that rejects every member does not split them, but is no sign that
+/// nothing is wrong. Either way, neither `found` nor `not_found`, so nothing
+/// it tested may be pushed.
+pub open spec fn not_found(counterexample: Search, tested: Search, foils: Search) -> bool {
+    complete(counterexample) && complete(foils)
+    && (exists|i: int, j: int| i != j
+        && verified_at(counterexample, i) && discriminates(at(counterexample, i), foils)
+        && verified_at(counterexample, j) && discriminates(at(counterexample, j), foils))
     && forall|i: int| verified_at(counterexample, i) ==>
         !splits(at(counterexample, i), tested) && !rejects_every(at(counterexample, i), tested)
 }
@@ -442,7 +472,8 @@ tokenized_state_machine!{ bon {
     /// Open a search and grant one capability per agent process, reserving each
     /// one's limit. One search runs at a time; its agent processes run in parallel.
     /// Every search starts from trunk's head: a counterexample's test is written
-    /// from the spec, never from candidate code.
+    /// from the spec, never from candidate code. A foil search alone starts
+    /// from the selected candidate it changes.
     transition!{ grant(kind: Kind, n: nat, agent_process_limit: nat, observed: Map<Object, Permission>) {
         require isolated(observed);
         require forall|search_index: int| 0 <= search_index < pre.searches.len() ==> complete(#[trigger] pre.searches[search_index]);
@@ -453,8 +484,15 @@ tokenized_state_machine!{ bon {
             0 <= agent_process.search < pre.searches.len()
             && selected(pre.searches[agent_process.search], agent_process.index)
             && pre.searches[agent_process.search].base == pre.trunk.last();
+        require kind matches Kind::Foil { goal: agent_process } ==>
+            0 <= agent_process.search < pre.searches.len()
+            && selected(pre.searches[agent_process.search], agent_process.index)
+            && pre.searches[agent_process.search].base == pre.trunk.last();
         let search_index = pre.searches.len() as int;
-        let base = pre.trunk.last();
+        let base = match kind {
+            Kind::Foil { goal } => at(pre.searches[goal.search], goal.index).commit,
+            _ => pre.trunk.last(),
+        };
         let attenuated = authority(kind, pre.checks, pre.tests, pre.trusted);
         update searches = pre.searches.push(Search { kind, base, n, authority: attenuated, limit: agent_process_limit, results: Map::empty() });
         update reserved = pre.reserved + agent_process_limit * n;
@@ -479,11 +517,12 @@ tokenized_state_machine!{ bon {
 
     /// Code or compaction: the selected candidate is pushed to trunk, if a
     /// counterexample search on it found none and trunk hasn't moved. (git: push)
-    transition!{ push(tested_index: int, i: int, counterexample_index: int) {
-        require 0 <= tested_index < pre.searches.len() && 0 <= counterexample_index < pre.searches.len();
+    transition!{ push(tested_index: int, i: int, counterexample_index: int, foil_index: int) {
+        require 0 <= tested_index < pre.searches.len() && 0 <= counterexample_index < pre.searches.len() && 0 <= foil_index < pre.searches.len();
         require selected(pre.searches[tested_index], i);
         require pre.searches[counterexample_index].kind == Kind::Counterexample { goal: Some(AgentProcess { search: tested_index, index: i }) };
-        require not_found(pre.searches[counterexample_index], pre.searches[tested_index]);
+        require pre.searches[foil_index].kind == Kind::Foil { goal: AgentProcess { search: tested_index, index: i } };
+        require not_found(pre.searches[counterexample_index], pre.searches[tested_index], pre.searches[foil_index]);
         require pre.searches[tested_index].base == pre.trunk.last();
         update trunk = pre.trunk.push(at(pre.searches[tested_index], i).commit);
         update authors = pre.authors.push(User::agent);
@@ -613,10 +652,13 @@ tokenized_state_machine!{ bon {
                     && pre.searches[tested_index].base == pre.trunk[trunk_index - 1]
                     && at(pre.searches[tested_index], i).commit == pre.trunk[trunk_index];
                 assert(post.searches[tested_index] == pre.searches[tested_index]);
-                let counterexample_index = choose|counterexample_index: int| 0 <= counterexample_index < pre.searches.len()
+                let (counterexample_index, foil_index) = choose|counterexample_index: int, foil_index: int|
+                    0 <= counterexample_index < pre.searches.len() && 0 <= foil_index < pre.searches.len()
                     && pre.searches[counterexample_index].kind == (Kind::Counterexample { goal: Some(AgentProcess { search: tested_index, index: i }) })
-                    && not_found(pre.searches[counterexample_index], pre.searches[tested_index]);
+                    && pre.searches[foil_index].kind == (Kind::Foil { goal: AgentProcess { search: tested_index, index: i } })
+                    && not_found(pre.searches[counterexample_index], pre.searches[tested_index], pre.searches[foil_index]);
                 assert(post.searches[counterexample_index] == pre.searches[counterexample_index]);
+                assert(post.searches[foil_index] == pre.searches[foil_index]);
                 assert(pushable(post.searches, tested_index, i));
                 assert(pushed(post.searches, post.trunk[trunk_index - 1], post.trunk[trunk_index]));
             } else {
@@ -676,12 +718,15 @@ tokenized_state_machine!{ bon {
                 assert(complete(pre.searches[tested_index]));
                 assert(tested_index != agent_process.search);
                 assert(post.searches[tested_index] == pre.searches[tested_index]);
-                let counterexample_index = choose|counterexample_index: int| 0 <= counterexample_index < pre.searches.len()
+                let (counterexample_index, foil_index) = choose|counterexample_index: int, foil_index: int|
+                    0 <= counterexample_index < pre.searches.len() && 0 <= foil_index < pre.searches.len()
                     && pre.searches[counterexample_index].kind == (Kind::Counterexample { goal: Some(AgentProcess { search: tested_index, index: i }) })
-                    && not_found(pre.searches[counterexample_index], pre.searches[tested_index]);
-                assert(complete(pre.searches[counterexample_index]));
-                assert(counterexample_index != agent_process.search);
+                    && pre.searches[foil_index].kind == (Kind::Foil { goal: AgentProcess { search: tested_index, index: i } })
+                    && not_found(pre.searches[counterexample_index], pre.searches[tested_index], pre.searches[foil_index]);
+                assert(complete(pre.searches[counterexample_index]) && complete(pre.searches[foil_index]));
+                assert(counterexample_index != agent_process.search && foil_index != agent_process.search);
                 assert(post.searches[counterexample_index] == pre.searches[counterexample_index]);
+                assert(post.searches[foil_index] == pre.searches[foil_index]);
                 assert(pushable(post.searches, tested_index, i));
                 assert(pushed(post.searches, post.trunk[trunk_index - 1], post.trunk[trunk_index]));
             } else {
@@ -706,7 +751,7 @@ tokenized_state_machine!{ bon {
     }
 
     #[inductive(push)]
-    fn push_inductive(pre: Self, post: Self, tested_index: int, i: int, counterexample_index: int) {
+    fn push_inductive(pre: Self, post: Self, tested_index: int, i: int, counterexample_index: int, foil_index: int) {
         assert(pushable(post.searches, tested_index, i));
         let head_index = post.trunk.len() - 1;
         assert(post.trunk[head_index - 1] == pre.trunk.last());

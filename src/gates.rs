@@ -61,6 +61,7 @@ pub enum Kind {
     Code { goal: Commit },
     Compaction { goal: Commit, out: Vec<Hash> },
     Counterexample { goal: Option<AgentProcess> },
+    Foil { goal: AgentProcess },
 }
 
 impl View for Kind {
@@ -72,6 +73,7 @@ impl View for Kind {
             Kind::Compaction { goal, out } => spec::Kind::Compaction { goal: goal@, out: hashes(out@) },
             Kind::Counterexample { goal } => spec::Kind::Counterexample {
                 goal: match goal { Some(agent_process) => Some(agent_process@), None => None } },
+            Kind::Foil { goal } => spec::Kind::Foil { goal: goal@ },
         }
     }
 }
@@ -90,6 +92,9 @@ pub struct Candidate {
     /// search's candidates by index, and trunk's head (or a compaction's goal)
     /// as -1. A repeated index: the first counts.
     pub accepts: Vec<(i64, bool)>,
+    /// Whether this candidate's test accepts each foil, by its index in the
+    /// foil search. A repeated index: the first counts.
+    pub accepts_foils: Vec<(i64, bool)>,
     pub rejects_counterexamples: bool,
     pub rank: i64,
     pub diff: u64,
@@ -107,6 +112,7 @@ impl View for Candidate {
             out: hashes(self.out@),
             intents: first_by_key(self.intents@.map_values(|pair: (Cue, Intent)| (pair.0 as nat, pair.1@))),
             accepts: first_by_key(self.accepts@.map_values(|pair: (i64, bool)| (pair.0 as int, pair.1))),
+            accepts_foils: first_by_key(self.accepts_foils@.map_values(|pair: (i64, bool)| (pair.0 as int, pair.1))),
             rejects_counterexamples: self.rejects_counterexamples,
             rank: self.rank as int,
             diff: self.diff as nat,
@@ -203,8 +209,9 @@ pub open spec fn texts(list: Seq<Path>) -> Seq<u64> {
     seq![list.len() as u64] + list.map_values(|path: Path| text(path.0@)).flatten()
 }
 
-/// A kind: a tag (0 queue, 1 code, 2 compaction, 3 counterexample), then its
-/// fields; a counterexample's goal is 0 for trunk, or 1 and the agent process.
+/// A kind: a tag (0 queue, 1 code, 2 compaction, 3 counterexample, 4 foil),
+/// then its fields; a counterexample's goal is 0 for trunk, or 1 and the agent
+/// process; a foil's goal is the agent process.
 pub open spec fn kind_words(kind: Kind) -> Seq<u64> {
     match kind {
         Kind::Queue { goal } => seq![0u64] + text(goal.0.0@),
@@ -214,6 +221,7 @@ pub open spec fn kind_words(kind: Kind) -> Seq<u64> {
             Some(agent_process) => seq![3u64, 1u64, agent_process.search as u64, agent_process.index as u64],
             None => seq![3u64, 0u64],
         },
+        Kind::Foil { goal } => seq![4u64, goal.search as u64, goal.index as u64],
     }
 }
 
@@ -228,6 +236,8 @@ pub open spec fn candidate_words(candidate: Candidate) -> Seq<u64> {
         + seq![candidate.intents.len() as u64] + candidate.intents@.map_values(|pair: (Cue, Intent)| seq![pair.0] + text(pair.1.0@)).flatten()
         + seq![candidate.accepts.len() as u64]
         + candidate.accepts@.map_values(|pair: (i64, bool)| seq![pair.0 as u64, bit(pair.1)]).flatten()
+        + seq![candidate.accepts_foils.len() as u64]
+        + candidate.accepts_foils@.map_values(|pair: (i64, bool)| seq![pair.0 as u64, bit(pair.1)]).flatten()
         + seq![bit(candidate.rejects_counterexamples), candidate.rank as u64, candidate.diff]
 }
 
@@ -329,6 +339,8 @@ pub open spec fn kind_json(kind: Kind) -> Seq<char> {
             Some(agent_process) => object(seq![field("search"@, decimal(agent_process.search as nat)), field("index"@, decimal(agent_process.index as nat))]),
             None => seq!['n', 'u', 'l', 'l'],
         })]))]),
+        Kind::Foil { goal } => object(seq![field("foil"@, object(seq![field("goal"@,
+            object(seq![field("search"@, decimal(goal.search as nat)), field("index"@, decimal(goal.index as nat))]))]))]),
     }
 }
 
@@ -343,6 +355,7 @@ pub open spec fn candidate_json(candidate: Candidate) -> Seq<char> {
         field("out"@, hash_strings(candidate.out@)),
         field("intents"@, array(candidate.intents@.map_values(|pair: (Cue, Intent)| array(seq![decimal(pair.0 as nat), string(pair.1.0@)])))),
         field("accepts"@, array(candidate.accepts@.map_values(|pair: (i64, bool)| array(seq![signed(pair.0 as int), boolean(pair.1)])))),
+        field("accepts_foils"@, array(candidate.accepts_foils@.map_values(|pair: (i64, bool)| array(seq![signed(pair.0 as int), boolean(pair.1)])))),
         field("rejects_counterexamples"@, boolean(candidate.rejects_counterexamples)),
         field("rank"@, signed(candidate.rank as int)),
         field("diff"@, decimal(candidate.diff as nat)),
@@ -409,10 +422,11 @@ pub trait Gates {
             r matches Some(i) ==> spec::selected(search@, i as int),
             r is None ==> forall|i: int| !spec::selected(search@, i);
 
-    /// No verified test of counterexample splits tested or rejects every member of it.
-    fn not_found(counterexample: &Search, tested: &Search) -> (r: bool)
-        requires counterexample.results.len() == counterexample.n, tested.results.len() == tested.n,
-        ensures r == spec::not_found(counterexample@, tested@);
+    /// Two verified tests of counterexample reject a foil, and none splits
+    /// tested or rejects every member of it.
+    fn not_found(counterexample: &Search, tested: &Search, foils: &Search) -> (r: bool)
+        requires counterexample.results.len() == counterexample.n, tested.results.len() == tested.n, foils.results.len() == foils.n,
+        ensures r == spec::not_found(counterexample@, tested@, foils@);
 
     /// The test that lands on trunk, if counterexample found one on trunk.
     fn found_on_trunk(counterexample: &Search) -> (r: Option<usize>)
