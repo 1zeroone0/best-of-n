@@ -319,7 +319,7 @@ fn repository_name(root: &std::path::Path) -> String {
 fn scratch(name: &str) -> PathBuf {
     // bon runs as engineer; only a candidate's tests run bon's code as agent,
     // which cannot write the host's working directories: they get agent's own.
-    let base = if is_agent() { std::env::temp_dir().join("bon") } else { PathBuf::from(WORKING_DIRECTORIES) };
+    let base = if is_agent() { std::env::temp_dir().join("bon-agent") } else { PathBuf::from(WORKING_DIRECTORIES) };
     if !base.exists() {
         let _ = std::fs::create_dir_all(&base);
     }
@@ -534,7 +534,13 @@ pub fn trace_running(traces: &std::path::Path, name: &str) -> bool {
         .filter_map(|e| trace_process(&e.file_name().to_string_lossy()))
         .any(|(p, s)| p == pid && s > start);
     // ps, not kill -0: kill -0 fails on another user's live process (EPERM).
-    !later && Command::new("ps").args(["-p", &pid.to_string()]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+    !later && process_running(&pid.to_string())
+}
+
+/// Check liveness even when the sandbox denies ps; ps covers other users.
+fn process_running(pid: &str) -> bool {
+    Command::new("/bin/kill").args(["-0", pid]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+        || Command::new("ps").args(["-p", pid]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
 }
 
 /// A trace write that failed is reported; the search goes on.
@@ -616,7 +622,7 @@ pub fn cleanup(path: &[String]) {
     let me = std::process::id().to_string();
     // ps, not kill -0: kill -0 fails on another user's live process (EPERM),
     // which would read as dead.
-    let running = |pid: &str| pid == me || Command::new("ps").args(["-p", pid]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    let running = |pid: &str| pid == me || process_running(pid);
     for e in std::fs::read_dir(WORKING_DIRECTORIES).into_iter().flatten().flatten() {
         let name = e.file_name().to_string_lossy().to_string();
         // <pid>.<owner>; <pid>-<name> from before the working directories were 0711.
@@ -1062,7 +1068,8 @@ pub fn observe(m: &Manifest, commit: &Commit) -> (r: Result<Observed, String>) {
     r
 }
 
-#[verifier::external]
+} // verus!
+
 fn observe_in(m: &Manifest, probe: &std::path::Path) -> Result<Observed, String> {
     // test(1) exits 0 (allowed) or 1 (denied); anything else is no answer.
     let ask = |path: &std::path::Path, flag: &str| -> Result<bool, String> {
@@ -1106,6 +1113,8 @@ fn observe_in(m: &Manifest, probe: &std::path::Path) -> Result<Observed, String>
     Ok((checks, transcripts, vec![perm("working directory", probe)?],
         vec![perm("repository", &m.root.join(".git"))?], vec![perm("working directories", std::path::Path::new(WORKING_DIRECTORIES))?], toolchain))
 }
+
+verus! {
 
 /// Run a search's agent processes in parallel and observe each: its candidate
 /// (None if it produced none) and its cost in microdollars. `target` is the
