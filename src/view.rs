@@ -537,7 +537,7 @@ fn reasons(processes: &[Value]) -> Vec<Value> {
 }
 
 /// The columns of the outcomes table.
-pub const OUTCOME_COLUMNS: [&str; 7] = ["Outcomes", "Attempts", "Pushed", "p", "Ended blocked", "Expected", "Exited"];
+pub const OUTCOME_COLUMNS: [&str; 7] = ["Outcomes", "Attempts", "Pushed", "Push rate", "Ended blocked", "Expected", "Exited"];
 
 /// A reason attempts blocked, in words, with its count: `Too few verified (1)`.
 pub fn reason_count(r: &crate::projection::Reason) -> String {
@@ -548,11 +548,12 @@ pub fn reason_count(r: &crate::projection::Reason) -> String {
 
 /// Attempts and how bon processes ended, by kind: one row per kind, and one
 /// per width under it when the kind ran at more than one. Attempts, pushed
-/// and p count attempts; ended blocked and exited count bon processes;
+/// and push rate (p) count attempts; ended blocked and exited count bon processes;
 /// expected is how many of them (1-p)^k predicts would end blocked.
 pub fn outcome_table(t: &crate::projection::Totals) -> Vec<[String; 7]> {
     let mut out = Vec::new();
-    let p = |a: u64, s: u64| if a > 0 { format!("{:.2}", s as f64 / a as f64) } else { "—".into() };
+    // Push rate: pushed over attempts (p), as a percentage.
+    let p = |a: u64, s: u64| if a > 0 { format!("{:.0}%", 100.0 * s as f64 / a as f64) } else { "—".into() };
     for e in &t.ended {
         let rows: Vec<_> = t.attempts.iter().filter(|r| r.kind == e.kind).collect();
         let (a, s) = rows.iter().fold((0, 0), |(a, s), r| (a + r.attempts, s + r.pushed));

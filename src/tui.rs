@@ -258,8 +258,12 @@ fn who(g: &GoalTrace) -> &'static str {
     if g.processes.iter().flat_map(|p| &p.searches).any(|s| s.background) { "bon" } else { "You" }
 }
 
-/// The main search of a bon process: its first that is not a counterexample.
-fn main_search(p: &BonProcess) -> Option<&SearchTrace> { p.searches.iter().find(|s| !clears(&s.kind)) }
+/// The attempt that ended a bon process: its last code or compaction search,
+/// and the foil and counterexample searches after it.
+fn last_attempt(p: &BonProcess) -> Option<(&SearchTrace, &[SearchTrace])> {
+    let i = p.searches.iter().rposition(|s| !clears(&s.kind))?;
+    Some((&p.searches[i], &p.searches[i + 1..]))
+}
 
 /// A search that clears or blocks another's push, rather than writing what is pushed.
 fn clears(kind: &str) -> bool { kind == "counterexample" || kind == "foil" }
@@ -290,8 +294,9 @@ fn reason(blocked: &str) -> (Option<&str>, &str) {
     }
 }
 
-/// A goal's steps, each labeled: how many candidates, how many verified, the
-/// selection, the foils, and what the counterexample search found.
+/// A goal's steps, each labeled, from the attempt that ended it: how many
+/// candidates, how many verified, the selection, the foils, and what the
+/// counterexample search found.
 fn step_parts(g: &GoalTrace) -> Vec<(&'static str, String)> {
     let Some(last) = g.processes.first() else { return Vec::new() };
     // A counterexample on trunk: how many of its tests were verified.
@@ -299,14 +304,13 @@ fn step_parts(g: &GoalTrace) -> Vec<(&'static str, String)> {
         return vec![("Verified tests", last.searches.iter().map(|s| s.verified).sum::<u64>().to_string())];
     }
     let mut out = Vec::new();
-    if let Some(m) = main_search(last) {
-        out.push(("Candidates", m.width.max(m.returned).to_string()));
-        out.push(("Verified", m.verified.to_string()));
-        if let Some(i) = m.selected { out.push(("Selected", format!("#{i}"))); }
-    }
-    let foils = last.searches.iter().rev().find(|s| s.kind == "foil");
+    let Some((m, after)) = last_attempt(last) else { return out };
+    out.push(("Candidates", m.width.max(m.returned).to_string()));
+    out.push(("Verified", m.verified.to_string()));
+    if let Some(i) = m.selected { out.push(("Selected", format!("#{i}"))); }
+    let foils = after.iter().rev().find(|s| s.kind == "foil");
     if let Some(f) = foils { out.push(("Foils", foil_indices(f).len().to_string())); }
-    if let Some(ce) = last.searches.iter().rev().find(|s| s.kind == "counterexample") {
+    if let Some(ce) = after.iter().rev().find(|s| s.kind == "counterexample") {
         let telling = foils.map(|f| telling(ce, f).len());
         out.push(("Counterexample", match (g.outcome.as_str(), telling) {
             ("found", _) => "Found".into(),
@@ -654,9 +658,9 @@ fn wrap_items(items: &[String], sep: &str, w: usize) -> Vec<String> {
 }
 
 /// What a line of the detail is, for what stays pinned when it scrolls: the
-/// title, a process, a table's header, or a line that ends a table.
+/// title, a process, a search's heading, or a table's header.
 #[derive(Clone, Copy, PartialEq)]
-enum Mark { Title, Process, Header, Break }
+enum Mark { Title, Process, Search, Header }
 
 fn detail(app: &App, width: u16) -> Text<'static> { detail_marked(app, width).0 }
 
@@ -720,7 +724,7 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
                         _ => format!("{} → {}{}", s.width.max(s.returned), s.verified, s.selected.map_or(String::new(), |i| format!(" → #{i}"))),
                     };
                     let elapsed = s.seconds.map_or(String::new(), took);
-                    marks.push((t.len(), Mark::Break));
+                    marks.push((t.len(), Mark::Search));
                     let mut row = vec![
                         Span::styled("● ", pal.tone(stone)),
                         Span::styled(fit(&format!("{} {}", s.search, cap(&s.kind)), kw), pal.ink()),
@@ -1023,17 +1027,20 @@ fn why_blocked_in(s: &SearchTrace, protected: &[String]) -> Vec<String> {
     out
 }
 
-/// Text wrapped at `width`, every line after the first indented like the first.
+/// Text wrapped at `width`, every line indented: at the last space that
+/// fits, or inside a word longer than the line. Only the space a line breaks
+/// at is dropped; every other character stays.
 fn hanging(text: &str, indent: usize, width: usize, style: Style) -> Vec<Line<'static>> {
     let room = width.saturating_sub(indent).max(12);
     let mut lines = Vec::new();
-    let mut cur = String::new();
-    for word in text.split_whitespace() {
-        if !cur.is_empty() && cur.chars().count() + 1 + word.chars().count() > room { lines.push(std::mem::take(&mut cur)); }
-        if !cur.is_empty() { cur.push(' '); }
-        cur.push_str(word);
+    let mut rest: Vec<char> = text.trim().chars().collect();
+    while rest.len() > room {
+        let cut = rest[..=room].iter().rposition(|c| *c == ' ').filter(|&i| i > 0);
+        let (line, skip) = match cut { Some(i) => (rest[..i].iter().collect::<String>(), i + 1), None => (rest[..room].iter().collect(), room) };
+        lines.push(line);
+        rest.drain(..skip);
     }
-    if !cur.is_empty() { lines.push(cur); }
+    if !rest.is_empty() { lines.push(rest.into_iter().collect()); }
     lines.into_iter().map(|l| Line::from(Span::styled(format!("{}{l}", " ".repeat(indent)), style))).collect()
 }
 
@@ -1060,6 +1067,19 @@ fn key_bar(pal: &Palette, items: &[(&str, String, u8)], w: usize) -> Line<'stati
     let mut v = vec![Span::raw(" ")];
     for (k, d, _) in items { v.push(Span::styled(format!("{k} "), pal.ink().add_modifier(Modifier::BOLD))); v.push(Span::styled(format!("{d}  "), pal.muted())); }
     Line::from(v)
+}
+
+/// The overflow cue a pane shows on its first row once scrolled, and on its last
+/// while rows run past the bottom.
+fn more_line(pal: &Palette, up: bool) -> Line<'static> { Line::from(Span::styled(if up { " ↑ more" } else { " ↓ more" }, pal.muted())) }
+
+/// For `len` rows in a pane `h` high from row `top`: whether the first row is
+/// the up cue, and how many rows of content fit, the down cue's row left free
+/// when there are more.
+fn more(len: usize, h: usize, top: usize) -> (bool, usize) {
+    let up = top > 0;
+    let avail = h.saturating_sub(up as usize);
+    (up, if top + avail < len { avail.saturating_sub(1) } else { avail })
 }
 
 fn draw(f: &mut Frame, app: &mut App) {
@@ -1121,7 +1141,7 @@ fn draw(f: &mut Frame, app: &mut App) {
     let (list_area, detail_area) = if !detail_tab { (body, None) }
         else if wide {
             // Beside the detail the list is compact (its steps are in the detail), so the detail has room.
-            let list_w = (body.width * 9 / 20).clamp(56, 66).min(body.width.saturating_sub(40));
+            let list_w = (body.width * 9 / 20).clamp(60, 66).min(body.width.saturating_sub(40));
             let [l, _, d] = Layout::horizontal([Constraint::Length(list_w), Constraint::Length(1), Constraint::Min(30)]).areas(body); (l, Some(d))
         }
         else if app.detail_open { (Rect::default(), Some(body)) } else { (body, None) };
@@ -1132,50 +1152,66 @@ fn draw(f: &mut Frame, app: &mut App) {
     if list_area.width > 0 { app.list_w = list_area.width; }
     let list = rows(app, app.list_w);
     let ti = app.ti();
-    // Keep the focus on a focusable row, and in view.
+    // Keep the focus on a focusable row, and in view: rows below a cue it
+    // shares the pane with.
     if !list.is_empty() {
         let mut i = app.focus[ti].min(list.len() - 1);
         if !list[i].focusable() { if let Some(j) = (i..list.len()).chain((0..i).rev()).find(|&j| list[j].focusable()) { i = j; } }
         app.focus[ti] = i;
         let h = list_area.height as usize;
-        if h > 0 {
+        if h > 2 {
             if i < app.top[ti] { app.top[ti] = i.saturating_sub(1); }
-            if i >= app.top[ti] + h { app.top[ti] = i + 1 - h; }
+            for _ in 0..3 {
+                let (_, avail) = more(list.len(), h, app.top[ti]);
+                if i >= app.top[ti] + avail { app.top[ti] = i + 1 - avail; } else { break; }
+            }
         }
     }
     if list_area.width > 0 {
-        let lines: Vec<Line> = list.into_iter().enumerate().skip(app.top[ti]).take(list_area.height as usize).map(|(i, r)| {
+        let (up, avail) = more(list.len(), list_area.height as usize, app.top[ti]);
+        let down = app.top[ti] + avail < list.len();
+        let mut lines: Vec<Line> = list.into_iter().enumerate().skip(app.top[ti]).take(avail).map(|(i, r)| {
             if r.focusable() && i == app.focus[ti] && detail_tab {
                 let mut l = r.line.patch_style(pal.selected());
                 if let Some(first) = l.spans.first_mut() { if first.content.starts_with(' ') { *first = Span::styled(format!("▎{}", &first.content[1..]), pal.tone(Tone::Blue).patch(pal.selected())); } }
                 l
             } else { r.line }
         }).collect();
+        if up { lines.insert(0, more_line(&pal, true)); }
+        if down { lines.push(more_line(&pal, false)); }
         f.render_widget(Paragraph::new(lines), list_area);
     }
     if let Some(d) = detail_area {
         let inner = Rect { x: d.x + 1, width: d.width.saturating_sub(2), ..d };
         let (text, marks) = detail_marked(app, inner.width);
-        let s = app.detail_top as usize;
-        if marks.is_empty() {
-            f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }).scroll((app.detail_top, 0)), inner);
-        } else {
-            // Its lines are cut to the pane, so a line is a row. Scrolled, the title, the
-            // process above and a table's header whose rows continue stay at the top.
-            let lines = text.lines;
-            let last = |m: Mark| marks.iter().rev().find(|(i, k)| *k == m && *i < s).map(|(i, _)| *i);
-            let mut pins: Vec<usize> = Vec::new();
-            if s > 0 {
-                if let Some(i) = last(Mark::Title) { pins.push(i); }
-                if let Some(i) = last(Mark::Process) { pins.push(i); }
-                if let Some(h) = last(Mark::Header) {
-                    if !marks.iter().any(|(i, k)| *i > h && *i <= s && matches!(k, Mark::Break | Mark::Process)) { pins.push(h); }
-                }
-            }
-            let pinned: Vec<Line> = pins.iter().map(|i| lines[*i].clone()).collect();
-            let shown: Vec<Line> = pinned.into_iter().chain(lines.into_iter().skip(s)).take(inner.height as usize).collect();
-            f.render_widget(Paragraph::new(shown), inner);
+        let lines = text.lines;
+        let h = inner.height as usize;
+        // Its lines are cut to the pane, so a line is a row; it scrolls no further than its last line.
+        let s = (app.detail_top as usize).min(lines.len().saturating_sub(1));
+        if !lines.is_empty() { app.detail_top = s as u16; }
+        // Scrolled, the title, the process above, its search and a table's header whose
+        // rows continue stay at the top: each while what it heads is on screen.
+        let last = |m: Mark| marks.iter().rev().find(|(i, k)| *k == m && *i < s).map(|(i, _)| *i);
+        let open = |at: usize, ends: &[Mark]| !marks.iter().any(|(i, k)| *i > at && *i <= s && ends.contains(k));
+        let mut pins: Vec<usize> = Vec::new();
+        if s > 0 {
+            if let Some(i) = last(Mark::Title) { pins.push(i); }
+            if let Some(i) = last(Mark::Process) { pins.push(i); }
+            if let Some(i) = last(Mark::Search).filter(|&i| open(i, &[Mark::Process, Mark::Search])) { pins.push(i); }
+            if let Some(i) = last(Mark::Header).filter(|&i| open(i, &[Mark::Process, Mark::Search])) { pins.push(i); }
+            pins.retain(|i| *i < s);
+            pins.dedup();
         }
+        let up = s > 0;
+        let room = h.saturating_sub(pins.len() + up as usize);
+        let down = s + room < lines.len();
+        let room = room.saturating_sub(down as usize);
+        let mut shown: Vec<Line> = Vec::new();
+        if up { shown.push(more_line(&pal, true)); }
+        shown.extend(pins.iter().map(|i| lines[*i].clone()));
+        shown.extend(lines.into_iter().skip(s).take(room));
+        if down { shown.push(more_line(&pal, false)); }
+        f.render_widget(Paragraph::new(shown), inner);
     }
     // An overlay covers the body.
     match &app.overlay {
@@ -1657,12 +1693,57 @@ mod tests {
         let mut app = App::new();
         app.p = serde_json::from_value(serde_json::json!({ "configured": true, "repo": { "now": 10 } })).unwrap();
         app.p.groups = vec![foiled()];
-        app.detail_top = 22;
+        // Scrolled into the counterexample search's table: the cue, the title, the process,
+        // the search's heading and the table's header, then its rows.
         let mut t = Terminal::new(TestBackend::new(140, 30)).unwrap();
         t.draw(|f| draw(f, &mut app)).unwrap();
+        let lines = detail_marked(&app, 140 - 62).0.lines;
+        let at = lines.iter().position(|l| l.spans.iter().any(|s| s.content.starts_with("  #1 "))).unwrap();
+        app.detail_top = at as u16;
+        t.draw(|f| draw(f, &mut app)).unwrap();
         let b = t.backend().buffer().clone();
-        let row = |y: u16| (0..140).map(|x| b[(x, y)].symbol().to_string()).collect::<String>();
-        assert!(row(3).contains("Code from 9bb8a5b") && row(4).contains("Process 7"), "{}\n{}", row(3), row(4));
+        let row = |y: u16| (63..140).map(|x| b[(x, y)].symbol().to_string()).collect::<String>();
+        let top: Vec<String> = (3..9).map(row).collect();
+        assert!(top[0].contains("↑ more") && top[1].contains("Code from 9bb8a5b") && top[2].contains("Process 7")
+            && top[3].contains("2 Counterexample") && top[4].contains("Test  Verified") && top[5].contains("#1"), "{top:#?}");
+        // Scrolled past it to the end, no search is pinned whose rows are gone.
+        app.detail_top = u16::MAX;
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let b = t.backend().buffer().clone();
+        let all: String = (3..29).map(|y| (63..140).map(|x| b[(x, y)].symbol().to_string()).collect::<String>() + "\n").collect();
+        assert!(!all.contains("Test  Verified") || all.contains("#1    Yes"), "{all}");
+    }
+
+    #[test]
+    fn a_pane_says_when_it_has_more() {
+        let mut p: Projection = serde_json::from_value(serde_json::json!({ "configured": true, "repo": { "now": 10 } })).unwrap();
+        p.queue = Some((1..40).map(|i| serde_json::from_value(serde_json::json!({ "id": i, "intent": "x" })).unwrap()).collect());
+        let q = screen(p, Tab::Queue, 80, 20);
+        assert!(q.contains("↓ more") && !q.contains("↑ more"), "{q}");
+    }
+
+    #[test]
+    fn the_steps_are_the_attempt_that_ended_the_goal() {
+        // Two attempts: the first blocked on its foils, the second pushed #6.
+        let ce = |blocked: bool| serde_json::json!({ "kind": "counterexample", "width": 2, "returned": 2, "verified": 2,
+            "blocked": if blocked { serde_json::json!("blocked: undiscriminating: fewer than two verified tests reject a foil") } else { serde_json::Value::Null } });
+        let foil = serde_json::json!({ "kind": "foil", "width": 2, "returned": 2, "candidates": [{ "index": 0, "accepted": true }, { "index": 1, "accepted": true }] });
+        let g: GoalTrace = serde_json::from_value(serde_json::json!({ "kind": "code", "title": "from 9bb8a5b", "outcome": "pushed",
+            "push": { "commit": "0b1e1a5aa9" },
+            "processes": [{ "pid": 1, "outcome": "pushed", "searches": [
+                { "search": 0, "kind": "code", "width": 8, "returned": 8, "verified": 8, "selected": 2 }, foil, ce(true),
+                { "search": 3, "kind": "code", "width": 12, "returned": 12, "verified": 12, "selected": 6 }, foil, ce(false)] }] })).unwrap();
+        assert_eq!(steps(&g, false), "Candidates 12 · Verified 12 · Selected #6 · Foils 2 · Counterexample None found");
+        assert_eq!(steps(&g, true), "12→12→#6 · 2 foils · None found · 0b1e1a5");
+    }
+
+    #[test]
+    fn an_expression_wraps_and_keeps_every_character() {
+        let e = "r matches Some(i) ==> spec::found_on_trunk(counterexample@, i as int)&&a_very_long_word_with_no_space_at_all";
+        let ls = hanging(e, 2, 30, Style::new());
+        let text: Vec<String> = ls.iter().map(|l| l.spans[0].content.to_string()).collect();
+        assert!(text.iter().all(|l| l.chars().count() <= 30 && l.starts_with("  ")), "{text:?}");
+        assert_eq!(text.iter().map(|l| l[2..].to_string()).collect::<Vec<_>>().join(" ").replace(' ', ""), e.replace(' ', ""));
     }
 
     #[test]
