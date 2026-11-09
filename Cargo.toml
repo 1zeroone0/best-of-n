@@ -1,6 +1,6 @@
 [package]
 name = "best-of-n"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "best-of-N: you write what the software must do; verified agent search writes the code"
@@ -8,7 +8,7 @@ repository = "https://github.com/1zeroone0/best-of-n"
 readme = "README.md"
 keywords = ["agents", "verification", "verus", "search", "build"]
 categories = ["development-tools"]
-exclude = ["view/fixtures/", "view/node_modules/", "/.bon/"]
+exclude = ["view/fixtures/", "view/node_modules/", "/.bon/", "/assets/", "/examples/python/.venv/"]
 
 [[bin]]
 name = "bon"

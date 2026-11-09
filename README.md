@@ -4,20 +4,20 @@ You write what the software must do. bon searches for the code: several
 agent processes each write a candidate, Verus proves them, two must agree,
 and blind tests try to split them before the best reaches trunk.
 
-<img src="readme/bon.svg" width="880" alt="You write intents to the queue, then the spec and checks. One search: agent processes generate candidates; the tests and Verus verify them; two must agree; a counterexample search tries to split them; the best is selected and pushed to trunk. People try trunk and talk again. Below: the kernel (spec, gates, implementation, proven by Verus) emits types; programs in TypeScript, Go and Python are built on them, around trusted code.">
+<img src="assets/bon.svg" width="880" alt="You write intents to the queue, then the spec and checks. One search: agent processes generate candidates; the tests and Verus verify them; two must agree; a counterexample search tries to split them; the best is selected and pushed to trunk. People try trunk and talk again. Below: the kernel (spec, gates, implementation, proven by Verus) emits types; programs in TypeScript, Go and Python are built on them, around trusted code.">
 
 `bon` in a terminal shows every search, what it cost and what reached trunk:
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="readme/traces-dark.png">
-  <img src="readme/traces-light.png" width="880" alt="bon's Traces tab: each bon process by time, its outcome and cost; beside it the focused one's searches and candidates.">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/traces-dark.png">
+  <img src="assets/traces-light.png" width="880" alt="bon's Traces tab: each bon process by time, its outcome and cost; beside it the focused one's searches and candidates.">
 </picture>
 
 and the spec, from its own source, down to the code that implements it:
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="readme/spec-dark.png">
-  <img src="readme/spec-light.png" width="880" alt="bon's Spec tab: the vocabulary, the state machine and, for a predicate, its gate's contract as written and every caller up to the programs.">
+  <source media="(prefers-color-scheme: dark)" srcset="assets/spec-dark.png">
+  <img src="assets/spec-light.png" width="880" alt="bon's Spec tab: the vocabulary, the state machine and, for a predicate, its gate's contract as written and every caller up to the programs.">
 </picture>
 
 ## Start
