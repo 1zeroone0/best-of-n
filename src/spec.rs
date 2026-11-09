@@ -49,6 +49,10 @@ pub enum Object {
     /// through to the path it was given) but not list it or add to it, so an
     /// agent process reaches only its own working directory. Owner: engineer.
     WorkingDirectories,
+    /// The toolchain the checks run with: rustup's home, cargo's home, and every
+    /// directory on the checks' PATH, as the host file names them. Owner: root
+    /// (or engineer), all the way up.
+    Toolchain,
 }
 
 /// POSIX permission bits.
@@ -190,13 +194,38 @@ pub open spec fn policy(user: User, object: Object) -> Permission {
         (User::agent, Object::WorkingDirectory) => Permission { read: true,  write: true,  execute: true },
         (User::agent, Object::Repository)       => Permission { read: false, write: false, execute: false },
         (User::agent, Object::WorkingDirectories) => Permission { read: false, write: false, execute: true },
+        (User::agent, Object::Toolchain)        => Permission { read: true,  write: false, execute: true },
         (User::engineer, _)                   => Permission { read: true,  write: true,  execute: true },
     }
 }
 
-/// agent's permissions, as trusted code observed them, match the policy.
-pub open spec fn isolated(observed: Map<Object, Permission>) -> bool {
-    forall|object: Object| observed.contains_key(object) && observed[object] == policy(User::agent, object)
+/// agent's permissions, as trusted code observed them, match the policy. Each
+/// object is observed path by path: agent's permissions on a path, or None where
+/// the path does not exist. Every path observed exists and matches the policy,
+/// and every object but the transcripts, which a repository may not have, is
+/// observed on at least one path, so a missing object never passes.
+pub open spec fn isolated(observed: Map<Object, Seq<Option<Permission>>>) -> bool {
+    forall|object: Object| observed.contains_key(object)
+        && (object != Object::Transcripts ==> observed[object].len() > 0)
+        && forall|path_index: int| 0 <= path_index < observed[object].len()
+            ==> observed[object][path_index] == Some(policy(User::agent, object))
+}
+
+/// An object not observed, or with a missing path, is never isolated; nor is
+/// one observed on no path, unless it is the transcripts.
+pub proof fn missing_is_not_isolated(observed: Map<Object, Seq<Option<Permission>>>, object: Object)
+    requires
+        !observed.contains_key(object) || observed[object].contains(None)
+        || (object != Object::Transcripts && observed[object].len() == 0),
+    ensures !isolated(observed),
+{
+    if isolated(observed) {
+        assert(observed.contains_key(object));
+        if observed[object].contains(None) {
+            let path_index = choose|path_index: int| 0 <= path_index < observed[object].len() && observed[object][path_index] == None::<Permission>;
+            assert(observed[object][path_index] == Some(policy(User::agent, object)));
+        }
+    }
 }
 
 /// The candidate at index i of search. Meaningful only when one exists.
@@ -609,7 +638,7 @@ tokenized_state_machine!{ bon {
     /// checks accept its head, as trusted code observed it: every test check
     /// and verify check accepted it. Code is granted on a trunk they reject;
     /// compaction and a counterexample on trunk, on one they accept.
-    transition!{ grant(kind: Kind, n: nat, agent_process_limit: nat, observed: Map<Object, Permission>, checks_accept: bool) {
+    transition!{ grant(kind: Kind, n: nat, agent_process_limit: nat, observed: Map<Object, Seq<Option<Permission>>>, checks_accept: bool) {
         require isolated(observed);
         require forall|search_index: int| 0 <= search_index < pre.searches.len() ==> complete(#[trigger] pre.searches[search_index]);
         require pre.spent + pre.reserved + agent_process_limit * n <= pre.limit;
@@ -762,7 +791,7 @@ tokenized_state_machine!{ bon {
     fn advance_inductive(pre: Self, post: Self, commit: Commit, checks: Set<Path>, tests: Set<Path>, trusted: Set<Path>) {}
 
     #[inductive(grant)]
-    fn grant_inductive(pre: Self, post: Self, kind: Kind, n: nat, agent_process_limit: nat, observed: Map<Object, Permission>, checks_accept: bool) {
+    fn grant_inductive(pre: Self, post: Self, kind: Kind, n: nat, agent_process_limit: nat, observed: Map<Object, Seq<Option<Permission>>>, checks_accept: bool) {
         let search_index = pre.searches.len() as int;
         let processes = agent_processes(search_index, n);
         // Every earlier search is complete, so no capability is outstanding.

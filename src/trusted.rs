@@ -108,11 +108,9 @@ struct Host {
     jobs: Option<usize>,
     /// The toolchain checks judge with, where no agent process can write it
     /// (/opt/bon, root's all the way up): rustup's home, and a cargo home whose
-    /// root is root's, only its caches agent's. Unset: agent's own.
-    #[serde(default)]
-    rustup_home: Option<String>,
-    #[serde(default)]
-    cargo_home: Option<String>,
+    /// root is root's, only its caches agent's. Required.
+    rustup_home: String,
+    cargo_home: String,
 }
 
 fn trunk_default() -> String { "main".into() }
@@ -214,13 +212,28 @@ fn sh(dir: &std::path::Path, program: &str, args: &[&str]) -> Result<String, Str
 
 fn git(root: &std::path::Path, args: &[&str]) -> Result<String, String> { sh(root, "git", args) }
 
+/// agent's home directory.
+const AGENT_HOME: &str = "/Users/agent";
+
+/// The PATH checks run with: the host file's, without any directory under
+/// agent's home, so every tool a check runs is the toolchain's. Harness
+/// processes keep the host file's whole PATH.
+fn checks_path(config: &Config) -> Vec<String> {
+    config.path.iter().filter(|d| !std::path::Path::new(d).starts_with(AGENT_HOME)).cloned().collect()
+}
+
 /// A command run as user agent with a cleared environment: only PATH, HOME and
 /// what bon sets. (TCB: sudo)
 fn as_agent(config: &Config, dir: &std::path::Path, env: &[(&str, String)], argv: &[String]) -> Command {
+    as_agent_on(config, &config.path, dir, env, argv)
+}
+
+/// as_agent, with PATH path.
+fn as_agent_on(config: &Config, path: &[String], dir: &std::path::Path, env: &[(&str, String)], argv: &[String]) -> Command {
     let mut c = Command::new("sudo");
     c.args(["-n", "-u", "agent", "env", "-i"]);
-    c.arg(format!("PATH={}", config.path.join(":")));
-    c.arg("HOME=/Users/agent");
+    c.arg(format!("PATH={}", path.join(":")));
+    c.arg(format!("HOME={AGENT_HOME}"));
     c.arg("LANG=en_US.UTF-8");
     c.arg("TERM=dumb");
     for (k, v) in &config.toolchain { c.arg(format!("{k}={v}")); }
@@ -619,7 +632,7 @@ fn hash(s: &str) -> u64 {
 /// A check's exit (0 or not), its output, and whether its time limit stopped it.
 fn run_check(config: &Config, dir: &std::path::Path, target: &std::path::Path, command: &str, log: &std::path::Path) -> (bool, String, bool) {
     let argv = vec!["/bin/sh".to_string(), "-c".to_string(), command.to_string()];
-    let c = as_agent(config, dir, &[("BON_BUILD", target.to_string_lossy().into()), ("CARGO_TARGET_DIR", target.to_string_lossy().into())], &argv);
+    let c = as_agent_on(config, &checks_path(config), dir, &[("BON_BUILD", target.to_string_lossy().into()), ("CARGO_TARGET_DIR", target.to_string_lossy().into())], &argv);
     let (ok, out, killed) = supervise(c, None, Duration::from_secs(config.agent_process.time), log);
     (ok && !killed, out, killed)
 }
@@ -757,11 +770,10 @@ pub fn manifest(root: &str, commit: &Commit) -> (r: Result<Manifest, String>) {
     let text = git(&root, &["show", &format!("{c}:{MANIFEST}")]).map_err(|_| format!("no {MANIFEST} at trunk's head; commit one"))?;
     let mut config: Config = toml::from_str(&text).map_err(|e| format!("{MANIFEST}: {e}"))?;
     let host: Host = toml::from_str(&std::fs::read_to_string(HOST).map_err(|_| format!("no {HOST}; run bon setup"))?)
-        .map_err(|e| format!("{HOST}: {e}"))?;
+        .map_err(|e| format!("{HOST}: {e}; run bon setup"))?;
     config.path = host.path;
     config.prices = host.prices;
-    config.toolchain = [("RUSTUP_HOME", &host.rustup_home), ("CARGO_HOME", &host.cargo_home)].into_iter()
-        .filter_map(|(k, v)| v.clone().map(|v| (k.to_string(), v))).collect();
+    config.toolchain = vec![("RUSTUP_HOME".to_string(), host.rustup_home), ("CARGO_HOME".to_string(), host.cargo_home)];
     cargo_config_guard(&root)?;
     config.jobs = host.jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1)));
     for h in config.harness.iter().chain(config.counterexample.harness.iter()) {
@@ -1012,33 +1024,77 @@ pub fn trunk_accepted(m: &Manifest, head: &Commit) -> bool {
     tests && proved
 }
 
-/// agent's effective permissions on each file the policy covers, observed by
-/// asking as agent, on a probe working directory made the same way as real ones.
+/// The permissions trusted code observed for agent on each object the policy
+/// names, path by path, in the order of `gates::observed`: the checks, the
+/// transcripts, a working directory, the repository, the working directories,
+/// the toolchain. None is a path that does not exist.
+pub type Observed = (Vec<Option<Permission>>, Vec<Option<Permission>>, Vec<Option<Permission>>,
+                     Vec<Option<Permission>>, Vec<Option<Permission>>, Vec<Option<Permission>>);
+
+/// agent's effective permissions on every path of each object the policy
+/// names, observed by asking as agent, on a probe working directory made the
+/// same way as real ones. A path that does not exist is reported as missing
+/// (None), never as the policy's value. Err is an observation that could not
+/// be made (agent cannot be asked, a path cannot be looked at), never a denial.
 #[verifier::external_body]
-pub fn observe(m: &Manifest, commit: &Commit) -> (r: Result<(Permission, Permission, Permission, Permission, Permission), String>) {
+pub fn observe(m: &Manifest, commit: &Commit) -> (r: Result<Observed, String>) {
     let c: String = commit.iter().collect();
+    // Asking as agent must work before any answer counts as a denial.
+    let asks = Command::new("sudo").args(["-n", "-u", "agent", "true"]).status().map_err(|e| format!("cannot ask as agent: {e}; run bon setup"))?;
+    if !asks.success() { return Err("cannot ask as agent (sudo -n -u agent); run bon setup".into()); }
     let probe = scratch(&format!("probe/{}", repository_name(&m.root)));
     if let Err(e) = working_directory(&m.root, &m.config, &c, &probe) {
         let _ = std::fs::remove_dir_all(&probe);
         return Err(format!("agent is not set up ({e}); run bon setup"));
     }
-    let ask = |path: &std::path::Path, flag: &str| -> bool {
-        Command::new("sudo").args(["-n", "-u", "agent", "test", flag]).arg(path).status().map_or(false, |s| s.success())
+    let r = observe_in(m, &probe);
+    let _ = std::fs::remove_dir_all(&probe);
+    r
+}
+
+#[verifier::external]
+fn observe_in(m: &Manifest, probe: &std::path::Path) -> Result<Observed, String> {
+    // test(1) exits 0 (allowed) or 1 (denied); anything else is no answer.
+    let ask = |path: &std::path::Path, flag: &str| -> Result<bool, String> {
+        let s = Command::new("sudo").args(["-n", "-u", "agent", "test", flag]).arg(path).status()
+            .map_err(|e| format!("cannot ask as agent about {}: {e}", path.display()))?;
+        match s.code() {
+            Some(0) => Ok(true),
+            Some(1) => Ok(false),
+            _ => Err(format!("cannot ask as agent about {}: {s}", path.display())),
+        }
     };
-    let perm = |path: &std::path::Path| Permission { read: ask(path, "-r"), write: ask(path, "-w"), execute: ask(path, "-x") };
-    let check = m.config.checks.paths.first().map(|p| probe.join(p.trim_end_matches('/'))).ok_or("no check paths")?;
+    // Whether a path exists, as bon's own process sees it: missing is reported
+    // as missing; a path that cannot be looked at is an error.
+    let present = |path: &std::path::Path| -> Result<bool, String> {
+        match std::fs::metadata(path) {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(format!("cannot observe {}: {e}", path.display())),
+        }
+    };
     // A check that is a file is run by an interpreter that reads it (sh, cargo),
     // so for a file, execute is whether agent can read it.
-    let check_perm = |path: &std::path::Path| {
-        let p = perm(path);
-        if path.is_dir() { p } else { Permission { execute: p.read, ..p } }
+    let perm = |object: &str, path: &std::path::Path| -> Result<Option<Permission>, String> {
+        if !present(path)? {
+            eprintln!("bon: missing: {object} {}", path.display());
+            return Ok(None);
+        }
+        let p = Permission { read: ask(path, "-r")?, write: ask(path, "-w")?, execute: ask(path, "-x")? };
+        Ok(Some(if path.is_dir() { p } else { Permission { execute: p.read, ..p } }))
     };
-    // The transcripts as agent meets them: in a working directory.
+    let mut checks = Vec::new();
+    for p in &m.config.checks.paths { checks.push(perm("check", &probe.join(p.trim_end_matches('/')))?); }
+    // The transcripts as agent meets them: in a working directory. A
+    // repository without them observes them on no path.
     let transcripts = probe.join(m.config.transcripts.clone().unwrap_or("transcripts".into()));
-    let r = (check_perm(&check), if transcripts.exists() { perm(&transcripts) } else { Permission { read: true, write: false, execute: true } },
-             perm(&probe), perm(&m.root.join(".git")), perm(std::path::Path::new(WORKING_DIRECTORIES)));
-    let _ = std::fs::remove_dir_all(&probe);
-    Ok(r)
+    let transcripts = if present(&transcripts)? { vec![perm("transcripts", &transcripts)?] } else { Vec::new() };
+    // The toolchain: the host file's homes, and every directory on the checks' PATH.
+    let mut toolchain = Vec::new();
+    for (k, v) in &m.config.toolchain { toolchain.push(perm(&format!("toolchain {k}"), std::path::Path::new(v))?); }
+    for d in checks_path(&m.config) { toolchain.push(perm("toolchain", std::path::Path::new(&d))?); }
+    Ok((checks, transcripts, vec![perm("working directory", probe)?],
+        vec![perm("repository", &m.root.join(".git"))?], vec![perm("working directories", std::path::Path::new(WORKING_DIRECTORIES))?], toolchain))
 }
 
 /// Run a search's agent processes in parallel and observe each: its candidate

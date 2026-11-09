@@ -182,14 +182,17 @@ pub open spec fn first_by_key<K, V>(pairs: Seq<(K, V)>) -> Map<K, V> {
     Map::new(pairs.map_values(|pair: (K, V)| pair.0).to_set(), |key: K| pairs[first(pairs, key)].1)
 }
 
-/// agent's permissions on each file, as trusted code observed them.
-pub open spec fn observed(checks: Permission, transcripts: Permission, working_directory: Permission, repository: Permission, working_directories: Permission) -> Map<Object, Permission> {
+/// agent's permissions on each object, path by path, as trusted code observed
+/// them: None where a path does not exist.
+pub open spec fn observed(checks: Seq<Option<Permission>>, transcripts: Seq<Option<Permission>>, working_directory: Seq<Option<Permission>>,
+    repository: Seq<Option<Permission>>, working_directories: Seq<Option<Permission>>, toolchain: Seq<Option<Permission>>) -> Map<Object, Seq<Option<Permission>>> {
     map![
         Object::Checks => checks,
         Object::Transcripts => transcripts,
         Object::WorkingDirectory => working_directory,
         Object::Repository => repository,
         Object::WorkingDirectories => working_directories,
+        Object::Toolchain => toolchain,
     ]
 }
 
@@ -416,9 +419,11 @@ pub trait Encoding {
 /// Each gate is named for the spec predicate it decides, and its contract is
 /// that predicate.
 pub trait Gates {
-    /// agent's permissions match the policy.
-    fn isolated(checks: Permission, transcripts: Permission, working_directory: Permission, repository: Permission, working_directories: Permission) -> (r: bool)
-        ensures r == spec::isolated(observed(checks, transcripts, working_directory, repository, working_directories));
+    /// agent's permissions match the policy, on every path of every object, and
+    /// none is missing.
+    fn isolated(checks: &Vec<Option<Permission>>, transcripts: &Vec<Option<Permission>>, working_directory: &Vec<Option<Permission>>,
+        repository: &Vec<Option<Permission>>, working_directories: &Vec<Option<Permission>>, toolchain: &Vec<Option<Permission>>) -> (r: bool)
+        ensures r == spec::isolated(observed(checks@, transcripts@, working_directory@, repository@, working_directories@, toolchain@));
 
     /// Accepted, proved, every changed path within the authority, and for a
     /// compaction, every counterexample still rejected.
