@@ -564,6 +564,9 @@ tokenized_state_machine!{ bon {
         #[sharding(variable)] pub limit: nat,
         #[sharding(variable)] pub spent: nat,
         #[sharding(variable)] pub reserved: nat,
+        /// Every returned agent process's generation, as measured: what it
+        /// spent, and what it ran past its limit.
+        #[sharding(variable)] pub generation: nat,
         /// Outstanding capabilities, keyed by the agent process that holds each.
         /// Each is a Verus token: the token is how Verus represents a capability;
         /// capability is the term. An agent process holds exactly one, and waiting
@@ -583,6 +586,7 @@ tokenized_state_machine!{ bon {
         init limit = limit;
         init spent = 0;
         init reserved = 0;
+        init generation = 0;
         init capability = Map::empty();
     }}
 
@@ -635,18 +639,21 @@ tokenized_state_machine!{ bon {
 
     /// The bon process waits on an agent process and records what it returned and
     /// its generation, consuming its capability and settling its limit. Generation is
-    /// what the agent process's models charged for its tokens, at the host file's
-    /// prices (TCB: trusted code counted it). A search's cost is its generation plus
-    /// time: the rate in bon.toml times its wall time. (OSTEP: wait)
+    /// what the agent process's tokens cost at the host file's prices, as measured
+    /// (TCB: trusted code counted it). What it is charged, and spends against its
+    /// limit, is its generation up to its limit. A harness that cannot be stopped mid-turn may
+    /// run past its limit; the overrun is in generation, never in spent. A search's
+    /// cost is its generation plus time: the rate in bon.toml times its wall time.
+    /// (OSTEP: wait)
     transition!{ wait(agent_process: AgentProcess, held: Capability, result: Option<Candidate>, generation: nat) {
         remove capability -= [agent_process => held];
         require result matches Some(candidate) ==> candidate.base == held.base;
-        require generation <= held.limit;
         let search = pre.searches[agent_process.search];
         update searches = pre.searches.update(agent_process.search,
             Search { results: search.results.insert(agent_process.index, result), ..search });
-        update spent = pre.spent + generation;
+        update spent = pre.spent + vstd::math::min(generation as int, held.limit as int) as nat;
         update reserved = (pre.reserved - held.limit) as nat;
+        update generation = pre.generation + generation;
     }}
 
     /// Code or compaction: the selected candidate is pushed to trunk, if a
@@ -719,6 +726,13 @@ tokenized_state_machine!{ bon {
         && (self.searches.len() == 0 ==> self.capability.dom().len() == 0 && self.reserved == 0)
         && (self.searches.len() > 0 ==>
             self.reserved == self.searches.last().limit * self.capability.dom().len())
+    }
+
+    /// What is spent is never more than what was generated: an overrun is
+    /// recorded, never charged.
+    #[invariant]
+    pub fn spent_within_generation(&self) -> bool {
+        self.spent <= self.generation
     }
 
     /// Candidates of a search are siblings of its base.
@@ -814,7 +828,7 @@ tokenized_state_machine!{ bon {
     fn wait_inductive(pre: Self, post: Self, agent_process: AgentProcess, held: Capability, result: Option<Candidate>, generation: nat) {
         broadcast use vstd::set::lemma_set_remove_len;
         assert(pre.capability.contains_key(agent_process) && pre.capability[agent_process] == held);
-        // Settling: one capability fewer, its limit released, its generation spent.
+        // Settling: one capability fewer, its limit released, what it is charged spent.
         assert(post.capability.dom() =~= pre.capability.dom().remove(agent_process));
         assert(post.capability.dom().len() + 1 == pre.capability.dom().len());
         let search_limit = pre.searches.last().limit;

@@ -1194,8 +1194,10 @@ pub fn record_grant(m: &Manifest, kind: &Kind, n: usize, agent_process_limit: u6
     record(m, &format!("grant {n} {now} {agent_process_limit} {k} {goal}"));
 }
 
-/// wait: when, the agent process, the commit it returned (or none), and its
-/// generation in microdollars. Its result is the one the search now holds.
+/// wait: when, the agent process, the commit it returned (or none), what it
+/// is charged against its limit (its generation, up to the agent process's
+/// limit), and its generation as measured, both in
+/// microdollars. Its result is the one the search now holds.
 #[verifier::external_body]
 pub fn record_wait(m: &Manifest, search: usize, index: usize, result: &Option<Candidate>, generation: u64, Ghost(searches): Ghost<Seq<spec::Search>>)
     requires
@@ -1205,7 +1207,8 @@ pub fn record_wait(m: &Manifest, search: usize, index: usize, result: &Option<Ca
 {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let commit = result.as_ref().map_or("none".to_string(), |c| c.commit.iter().collect());
-    record(m, &format!("wait {now} {search} {index} {commit} {generation}"));
+    let charged = generation.min(micro(m.config.agent_process.limit));
+    record(m, &format!("wait {now} {search} {index} {commit} {charged} {generation}"));
 }
 
 /// push: the tested search's selected candidate i, cleared by the counterexample
