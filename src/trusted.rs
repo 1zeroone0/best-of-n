@@ -282,7 +282,11 @@ fn materialize(root: &std::path::Path, commit: &str, dir: &std::path::Path) -> R
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let mut archive = Command::new("git").args(["archive", "--format=tar", commit]).current_dir(root)
         .stdout(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
-    let tar = Command::new("tar").arg("-x").arg("-C").arg(dir)
+    // -m: each file gets the time it was extracted, not its commit's. Cargo
+    // tracks a package's own sources by path and mtime, so files older than a
+    // build directory's artifacts (one shared across the commits a test runs on)
+    // read as unchanged, and the test runs on the last commit built.
+    let tar = Command::new("tar").arg("-x").arg("-m").arg("-C").arg(dir)
         .stdin(archive.stdout.take().unwrap()).status().map_err(|e| e.to_string())?;
     if !archive.wait().map_err(|e| e.to_string())?.success() || !tar.success() {
         return Err(format!("materialize {commit}"));
@@ -1431,6 +1435,26 @@ pub fn parse_cue(t: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_materialized_commit_is_newer_than_any_build_before_it() {
+        let d = std::env::temp_dir().join(format!("bon-mtime-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        git(&d, &["init", "-q"]).unwrap();
+        std::fs::write(d.join("a.rs"), "fn main() {}\n").unwrap();
+        git(&d, &["add", "."]).unwrap();
+        let out = Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "old"])
+            .env("GIT_AUTHOR_DATE", "2001-01-01T00:00:00Z").env("GIT_COMMITTER_DATE", "2001-01-01T00:00:00Z").current_dir(&d).status().unwrap();
+        assert!(out.success());
+        let before = std::time::SystemTime::now() - Duration::from_secs(5);
+        let dir = d.join("out");
+        let _ = materialize(&d, "HEAD", &dir);
+        let mtime = std::fs::metadata(dir.join("a.rs")).unwrap().modified().unwrap();
+        assert!(mtime > before, "a file of a 2001 commit gets the time it was extracted");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     use super::*;
 
     #[test]
