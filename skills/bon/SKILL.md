@@ -13,9 +13,12 @@ with them on the spec level, and you run bon.
 
 1. **Design in chat, one decision at a time.** Get a clear yes, then build all
    of what was agreed. No half versions, no "later".
-2. **One word per thing.** Take it from OSTEP or object capabilities, then
-   Verus and Rust, then the tool's own (git, POSIX). The same word in chat,
-   queue, spec, code and config. A new word gets defined or dropped.
+2. **One word per thing.** Take it from OSTEP, object capabilities or
+   λ-calculus, whichever fits best (λ-calculus for the logic: function, term,
+   bound, free; OSTEP and object capabilities for the system's nouns); then
+   Verus and Rust; then the tool's own (git, POSIX). If none fits, or you are
+   unsure, ask the owner. The same word in chat, queue, spec, code and config.
+   A new word gets defined or dropped.
 3. **Ask the bitter lesson first.** Do search, agreement, limits or git
    already cover it? Then no new mechanism, state or special case.
 4. **Upstream is the owner's; downstream is computation's.** Selections,
@@ -40,6 +43,51 @@ with them on the spec level, and you run bon.
     disagreeing or proposing, read what it concerns and cite `file:line`; say
     where the code agrees with the owner and where it disagrees. A word not in
     the spec is undefined: use the spec's word or say it is missing.
+14. **Keep bon the tool apart from bon's own repository.** What bon builds
+    for any repository (a verified core, the types it emits, programs in
+    TypeScript, Go or Python over them) is the tool's, even where bon's own
+    repository does not use it. Bon's own spec is one input, never the shape.
+15. **State a cost before building, not after.** A trade-off the owner has
+    not heard (history lost, a format changed, a search spent) is theirs to
+    decide first.
+
+## How the owner learns
+
+- Define every symbol before using it: its category (definition, parameter,
+  placeholder) and its meaning.
+- One complete worked example, then vary one thing at a time.
+- Code line by line with short inline comments, not prose.
+- A tree view first, with its moving parts marked, then the linear form.
+- Never one letter, word or color for two things; state positional
+  conventions.
+- When the owner is wrong, find the misconception; do not restate the answer.
+- Lead with the answer, and be short. Give the anchor; the owner extends it.
+
+## Writing the spec
+
+- **Names:** a parameter is the word for what it is (`search`, `candidate`,
+  `path`), or for its role when two of one type meet, in a fixed order
+  (`counterexample`, then `tested`). Letters only for a candidate's index
+  (`i`, `j`) and a gate's return (`r`). Nothing shares a name with a spec
+  function; a value is never named like the function that produces it.
+- **Every spec function has one `///` sentence saying when it holds.**
+- **Count the implementations:** a gate's contract admits exactly one
+  (`ensures r == predicate`, or an option the predicate makes unique); pin
+  order and duplicates where a gate returns many.
+- **Classify an intent by what it is about,** not by its words: every state
+  → invariant; one step → transition; a yes or no the bon process decides →
+  predicate and gate; a value from others → function; what programs may
+  assume → property; effects (files, processes, what an agent sees) →
+  trusted code and a test; look and feel → the program layer. One intent may
+  split across kinds.
+- **Trusted code:** a trusted function carries no `ensures`; verified code
+  checks what it returns. A `requires` on one is a checked edge. Trusted code
+  and the checks are protected from every search, and a skipped proof outside
+  them (`external_body`, `assume`, `admit`) fails `sbom --check`.
+- **Provenance:** an intent enters the spec in the commit that deletes its
+  queue line, citing `(queue N)`; a change agreed in chat cites its session.
+- **Views derive only from the source:** the spec's and the code's own names
+  and text, grouped and laid out, never paraphrased or given a new notation.
 
 ## Read first
 
@@ -119,13 +167,19 @@ at a time.
 
 | when | run |
 |---|---|
-| see everything | `bon` in the terminal, `bon view` on a page |
+| see everything | `bon` in a terminal (the view: Project, Spec, Queue, Traces); piped, it prints text; `bon view` on a page |
+| the spec, its vocabulary and how it reaches the code | `bon spec`, or `bon spec NAME` for one item |
+| the kernel's types changed | `bon types`; `bon types --check` is a test |
 | the spec changed and trunk's checks reject it | `bon code` |
 | trunk may do what the spec forbids | `bon counterexample` (if found, its test lands on trunk, whose checks then reject it: run `bon code`) |
 | trunk should lose what is stale | `bon compaction` |
-| a new transcript arrived | `bon queue`; show the owner the patch it names and the contested cues |
+| a new transcript arrived | `bon queue`; show the owner the patch it names and the contested cues; they accept it with `git am` |
 | spare capacity should work | `bon background` (`--plist` for launchd) |
 | a dependency, tool or trusted function changed | `bon sbom`; commit `.bon/sbom.json` |
+
+**A run's settings** (`n`, harnesses, limits) are read from `.bon/bon.toml`
+at trunk's head: edit it, commit and push, then run. Each run's settings stay
+in git beside its result.
 
 **In Rex** (`REX_SESSION` is set), a search runs in its own pane, so it
 outlives this agent, the app and the connection:
@@ -159,9 +213,13 @@ Everywhere else `bon` is a fixed tool, and none of this applies.
 ## Traces
 
 Everything bon observed is on disk. Answer by querying it (DuckDB reads
-JSONL directly).
+JSONL directly). Traces hold prompts, arguments and outputs: they never enter
+the repository. `.bon/traces` is its own git repository, pushed after each
+search command to the private remote the manifest names in `traces`.
 
-- `.bon/traces/<pid>/transitions`: each transition, by its spec name.
+- `.bon/traces/<pid>/transitions`: each transition, by its spec name, with
+  its arguments; the lines that are not transitions (selected, blocked, not
+  found, proposal) say what the bon process concluded.
 - `.bon/traces/<pid>/searches.jsonl`: each search's `agent_processes`,
   `verified`, `generation_dollars`, `seconds`, `rate`, `time_dollars`,
   `cost_per_verified_candidate`.
