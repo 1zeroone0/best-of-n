@@ -5,7 +5,8 @@
 use best_of_n::exec::Kernel;
 use best_of_n::gates::{AgentProcess, Candidate, Encoding, Gates, Hash, Kind, Search};
 
-fn t(s: &str) -> Vec<char> { s.chars().collect() }
+/// Text as whichever text type a field takes (Commit, Path, Intent, Transcript).
+fn t<T: FromIterator<char>>(s: &str) -> T { s.chars().collect() }
 
 fn candidate(commit: &str, out: u64, rank: i64) -> Candidate {
     Candidate {

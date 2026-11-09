@@ -3,8 +3,9 @@
 //! candidates write the implementation in exec.rs and cannot weaken a contract.
 //!
 //! Exec types carry the spec's names and view the spec type of the same name.
-//! Text (commits, paths, intents) is `Vec<char>`, whose view is the spec's
-//! `Seq<char>`; trusted code converts at the edge.
+//! Text has a type per meaning (Commit, Path, Intent, Transcript), each a
+//! `Vec<char>` whose view is the spec's type of the same name; trusted code
+//! converts at the edge.
 
 use vstd::prelude::*;
 use crate::spec;
@@ -14,17 +15,26 @@ verus! {
 
 // ── types ───────────────────────────────────────────────
 
-/// A git commit, by its hash.
-pub type Commit = Vec<char>;
+/// A git commit, by its hash. Its own type: a commit is never a path.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Commit(pub Vec<char>);
 
 /// A path in a commit's tree.
-pub type Path = Vec<char>;
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Path(pub Vec<char>);
 
 /// One line of the queue.
-pub type Intent = Vec<char>;
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Intent(pub Vec<char>);
 
 /// A WebVTT file.
-pub type Transcript = Path;
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Transcript(pub Path);
+
+impl View for Commit { type V = spec::Commit; open spec fn view(&self) -> spec::Commit { spec::Commit(self.0@) } }
+impl View for Path { type V = spec::Path; open spec fn view(&self) -> spec::Path { spec::Path(self.0@) } }
+impl View for Intent { type V = spec::Intent; open spec fn view(&self) -> spec::Intent { spec::Intent(self.0@) } }
+impl View for Transcript { type V = spec::Transcript; open spec fn view(&self) -> spec::Transcript { spec::Transcript(self.0@) } }
 
 /// A WebVTT cue, by its start time in milliseconds.
 pub type Cue = u64;
@@ -189,17 +199,17 @@ pub open spec fn text(chars: Seq<char>) -> Seq<u64> {
 }
 
 /// A list of texts: its length, then each text.
-pub open spec fn texts(list: Seq<Vec<char>>) -> Seq<u64> {
-    seq![list.len() as u64] + list.map_values(|chars: Vec<char>| text(chars@)).flatten()
+pub open spec fn texts(list: Seq<Path>) -> Seq<u64> {
+    seq![list.len() as u64] + list.map_values(|path: Path| text(path.0@)).flatten()
 }
 
 /// A kind: a tag (0 queue, 1 code, 2 compaction, 3 counterexample), then its
 /// fields; a counterexample's goal is 0 for trunk, or 1 and the agent process.
 pub open spec fn kind_words(kind: Kind) -> Seq<u64> {
     match kind {
-        Kind::Queue { goal } => seq![0u64] + text(goal@),
-        Kind::Code { goal } => seq![1u64] + text(goal@),
-        Kind::Compaction { goal, out } => seq![2u64] + text(goal@) + seq![out.len() as u64] + out@.map_values(|hash: Hash| hash.0),
+        Kind::Queue { goal } => seq![0u64] + text(goal.0.0@),
+        Kind::Code { goal } => seq![1u64] + text(goal.0@),
+        Kind::Compaction { goal, out } => seq![2u64] + text(goal.0@) + seq![out.len() as u64] + out@.map_values(|hash: Hash| hash.0),
         Kind::Counterexample { goal } => match goal {
             Some(agent_process) => seq![3u64, 1u64, agent_process.search as u64, agent_process.index as u64],
             None => seq![3u64, 0u64],
@@ -213,9 +223,9 @@ pub open spec fn bit(value: bool) -> u64 { if value { 1u64 } else { 0u64 } }
 /// A candidate, field by field in declaration order; a bool is 0 or 1, and
 /// rank is its two's complement.
 pub open spec fn candidate_words(candidate: Candidate) -> Seq<u64> {
-    text(candidate.commit@) + text(candidate.base@) + seq![bit(candidate.accepted), bit(candidate.proved)] + texts(candidate.changed@)
+    text(candidate.commit.0@) + text(candidate.base.0@) + seq![bit(candidate.accepted), bit(candidate.proved)] + texts(candidate.changed@)
         + seq![candidate.out.len() as u64] + candidate.out@.map_values(|hash: Hash| hash.0)
-        + seq![candidate.intents.len() as u64] + candidate.intents@.map_values(|pair: (Cue, Intent)| seq![pair.0] + text(pair.1@)).flatten()
+        + seq![candidate.intents.len() as u64] + candidate.intents@.map_values(|pair: (Cue, Intent)| seq![pair.0] + text(pair.1.0@)).flatten()
         + seq![candidate.accepts.len() as u64]
         + candidate.accepts@.map_values(|pair: (i64, bool)| seq![pair.0 as u64, bit(pair.1)]).flatten()
         + seq![bit(candidate.rejects_counterexamples), candidate.rank as u64, candidate.diff]
@@ -228,7 +238,7 @@ pub open spec fn result_words(result: Option<Candidate>) -> Seq<u64> {
 
 /// A search, field by field in declaration order.
 pub open spec fn encoded(search: Search) -> Seq<u64> {
-    kind_words(search.kind) + text(search.base@) + seq![search.n as u64] + texts(search.checks@) + texts(search.tests@) + texts(search.trusted@) + seq![search.limit]
+    kind_words(search.kind) + text(search.base.0@) + seq![search.n as u64] + texts(search.checks@) + texts(search.tests@) + texts(search.trusted@) + seq![search.limit]
         + seq![search.results.len() as u64] + search.results@.map_values(|result: Option<Candidate>| result_words(result)).flatten()
 }
 
@@ -299,8 +309,8 @@ pub open spec fn boolean(value: bool) -> Seq<char> {
 }
 
 /// Texts as a JSON array of strings.
-pub open spec fn strings(list: Seq<Vec<char>>) -> Seq<char> {
-    array(list.map_values(|chars: Vec<char>| string(chars@)))
+pub open spec fn strings(list: Seq<Path>) -> Seq<char> {
+    array(list.map_values(|path: Path| string(path.0@)))
 }
 
 /// Hashes as a JSON array of decimal strings.
@@ -311,10 +321,10 @@ pub open spec fn hash_strings(list: Seq<Hash>) -> Seq<char> {
 /// A kind as {"<kind>":{fields}}.
 pub open spec fn kind_json(kind: Kind) -> Seq<char> {
     match kind {
-        Kind::Queue { goal } => object(seq![field("queue"@, object(seq![field("goal"@, string(goal@))]))]),
-        Kind::Code { goal } => object(seq![field("code"@, object(seq![field("goal"@, string(goal@))]))]),
+        Kind::Queue { goal } => object(seq![field("queue"@, object(seq![field("goal"@, string(goal.0.0@))]))]),
+        Kind::Code { goal } => object(seq![field("code"@, object(seq![field("goal"@, string(goal.0@))]))]),
         Kind::Compaction { goal, out } => object(seq![field("compaction"@, object(seq![
-            field("goal"@, string(goal@)), field("out"@, hash_strings(out@))]))]),
+            field("goal"@, string(goal.0@)), field("out"@, hash_strings(out@))]))]),
         Kind::Counterexample { goal } => object(seq![field("counterexample"@, object(seq![field("goal"@, match goal {
             Some(agent_process) => object(seq![field("search"@, decimal(agent_process.search as nat)), field("index"@, decimal(agent_process.index as nat))]),
             None => seq!['n', 'u', 'l', 'l'],
@@ -325,13 +335,13 @@ pub open spec fn kind_json(kind: Kind) -> Seq<char> {
 /// A candidate in the spec's names.
 pub open spec fn candidate_json(candidate: Candidate) -> Seq<char> {
     object(seq![
-        field("commit"@, string(candidate.commit@)),
-        field("base"@, string(candidate.base@)),
+        field("commit"@, string(candidate.commit.0@)),
+        field("base"@, string(candidate.base.0@)),
         field("accepted"@, boolean(candidate.accepted)),
         field("proved"@, boolean(candidate.proved)),
         field("changed"@, strings(candidate.changed@)),
         field("out"@, hash_strings(candidate.out@)),
-        field("intents"@, array(candidate.intents@.map_values(|pair: (Cue, Intent)| array(seq![decimal(pair.0 as nat), string(pair.1@)])))),
+        field("intents"@, array(candidate.intents@.map_values(|pair: (Cue, Intent)| array(seq![decimal(pair.0 as nat), string(pair.1.0@)])))),
         field("accepts"@, array(candidate.accepts@.map_values(|pair: (i64, bool)| array(seq![signed(pair.0 as int), boolean(pair.1)])))),
         field("rejects_counterexamples"@, boolean(candidate.rejects_counterexamples)),
         field("rank"@, signed(candidate.rank as int)),
@@ -343,7 +353,7 @@ pub open spec fn candidate_json(candidate: Candidate) -> Seq<char> {
 pub open spec fn json(search: Search) -> Seq<char> {
     object(seq![
         field("kind"@, kind_json(search.kind)),
-        field("base"@, string(search.base@)),
+        field("base"@, string(search.base.0@)),
         field("n"@, decimal(search.n as nat)),
         field("checks"@, strings(search.checks@)),
         field("tests"@, strings(search.tests@)),
@@ -423,7 +433,7 @@ pub trait Gates {
         requires search.results.len() == search.n,
         ensures
             forall|entry: int| 0 <= entry < r.len() ==> spec::proposed(search@, r[entry].0 as nat, r[entry].1@),
-            forall|cue: Cue, intent: Seq<char>| spec::proposed(search@, cue as nat, intent) ==>
+            forall|cue: Cue, intent: spec::Intent| spec::proposed(search@, cue as nat, intent) ==>
                 exists|entry: int| 0 <= entry < r.len() && r[entry].0 == cue,
             forall|earlier: int, later: int| 0 <= earlier < later < r.len() ==> r[earlier].0 < r[later].0;
 

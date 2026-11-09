@@ -20,6 +20,18 @@ use vstd::prelude::*;
 
 use crate::gates::{Candidate, Commit, Cue, Hash, Intent, Kind, Path, Permission, Search};
 use crate::spec;
+use crate::gates::Transcript;
+
+// The text types at the trusted edge: each reads as its chars and is built from
+// chars. Each stays its own type: a commit is never passed as a path.
+impl std::ops::Deref for Commit { type Target = Vec<char>; fn deref(&self) -> &Vec<char> { &self.0 } }
+impl std::ops::Deref for Path { type Target = Vec<char>; fn deref(&self) -> &Vec<char> { &self.0 } }
+impl std::ops::Deref for Intent { type Target = Vec<char>; fn deref(&self) -> &Vec<char> { &self.0 } }
+impl std::ops::Deref for Transcript { type Target = Vec<char>; fn deref(&self) -> &Vec<char> { &self.0 .0 } }
+impl FromIterator<char> for Commit { fn from_iter<I: IntoIterator<Item = char>>(i: I) -> Self { Commit(i.into_iter().collect()) } }
+impl FromIterator<char> for Path { fn from_iter<I: IntoIterator<Item = char>>(i: I) -> Self { Path(i.into_iter().collect()) } }
+impl FromIterator<char> for Intent { fn from_iter<I: IntoIterator<Item = char>>(i: I) -> Self { Intent(i.into_iter().collect()) } }
+impl FromIterator<char> for Transcript { fn from_iter<I: IntoIterator<Item = char>>(i: I) -> Self { Transcript(Path(i.into_iter().collect())) } }
 
 // ── bon.toml ────────────────────────────────────────────
 
@@ -336,7 +348,7 @@ static LATEST: std::sync::Mutex<(String, String)> = std::sync::Mutex::new((Strin
 
 /// A kind's name and goal, as the trace records them.
 fn label(kind: &Kind) -> (String, String) {
-    let text = |v: &Vec<char>| v.iter().collect::<String>();
+    let text = |v: &[char]| v.iter().collect::<String>();
     match kind {
         Kind::Queue { goal } => ("queue".into(), text(goal)),
         Kind::Code { goal } => ("code".into(), text(goal)),
@@ -1028,7 +1040,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
     // agent empties its build directory; engineer removes the directory itself at cleanup.
     let _ = as_agent(config, std::path::Path::new("/tmp"), &[], &["rm".into(), "-rf".into(), build.to_string_lossy().into()])
         .stderr(Stdio::null()).status();
-    let text = |v: &Vec<char>| v.iter().collect::<String>();
+    let text = |v: &[char]| v.iter().collect::<String>();
     // Lines added and removed, apart: the kernel's diff is their sum.
     let (added, removed) = candidate.as_ref().map_or((0, 0), |c| added_removed(&m.root, &text(&c.base), &text(&c.commit)));
     let facts = serde_json::json!({
@@ -1041,7 +1053,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
         "over_limit": spent > micro(config.agent_process.limit),
         "candidate": candidate.as_ref().map(|c| serde_json::json!({
             "commit": text(&c.commit), "base": text(&c.base), "accepted": c.accepted, "proved": c.proved,
-            "changed": c.changed.iter().map(text).collect::<Vec<_>>(), "diff": c.diff, "added": added, "removed": removed, "rank": c.rank,
+            "changed": c.changed.iter().map(|p| text(p)).collect::<Vec<_>>(), "diff": c.diff, "added": added, "removed": removed, "rank": c.rank,
             "out": c.out.iter().map(|h| h.0).collect::<Vec<u64>>(), "accepts": c.accepts, "rejects_counterexamples": c.rejects_counterexamples,
             "intents": c.intents.iter().map(|(q, i)| (q, text(i))).collect::<Vec<_>>(),
         })),
@@ -1418,7 +1430,7 @@ mod tests {
     }
 
     fn rejecting_trunk(base: &str, test: &str) -> Search {
-        let text = |s: &str| s.chars().collect::<Vec<char>>();
+        fn text<T: FromIterator<char>>(s: &str) -> T { s.chars().collect() }
         Search {
             kind: Kind::Counterexample { goal: None }, base: text(base), n: 1, checks: vec![], tests: vec![text("tests/")], trusted: vec![], limit: 1,
             results: vec![Some(Candidate {
@@ -1471,7 +1483,7 @@ mod tests {
 
     #[test]
     fn a_test_builds_on_the_tree_it_tests() {
-        let text = |s: &str| s.chars().collect::<Vec<char>>();
+        fn text<T: FromIterator<char>>(s: &str) -> T { s.chars().collect() }
         let candidate = |commit: &str| Candidate {
             commit: text(commit), base: text("head"), accepted: true, proved: true, changed: vec![], out: vec![],
             intents: vec![], accepts: vec![], rejects_counterexamples: false, rank: 0, diff: 1,
@@ -1492,7 +1504,7 @@ mod tests {
         // queue 16: attempt a runs n[a] agent processes, the last width after the list ends;
         // the attempts are the longest list's length.
         let m = Manifest { config: config(), root: PathBuf::from(".") };
-        let code = Kind::Code { goal: vec![] };
+        let code = Kind::Code { goal: Commit(vec![]) };
         assert_eq!((width(&m, &code, 0), width(&m, &code, 1), width(&m, &code, 5)), (2, 4, 4));
         assert_eq!(attempts(&m), 2);
     }

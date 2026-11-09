@@ -16,16 +16,16 @@ verus! {
 // ── types ───────────────────────────────────────────────
 
 /// A git commit, by its hash. (TCB: git)
-pub type Commit = Seq<char>;
+pub struct Commit(pub Seq<char>);
 
 /// A path in a commit's tree, as git reports it. (TCB: git)
-pub type Path = Seq<char>;
+pub struct Path(pub Seq<char>);
 
 /// One line of the queue: what is wanted and not yet in the spec.
-pub type Intent = Seq<char>;
+pub struct Intent(pub Seq<char>);
 
 /// A WebVTT file, one per recorded call. (TCB: WebVTT)
-pub type Transcript = Path;
+pub struct Transcript(pub Path);
 
 /// A WebVTT cue, by its start time in milliseconds. (TCB: WebVTT)
 pub type Cue = nat;
@@ -138,21 +138,21 @@ pub struct Search {
 
 /// bon's directory in the repository: the manifest, the queue, the SBOM and
 /// the traces.
-pub open spec fn bon_path() -> Path { seq!['.', 'b', 'o', 'n', '/'] }
+pub open spec fn bon_path() -> Path { Path(seq!['.', 'b', 'o', 'n', '/']) }
 
 /// The queue's path, under bon's directory.
-pub open spec fn queue_path() -> Path { bon_path() + seq!['q', 'u', 'e', 'u', 'e', '.', 't', 's', 'v'] }
+pub open spec fn queue_path() -> Path { Path(bon_path().0 + seq!['q', 'u', 'e', 'u', 'e', '.', 't', 's', 'v']) }
 
 /// path is under one of the paths: each covers itself and every path it is a prefix of.
 pub open spec fn under(paths: Set<Path>, path: Path) -> bool {
-    exists|prefix: Path| paths.contains(prefix) && prefix.is_prefix_of(path)
+    exists|prefix: Path| paths.contains(prefix) && prefix.0.is_prefix_of(path.0)
 }
 
 /// No search may change path, except a queue search the queue: bon's directory,
 /// a path under a check (the spec, the proofs, engineer's tests), or trusted
 /// code (the files the manifest's SBOM declares trusted), which nothing proves.
 pub open spec fn protected(checks: Set<Path>, trusted: Set<Path>, path: Path) -> bool {
-    bon_path().is_prefix_of(path) || under(checks, path) || under(trusted, path)
+    bon_path().0.is_prefix_of(path.0) || under(checks, path) || under(trusted, path)
 }
 
 /// Attenuation at grant: what a capability for this kind may change. `tests`
@@ -370,7 +370,7 @@ pub open spec fn proposed(search: Search, cue: Cue, intent: Intent) -> bool {
     search.kind is Queue && agreed(search, cue)
     && exists|i: int| cites(search, i, cue) && at(search, i).intents[cue] == intent
         && forall|j: int| cites(search, j, cue) ==>
-            intent.len() < at(search, j).intents[cue].len() || (intent.len() == at(search, j).intents[cue].len() && i <= j)
+            intent.0.len() < at(search, j).intents[cue].0.len() || (intent.0.len() == at(search, j).intents[cue].0.len() && i <= j)
 }
 
 /// The agent processes of the search at search_index: one per index.

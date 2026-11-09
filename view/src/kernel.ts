@@ -1,5 +1,5 @@
 // Generated from src/gates.rs, src/wasm.rs, src/projection.rs by bon types. Do not edit.
-/** A git commit, by its hash. */
+/** A git commit, by its hash. Its own type: a commit is never a path. */
 export type Commit = string;
 /** A path in a commit's tree. */
 export type Path = string;

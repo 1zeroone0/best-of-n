@@ -4,7 +4,7 @@ package kernel
 
 import "encoding/json"
 
-// A git commit, by its hash.
+// A git commit, by its hash. Its own type: a commit is never a path.
 type Commit = string
 
 // A path in a commit's tree.

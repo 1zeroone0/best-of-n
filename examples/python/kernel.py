@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import TypedDict
 
-# A git commit, by its hash.
+# A git commit, by its hash. Its own type: a commit is never a path.
 Commit = str
 
 # A path in a commit's tree.
