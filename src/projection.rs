@@ -164,6 +164,9 @@ pub struct GoalTrace {
 #[serde(default)]
 pub struct BonProcess {
     pub pid: u64,
+    /// Its trace directory under .bon/traces: `<pid>`, or `<pid>.<start>` when
+    /// an earlier bon process had the same pid.
+    pub trace: String,
     pub running: bool,
     pub kind: String,
     pub goal: String,

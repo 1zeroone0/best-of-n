@@ -324,10 +324,9 @@ fn background(root: &str) -> Result<(), String> {
     let r = Path::new(root);
     // Spare capacity: no bon command running here, and load below the host's jobs.
     // A bon process is running while its pid, which names its traces, is alive.
-    let me = std::process::id().to_string();
-    let busy = std::fs::read_dir(r.join(".bon/traces")).into_iter().flatten().flatten()
-        .filter_map(|e| e.file_name().to_str().filter(|n| n.chars().all(|c| c.is_ascii_digit())).map(String::from))
-        .any(|pid| pid != me && Command::new("ps").args(["-p", &pid]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success()));
+    let traces = r.join(".bon/traces");
+    let busy = std::fs::read_dir(&traces).into_iter().flatten().flatten()
+        .any(|e| best_of_n::trusted::trace_running(&traces, &e.file_name().to_string_lossy()));
     if busy { println!("busy: a bon command is running here"); return Ok(()); }
     let jobs = std::fs::read_to_string(best_of_n::trusted::HOST).ok()
         .and_then(|d| d.lines().find_map(|l| l.strip_prefix("jobs").and_then(|v| v.trim_start_matches([' ', '=']).trim().parse::<f64>().ok())))

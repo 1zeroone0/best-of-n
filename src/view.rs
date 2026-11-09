@@ -144,20 +144,21 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
 
     // Every bon process's trace, newest first.
     let traces = root.join(".bon/traces");
-    let mut pids: Vec<(u64, PathBuf)> = std::fs::read_dir(&traces).into_iter().flatten().flatten()
-        .filter_map(|e| Some((e.file_name().to_string_lossy().parse::<u64>().ok()?, e.path()))).collect();
-    pids.sort_by_key(|(_, p)| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+    // Each run's directory: <pid>, or <pid>.<start> for a reused pid.
+    let mut pids: Vec<(u64, String, PathBuf)> = std::fs::read_dir(&traces).into_iter().flatten().flatten()
+        .filter_map(|e| { let name = e.file_name().to_string_lossy().to_string();
+            Some((best_of_n::trusted::trace_process(&name)?.0, name, e.path())) }).collect();
+    pids.sort_by_key(|(_, _, p)| std::fs::metadata(p).and_then(|m| m.modified()).ok());
     pids.reverse();
     let (mut verified_all, mut candidates_all, mut cost_all) = (0usize, 0usize, 0f64);
     let (mut generation_all, mut time_all) = (0f64, 0f64);
     let mut processes = Vec::new();
     let mut last_push: Option<Value> = None;
     let (mut earliest, mut latest) = (u64::MAX, 0u64);
-    for (pid, dir) in pids.into_iter() {
+    for (pid, trace, dir) in pids.into_iter() {
         // This bon process, reading its own traces after a push (for cost.toml),
         // has ended its work: only another live process is running.
-        let running = pid != u64::from(std::process::id()) && Command::new("ps").args(["-p", &pid.to_string()]).stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success());
+        let running = best_of_n::trusted::trace_running(&traces, &trace);
         let transitions: Vec<String> = std::fs::read_to_string(dir.join("transitions")).unwrap_or_default()
             .lines().map(String::from).collect();
         if !running && !transitions.iter().any(|t| t.starts_with("grant ")) { continue; }
@@ -296,7 +297,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
         });
         earliest = earliest.min(time); latest = latest.max(time);
         // What `find` looks in: the pid, the command, its outcome, and every commit.
-        let mut text = format!("{pid} {kind} {goal} {outcome} {}", push.as_ref().and_then(|p| p["commit"].as_str()).unwrap_or(""));
+        let mut text = format!("{trace} {kind} {goal} {outcome} {}", push.as_ref().and_then(|p| p["commit"].as_str()).unwrap_or(""));
         for s in &searches { for c in s["candidates"].as_array().into_iter().flatten() { text.push(' '); text.push_str(c["commit"].as_str().unwrap_or("")); } }
         if !filter.covers(time, &text) { continue; }
         for s in &searches {
@@ -354,7 +355,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
             "from": at, "subject": if started.is_empty() { String::new() } else { git(root, &["log", "-1", "--format=%s", &started]) },
         });
         processes.push(json!({
-            "pid": pid, "running": running, "kind": kind, "goal": goal, "title": title, "about": about, "base": base, "outcome": outcome, "sentence": sentence,
+            "pid": pid, "trace": trace, "running": running, "kind": kind, "goal": goal, "title": title, "about": about, "base": base, "outcome": outcome, "sentence": sentence,
             "cost": cost, "generation": generation, "time_cost": time_cost, "push": push, "limit": limit, "time": time,
             "transitions": transitions, "searches": searches,
         }));

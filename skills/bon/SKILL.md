@@ -240,7 +240,9 @@ Everywhere else `bon` is a fixed tool, and none of this applies.
 Everything bon observed is on disk. Answer by querying it (DuckDB reads
 JSONL directly). Traces hold prompts, arguments and outputs: they never enter
 the repository. `.bon/traces` is its own git repository, pushed after each
-search command to the private remote the manifest names in `traces`.
+search command to the private remote the manifest names in `traces`. Each
+run of bon has its own `<pid>`: its pid, or `<pid>.<start>` (unix seconds)
+when an earlier bon process of the same pid left a trace.
 
 - `.bon/traces/<pid>/transitions`: each transition, by its spec name, with
   its arguments; the lines that are not transitions (selected, blocked, not

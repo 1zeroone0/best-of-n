@@ -238,7 +238,10 @@ type GoalTrace struct {
 
 // One run of a bon command, by its pid.
 type BonProcess struct {
-	Pid        uint64   `json:"pid"`
+	Pid uint64 `json:"pid"`
+	// Its trace directory under .bon/traces: `<pid>`, or `<pid>.<start>` when
+	// an earlier bon process had the same pid.
+	Trace      string   `json:"trace"`
 	Running    bool     `json:"running"`
 	Kind       string   `json:"kind"`
 	Goal       string   `json:"goal"`

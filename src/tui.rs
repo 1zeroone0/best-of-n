@@ -1008,7 +1008,7 @@ fn key(app: &mut App, k: KeyEvent) -> bool {
                 if let Some(g) = sorted_groups(&app.p).get(gi) {
                     let mut items = Vec::new();
                     for b in &g.processes { for s in &b.searches { for c in &s.candidates { for l in &c.logs {
-                        items.push((format!("bon process {} · search {} · #{} · {l}", b.pid, s.search, c.index), app.root.join(".bon/traces").join(b.pid.to_string()).join(s.search.to_string()).join(c.index.to_string()).join(l)));
+                        items.push((format!("bon process {} · search {} · #{} · {l}", b.pid, s.search, c.index), app.root.join(".bon/traces").join(&b.trace).join(s.search.to_string()).join(c.index.to_string()).join(l)));
                     } } } }
                     if !items.is_empty() { app.overlay = Overlay::Logs { items, sel: 0 }; }
                 }
@@ -1021,7 +1021,7 @@ fn key(app: &mut App, k: KeyEvent) -> bool {
                     'find: for b in &g.processes { for s in &b.searches {
                         let gs = groups(s);
                         if gs.len() < 2 { continue; }
-                        let side = |c: &Facts| { let dir = app.root.join(".bon/traces").join(b.pid.to_string()).join(s.search.to_string()).join(c.index.to_string());
+                        let side = |c: &Facts| { let dir = app.root.join(".bon/traces").join(&b.trace).join(s.search.to_string()).join(c.index.to_string());
                             let name = c.logs.iter().find(|l| l.starts_with("agree")).cloned().unwrap_or("agree-0".into());
                             (format!("#{} {name}", c.index), std::fs::read_to_string(dir.join(&name)).unwrap_or_default().lines().map(String::from).collect::<Vec<_>>()) };
                         let ((lt, l), (rt, r)) = (side(gs[0][0]), side(gs[1][0]));

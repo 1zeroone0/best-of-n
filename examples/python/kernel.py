@@ -210,6 +210,9 @@ class GoalTrace(TypedDict):
 # One run of a bon command, by its pid.
 class BonProcess(TypedDict):
     pid: int
+    # Its trace directory under .bon/traces: `<pid>`, or `<pid>.<start>` when
+    # an earlier bon process had the same pid.
+    trace: str
     running: bool
     kind: str
     goal: str

@@ -41,7 +41,7 @@ export interface Push { commit: string | null; cost: number | null; to_selection
 /** The bon processes of one goal: one row of the traces. */
 export interface GoalTrace { kind: string; title: string; about: About; outcome: string; sentence: string; cost: number; generation: number; time_cost: number; push: Push | null; time: number; running: boolean; processes: Array<BonProcess> }
 /** One run of a bon command, by its pid. */
-export interface BonProcess { pid: number; running: boolean; kind: string; goal: string; title: string; about: About; outcome: string; sentence: string; cost: number; generation: number; time_cost: number; push: Push | null; limit: number | null; time: number; transitions: Array<string>; searches: Array<SearchTrace> }
+export interface BonProcess { pid: number; trace: string; running: boolean; kind: string; goal: string; title: string; about: About; outcome: string; sentence: string; cost: number; generation: number; time_cost: number; push: Push | null; limit: number | null; time: number; transitions: Array<string>; searches: Array<SearchTrace> }
 /** One search of a bon process, as its trace recorded it. */
 export interface SearchTrace { search: number; kind: string; goal: string; params: Params; width: number; started: number | null; returned: number; accepted: number; verified: number; selected: number | null; recorded_selected: number | null; kernel: string; blocked: string | null; generation: number | null; time_cost: number | null; cost: number | null; rate: number | null; seconds: number | null; time: number | null; running: boolean; background: boolean; candidates: Array<Facts> }
 /** What a search was granted with. */

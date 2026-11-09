@@ -230,13 +230,15 @@ fn as_agent(config: &Config, dir: &std::path::Path, env: &[(&str, String)], argv
     c
 }
 
-/// Run to completion or kill at `time`. Returns (exit 0, stdout).
+/// Run to completion or kill at `time`, with all it started. Returns (exit 0,
+/// stdout, killed).
 fn supervise(mut c: Command, stdin: Option<String>, time: Duration, log: &std::path::Path) -> (bool, String, bool) {
+    std::os::unix::process::CommandExt::process_group(&mut c, 0);
     c.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
     let start = Instant::now();
     let mut child = match c.spawn() {
         Ok(ch) => ch,
-        Err(e) => { let _ = std::fs::write(log, format!("spawn: {e}")); return (false, String::new(), false); }
+        Err(e) => { write_trace(log, format!("spawn: {e}")); return (false, String::new(), false); }
     };
     if let Some(text) = stdin {
         let mut pipe = child.stdin.take().unwrap();
@@ -246,16 +248,31 @@ fn supervise(mut c: Command, stdin: Option<String>, time: Duration, log: &std::p
     let mut err = child.stderr.take().unwrap();
     let o = std::thread::spawn(move || { let mut s = String::new(); let _ = out.read_to_string(&mut s); s });
     let e = std::thread::spawn(move || { let mut s = String::new(); let _ = err.read_to_string(&mut s); s });
-    let mut killed = false;
-    let status = loop {
-        if let Ok(Some(s)) = child.try_wait() { break Some(s); }
-        if start.elapsed() >= time { let _ = child.kill(); killed = true; break child.wait().ok(); }
+    // Done when the command has exited and nothing it started holds its output.
+    let mut status = None;
+    let killed = loop {
+        if status.is_none() { status = child.try_wait().ok().flatten(); }
+        if status.is_some() && o.is_finished() && e.is_finished() { break false; }
+        if start.elapsed() >= time { break true; }
         std::thread::sleep(Duration::from_millis(200));
     };
+    if killed {
+        // The command is its own process group, and agent's: agent signals the
+        // whole group (sudo, root's, is spared), so nothing it started outlives it.
+        let group = format!("-{}", child.id());
+        let signal = |s: &str| { let _ = Command::new("sudo").args(["-n", "-u", "agent", "/bin/kill", s, "--", &group])
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status(); };
+        signal("-TERM");
+        let grace = Instant::now();
+        while !(o.is_finished() && e.is_finished()) && grace.elapsed() < Duration::from_secs(2) { std::thread::sleep(Duration::from_millis(100)); }
+        signal("-KILL");
+        let _ = child.kill();
+        status = child.wait().ok();
+    }
     let stdout = o.join().unwrap_or_default();
     let stderr = e.join().unwrap_or_default();
     let exit = if killed { "killed".to_string() } else { status.and_then(|s| s.code()).map_or("signal".into(), |c| c.to_string()) };
-    let _ = std::fs::write(log, format!("exit: {exit}\nseconds: {:.1}\n--- stdout\n{stdout}\n--- stderr\n{stderr}", start.elapsed().as_secs_f64()));
+    write_trace(log, format!("exit: {exit}\nseconds: {:.1}\n--- stdout\n{stdout}\n--- stderr\n{stderr}", start.elapsed().as_secs_f64()));
     (status.map_or(false, |s| s.success()) && !killed, stdout, killed)
 }
 
@@ -450,8 +467,78 @@ static BACKGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 /// Mark this bon process as background work.
 pub fn background() { BACKGROUND.store(true, std::sync::atomic::Ordering::SeqCst); }
 
-/// This bon process's trace directory.
-fn trace_dir(root: &std::path::Path) -> PathBuf { root.join(BON).join("traces").join(format!("{}", std::process::id())) }
+/// This bon process's trace directory's name, claimed at its first trace write.
+static TRACE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// This bon process's trace directory: its own, never an earlier run's.
+fn trace_dir(root: &std::path::Path) -> PathBuf {
+    let traces = root.join(BON).join("traces");
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    traces.join(TRACE.get_or_init(|| claim(&traces, std::process::id(), now)))
+}
+
+/// Make a run's trace directory under `traces`, one no other run has: `<pid>`,
+/// or `<pid>.<start>` (unix seconds) when an earlier bon process of the same
+/// pid left `<pid>`. Making it is the claim: two runs never both make one.
+fn claim(traces: &std::path::Path, pid: u32, start: u64) -> String {
+    traced(traces, std::fs::create_dir_all(traces));
+    let mut name = pid.to_string();
+    for t in start..start + 1000 {
+        match std::fs::create_dir(traces.join(&name)) {
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => name = format!("{pid}.{t}"),
+            r => { traced(&traces.join(&name), r); break; }
+        }
+    }
+    name
+}
+
+/// A trace directory's bon process, by its name: (pid, start); start is 0 for
+/// `<pid>`, the first run of a pid.
+pub fn trace_process(name: &str) -> Option<(u64, u64)> {
+    let (pid, start) = name.split_once('.').unwrap_or((name, "0"));
+    let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    if !digits(pid) || !digits(start) { return None; }
+    Some((pid.parse().ok()?, start.parse().ok()?))
+}
+
+/// Whether the trace directory `name` under `traces` is another bon process's
+/// that is still running: its pid is alive, is not this process's, and no later
+/// run of that pid has a trace (else its pid was reused and it ended).
+pub fn trace_running(traces: &std::path::Path, name: &str) -> bool {
+    let Some((pid, start)) = trace_process(name) else { return false };
+    if pid == u64::from(std::process::id()) { return false; }
+    let later = std::fs::read_dir(traces).into_iter().flatten().flatten()
+        .filter_map(|e| trace_process(&e.file_name().to_string_lossy()))
+        .any(|(p, s)| p == pid && s > start);
+    // ps, not kill -0: kill -0 fails on another user's live process (EPERM).
+    !later && Command::new("ps").args(["-p", &pid.to_string()]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+}
+
+/// A trace write that failed is reported; the search goes on.
+fn traced(path: &std::path::Path, r: std::io::Result<()>) {
+    if let Err(e) = r { eprintln!("bon: trace not written: {}: {e}", path.display()); }
+}
+
+/// Write a trace file, its directory made first.
+fn write_trace(path: &std::path::Path, contents: impl AsRef<[u8]>) {
+    traced(path, (|| {
+        if let Some(d) = path.parent() { std::fs::create_dir_all(d)?; }
+        std::fs::write(path, contents)
+    })());
+}
+
+/// Append one line to a trace file, its directory made first.
+fn append_line(file: &std::path::Path, line: &str) {
+    traced(file, (|| {
+        if let Some(d) = file.parent() { std::fs::create_dir_all(d)?; }
+        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(file)?;
+        writeln!(f, "{line}")
+    })());
+}
+
+/// Where this driver's searches start in this bon process's runs: a search's
+/// index in the kernel (from 0 at initialize) plus it names its trace directory.
+static FIRST_RUN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Run trunk's checks once, as agent, building trunk in the process: (every
 /// test accepts trunk, Verus verifies it). Each candidate's build starts from it.
@@ -465,7 +552,7 @@ fn warm(m: &Manifest, head: &str) -> (bool, bool) {
         let build = scratch("trunk.build/build");
         writable_dir(&build).ok()?;
         let log = trace_dir(root);
-        let _ = std::fs::create_dir_all(&log);
+        traced(&log, std::fs::create_dir_all(&log));
         let tests = config.checks.test.iter().enumerate().all(|(k, v)| run_check(config, &dir, &build, v, &log.join(format!("trunk-test-{k}"))).0);
         let proved = config.checks.verify.iter().enumerate().all(|(k, v)| run_check(config, &dir, &build, v, &log.join(format!("trunk-verify-{k}"))).0);
         result = (tests, proved);
@@ -813,9 +900,14 @@ pub fn attempts(m: &Manifest) -> usize {
 #[verifier::external]
 fn bundle(m: &Manifest, commit: &str, base: &str, trace: &std::path::Path) -> Option<String> {
     let file = trace.join("candidate.bundle");
-    let _ = std::fs::create_dir_all(trace);
-    let ok = Command::new("git").args(["bundle", "create", "-q"]).arg(&file).arg(commit).arg(format!("^{base}"))
-        .current_dir(&m.root).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    traced(trace, std::fs::create_dir_all(trace));
+    // git bundles refs, never a bare commit ("empty bundle"): a ref for as long as it takes.
+    let r = format!("refs/bon/evidence/{commit}");
+    let ok = git(&m.root, &["update-ref", &r, commit]).is_ok()
+        && Command::new("git").args(["bundle", "create", "-q"]).arg(&file).arg(&r).arg(format!("^{base}"))
+            .current_dir(&m.root).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+    let _ = git(&m.root, &["update-ref", "-d", &r]);
+    if !ok { eprintln!("bon: trace not written: {}: git bundle of {commit}", file.display()); }
     ok.then(|| file.strip_prefix(&m.root).unwrap_or(&file).to_string_lossy().to_string())
 }
 
@@ -834,8 +926,11 @@ pub fn land(m: &Manifest, x: &Search, i: usize, t: Option<&Search>) -> (r: Resul
     match t {
         None => evidence.push(x.base.iter().collect()),
         Some(t) => {
+            // Under the tested search, whose candidates they are: its index in the
+            // kernel is the counterexample search's goal.
+            let Kind::Counterexample { goal: Some(p) } = &x.kind else { return Err("evidence without a tested search".into()) };
             let d = trace_dir(&m.root);
-            let search = RUNS.load(std::sync::atomic::Ordering::SeqCst).saturating_sub(2);
+            let search = FIRST_RUN.load(std::sync::atomic::Ordering::SeqCst) + p.search;
             for (j, accepts) in c.accepts.iter() {
                 if *accepts || *j < 0 { continue; }
                 if let Some(Some(e)) = t.results.get(*j as usize) {
@@ -894,7 +989,7 @@ pub fn check(m: &Manifest, commit: &Commit) -> Result<Vec<(String, bool, PathBuf
     let build = scratch("check.build/build");
     writable_dir(&build)?;
     let log = trace_dir(root);
-    let _ = std::fs::create_dir_all(&log);
+    traced(&log, std::fs::create_dir_all(&log));
     let mut out = Vec::new();
     for (kind, list) in [("test", &config.checks.test), ("verify", &config.checks.verify)] {
         for (k, v) in list.iter().enumerate() {
@@ -961,7 +1056,7 @@ pub fn run(m: &Manifest, kind: &Kind, a: usize, start: &Commit, target: Option<&
     let hs = harnesses(&m.config, kind);
     let slots: Vec<Harness> = hs.iter().flat_map(|h| std::iter::repeat(h.clone()).take(at(h, a))).collect();
     let traces = trace_dir(&m.root).join(search.to_string());
-    let _ = std::fs::create_dir_all(&traces);
+    traced(&traces, std::fs::create_dir_all(&traces));
     // At most `jobs` agent processes at once; each worker takes the next index.
     let next = std::sync::atomic::AtomicUsize::new(0);
     let out: Vec<std::sync::Mutex<(Option<Candidate>, u64)>> = slots.iter().map(|_| std::sync::Mutex::new((None, 0))).collect();
@@ -993,12 +1088,7 @@ pub fn push(m: &Manifest, commit: &Commit) -> (r: Result<(), String>) {
 }
 
 #[verifier::external]
-fn append(file: &std::path::Path, line: &serde_json::Value) {
-    if let Some(d) = file.parent() { let _ = std::fs::create_dir_all(d); }
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(file) {
-        let _ = writeln!(f, "{line}");
-    }
-}
+fn append(file: &std::path::Path, line: &serde_json::Value) { append_line(file, &line.to_string()); }
 
 /// What this bon process spent before its push: the generation and time cost
 /// of every search it ran (blocked attempts, reruns, foil and counterexample
@@ -1049,7 +1139,6 @@ pub fn report(m: &Manifest, s: &Search, verified: usize, generation: u64, starte
         per.map_or("no verified candidate".to_string(), |p| format!("${p:.4} per verified candidate")));
     eprintln!("bon: {line}");
     let d = trace_dir(&m.root);
-    let _ = std::fs::create_dir_all(&d);
     let (kind, goal) = LATEST.lock().map(|l| l.clone()).unwrap_or_default();
     let summary = serde_json::json!({
         "search": search, "kind": kind, "goal": goal,
@@ -1058,14 +1147,11 @@ pub fn report(m: &Manifest, s: &Search, verified: usize, generation: u64, starte
         "seconds": hours * 3600.0, "rate": rate, "background": background, "time_dollars": time,
         "cost_per_verified_candidate": per,
     });
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(d.join("searches.jsonl")) {
-        let _ = writeln!(f, "{summary}");
-    }
+    append(&d.join("searches.jsonl"), &summary);
     // The search as the gates saw it, in the kernel's words (little-endian),
     // for programs to read and re-derive its selection.
     let words: Vec<u8> = <crate::exec::Kernel as crate::gates::Encoding>::encode(s).iter().flat_map(|w| w.to_le_bytes()).collect();
-    let _ = std::fs::create_dir_all(d.join(search.to_string()));
-    let _ = std::fs::write(d.join(search.to_string()).join("search.words"), words);
+    write_trace(&d.join(search.to_string()).join("search.words"), words);
 }
 
 /// Record which candidate of the latest search was selected.
@@ -1085,6 +1171,8 @@ pub fn record_selected(m: &Manifest, i: usize) {
 /// initialize: trunk's head as root, and the bon process's limit.
 #[verifier::external_body]
 pub fn record_initialize(m: &Manifest, root: &Commit, limit: u64) {
+    // A new kernel instance: its search 0 is this bon process's next run.
+    FIRST_RUN.store(RUNS.load(std::sync::atomic::Ordering::SeqCst), std::sync::atomic::Ordering::SeqCst);
     let root: String = root.iter().collect();
     record(m, &format!("initialize {root} {limit}"));
 }
@@ -1181,11 +1269,7 @@ pub fn record_over_limit(m: &Manifest) { record(m, "over limit: an agent process
 /// Append one line to this command's trace.
 #[verifier::external]
 fn record(m: &Manifest, line: &str) {
-    let d = trace_dir(&m.root);
-    let _ = std::fs::create_dir_all(&d);
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(d.join("transitions")) {
-        let _ = writeln!(f, "{line}");
-    }
+    append_line(&trace_dir(&m.root).join("transitions"), line);
 }
 
 /// The agree checks' outputs at a commit, hashed: a compaction search's goal.
@@ -1196,7 +1280,7 @@ pub fn agree_outputs(m: &Manifest, commit: &Commit) -> (r: Result<Vec<Hash>, Str
     check_directory(&m.root, &c, &dir)?;
     let build = build_directory(&m.config, "goal/build")?;
     let log = trace_dir(&m.root);
-    let _ = std::fs::create_dir_all(&log);
+    traced(&log, std::fs::create_dir_all(&log));
     let mut out = Vec::new();
     for (k, a) in m.config.checks.agree.iter().enumerate() {
         out.push(Hash(hash(&run_check(&m.config, &dir, &build, a, &log.join(format!("goal-agree-{k}"))).1)));
@@ -1221,7 +1305,7 @@ pub const BUILD: [&str; 2] = [".cargo/", "build.rs"];
 #[allow(clippy::too_many_arguments)]
 fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Harness, start: &str,
                  target: Option<&Search>, foils: Option<&Search>, trace: &std::path::Path) -> (Option<Candidate>, u64) {
-    let _ = std::fs::create_dir_all(trace);
+    traced(trace, std::fs::create_dir_all(trace));
     let config = &m.config;
     let dir = scratch(&format!("{search}.{index}/{}", repository_name(&m.root)));
     // What each kind may not write, made structural: code, the counterexamples' tests.
@@ -1231,7 +1315,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
         _ => (None, Vec::new()),
     };
     if let Err(e) = working_directory_except(&m.root, config, start, &dir, writable, &more) {
-        let _ = std::fs::write(trace.join("error"), e);
+        write_trace(&trace.join("error"), e);
         return (None, 0);
     }
     if let Kind::Counterexample { .. } = kind {
@@ -1243,16 +1327,16 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
         }
     }
     let argv = harness_argv(h, config, &dir);
-    let _ = std::fs::write(trace.join("argv"), argv.join(" "));
+    write_trace(&trace.join("argv"), argv.join(" "));
     let text = prompt(kind, config, &aim(m, kind, target, start));
-    let _ = std::fs::write(trace.join("prompt"), &text);
+    write_trace(&trace.join("prompt"), &text);
     let c = as_agent(config, &dir, &[], &argv);
     let (_, stdout, killed) = supervise(c, Some(text), Duration::from_secs(config.agent_process.time), &trace.join("harness"));
     // Without token counts there is no measured cost: charge the whole limit.
     let (spent, harness_cost, prices) = generation(h, config, &stdout).unwrap_or((micro(config.agent_process.limit), None, HashMap::new()));
-    if killed { let _ = std::fs::write(trace.join("killed"), "time limit"); }
+    if killed { write_trace(&trace.join("killed"), "time limit"); }
     let candidate = capture(m, kind, search, index, start, &dir, target, foils, trace).map_err(|e| {
-        let _ = std::fs::write(trace.join("error"), &e);
+        write_trace(&trace.join("error"), &e);
     }).ok();
     let _ = Command::new("chmod").args(["-R", "-N"]).arg(&dir).stderr(Stdio::null()).status();
     let _ = std::fs::remove_dir_all(&dir);
@@ -1279,7 +1363,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
             "intents": c.intents.iter().map(|(q, i)| (q, text(i))).collect::<Vec<_>>(),
         })),
     });
-    let _ = std::fs::write(trace.join("facts.json"), serde_json::to_string_pretty(&facts).unwrap_or_default());
+    write_trace(&trace.join("facts.json"), serde_json::to_string_pretty(&facts).unwrap_or_default());
     (candidate, spent)
 }
 
@@ -1311,8 +1395,9 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
     let tree = with(&["write-tree"])?;
     let _ = std::fs::remove_file(&index_file);
     let (name, goal) = label(kind);
-    let message = format!("{name}{}\n\nTrace: {BON}/traces/{}/{search}/{index}\n",
-                          if goal.is_empty() { String::new() } else { format!(": {goal}") }, std::process::id());
+    let run = trace_dir(root).file_name().map_or(String::new(), |n| n.to_string_lossy().to_string());
+    let message = format!("{name}{}\n\nTrace: {BON}/traces/{run}/{search}/{index}\n",
+                          if goal.is_empty() { String::new() } else { format!(": {goal}") });
     let commit_of = |tree: &str| -> Result<String, String> {
         let out = Command::new("git").args(["commit-tree", tree, "-p", start, "-m", &message]).current_dir(root)
             .env("GIT_AUTHOR_NAME", "agent").env("GIT_AUTHOR_EMAIL", "agent@localhost")
@@ -1921,6 +2006,83 @@ mod tests {
         assert_eq!(git(&work, &["rev-parse", "HEAD"]).unwrap(), base, "the local trunk is unchanged");
         assert!(!work.join(BON).join("traces").join("counterexamples.jsonl").exists(), "nothing is recorded");
         let _ = std::fs::remove_dir_all(work.parent().unwrap());
+    }
+
+    #[test]
+    fn evidence_is_filed_under_the_search_it_was_tested_in() {
+        // queue 47: select, foil, counterexample: the evidence is the tested search's candidate.
+        fn text<T: FromIterator<char>>(s: &str) -> T { s.chars().collect() }
+        let (_remote, work, base, test) = landing_fixture("evidence");
+        std::fs::write(work.join("b"), "b").unwrap();
+        git(&work, &["add", "b"]).unwrap();
+        git(&work, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "wrong code"]).unwrap();
+        let wrong = git(&work, &["rev-parse", "HEAD"]).unwrap();
+        git(&work, &["reset", "-q", "--hard", &base]).unwrap();
+        let candidate = |commit: &str, changed: Vec<Path>, accepts: Vec<(i64, bool)>| Candidate {
+            commit: text(commit), base: text(&base), accepted: true, proved: true, changed, out: vec![], intents: vec![],
+            accepts, accepts_foils: vec![], rejects_counterexamples: false, rank: 0, diff: 1,
+        };
+        let search = |kind: Kind, c: Candidate| Search {
+            kind, base: text(&base), n: 1, checks: vec![], tests: vec![text("tests/")], trusted: vec![], limit: 1, results: vec![Some(c)],
+        };
+        let tested = search(Kind::Code { goal: text(&base) }, candidate(&wrong, vec![], vec![]));
+        let x = search(Kind::Counterexample { goal: Some(crate::gates::AgentProcess { search: 0, index: 0 }) },
+                       candidate(&test, vec![text("tests/c_1.sh")], vec![(0, false)]));
+        // The foil and counterexample searches ran after it.
+        RUNS.store(3, std::sync::atomic::Ordering::SeqCst);
+        let m = Manifest { config: config(), root: work.clone() };
+        land(&m, &x, 0, Some(&tested)).unwrap();
+        assert!(trace_dir(&work).join("0").join("0").join("candidate.bundle").is_file(), "under search 0, the tested one");
+        assert!(!trace_dir(&work).join("1").exists(), "never under the foil search");
+        let record = std::fs::read_to_string(work.join(BON).join("traces").join("counterexamples.jsonl")).unwrap();
+        assert_eq!(record.trim(), serde_json::json!({ "test": "tests/c_1.sh", "evidence": [wrong] }).to_string());
+        let _ = std::fs::remove_dir_all(work.parent().unwrap());
+    }
+
+    #[test]
+    fn each_run_has_its_own_trace_even_on_a_reused_pid() {
+        // queue 47.
+        let d = std::env::temp_dir().join(format!("bon-claim-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(claim(&d, 4242, 1000), "4242", "a pid's first run is <pid>");
+        assert_eq!(claim(&d, 4242, 1000), "4242.1000", "a reused pid is <pid>.<start>, never the earlier run's");
+        assert_eq!(claim(&d, 4242, 1000), "4242.1001");
+        assert_eq!((trace_process("4242"), trace_process("4242.1000"), trace_process("proposals"), trace_process("1.x")),
+                   (Some((4242, 0)), Some((4242, 1000)), None, None));
+        // Of a live pid, only its latest run is running: the earlier one ended.
+        let mut live = Command::new("sleep").arg("30").spawn().unwrap();
+        let pid = live.id();
+        std::fs::create_dir_all(d.join(pid.to_string())).unwrap();
+        assert!(trace_running(&d, &pid.to_string()));
+        std::fs::create_dir_all(d.join(format!("{pid}.5"))).unwrap();
+        assert!(!trace_running(&d, &pid.to_string()) && trace_running(&d, &format!("{pid}.5")));
+        let _ = live.kill();
+        let _ = live.wait();
+        assert!(!trace_running(&d, &format!("{pid}.5")));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_failed_trace_write_is_reported_and_the_search_goes_on() {
+        // queue 47: a trace under a file cannot be written; nothing panics.
+        let d = std::env::temp_dir().join(format!("bon-traced-test-{}", std::process::id()));
+        std::fs::write(&d, "a file").unwrap();
+        write_trace(&d.join("facts.json"), "{}");
+        append_line(&d.join("transitions"), "grant");
+        assert!(std::fs::metadata(&d).unwrap().is_file());
+        let _ = std::fs::remove_file(&d);
+    }
+
+    #[test]
+    fn a_time_limit_stops_everything_the_command_started() {
+        // queue 47: a grandchild holding stdout dies with its command.
+        let log = std::env::temp_dir().join(format!("bon-supervise-test-{}", std::process::id()));
+        let c = as_agent(&config(), std::path::Path::new("/tmp"), &[], &["/bin/sh".into(), "-c".into(), "/bin/sleep 60 & wait".into()]);
+        let start = Instant::now();
+        let (ok, _, killed) = supervise(c, None, Duration::from_secs(1), &log);
+        assert!(!ok && killed, "{}", std::fs::read_to_string(&log).unwrap_or_default());
+        assert!(start.elapsed() < Duration::from_secs(6), "{:?}", start.elapsed());
+        let _ = std::fs::remove_file(&log);
     }
 
     #[test]
