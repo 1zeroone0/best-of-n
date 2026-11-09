@@ -694,7 +694,8 @@ impl Slot {
                         return Slot(p);
                     }
                     let holder = std::fs::read_to_string(&p).unwrap_or_default();
-                    let alive = Command::new("ps").args(["-p", holder.trim()]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+                    // This process's own slot is held, whatever ps can see from where it runs.
+                    let alive = holder.trim() == pid || Command::new("ps").args(["-p", holder.trim()]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
                     if alive || holder.trim().is_empty() { break; }
                     let _ = std::fs::remove_file(&p);
                 }

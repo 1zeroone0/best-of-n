@@ -861,6 +861,9 @@ mod tests {
         git(&d, &["init", "-q", "--bare", "-b", "main", remote.to_str().unwrap()]).unwrap();
         git(&work, &["init", "-q", "-b", "main"]).unwrap();
         git(&work, &["remote", "add", "origin", remote.to_str().unwrap()]).unwrap();
+        // Whoever runs the tests (agent, for a candidate) may have no git identity.
+        git(&work, &["config", "user.name", "t"]).unwrap();
+        git(&work, &["config", "user.email", "t@t"]).unwrap();
         std::fs::create_dir_all(work.join(".bon")).unwrap();
         std::fs::write(work.join(".bon/bon.toml"), "remote = \"origin\"\ntrunk = \"main\"\n").unwrap();
         git(&work, &["add", "."]).unwrap();
