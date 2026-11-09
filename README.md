@@ -43,6 +43,7 @@ bon
 | `bon spec [NAME]` | the spec's vocabulary and how it reaches the code, or one item |
 | `bon types [--check]` | the types programs are built on, in TypeScript, Go and Python |
 | `bon sbom --check` | fail when what bon trusts changed, or a proof is skipped outside it |
+| `bon check` | every check on the working tree, as candidates are judged; whose fix a failure is |
 | `bon view` | the same on a page |
 
 **You decide** the spec and the checks; the [queue](.bon/queue.tsv) holds what

@@ -717,6 +717,32 @@ pub fn on_trunk(m: &Manifest) -> (r: Result<(), String>) {
     Ok(())
 }
 
+/// Every test check and every verify check on a commit, run as agent in a
+/// checkout without `.git`, the way candidates are judged; each one's name,
+/// whether it exited 0, and its log. All of them run, not only until one fails.
+#[verifier::external]
+pub fn check(m: &Manifest, commit: &Commit) -> Result<Vec<(String, bool, PathBuf)>, String> {
+    let (config, root) = (&m.config, &m.root);
+    let c: String = commit.iter().collect();
+    let dir = scratch(&format!("check/{}", repository_name(root)));
+    check_directory(root, &c, &dir)?;
+    let build = scratch("check.build/build");
+    writable_dir(&build)?;
+    let log = trace_dir(root);
+    let _ = std::fs::create_dir_all(&log);
+    let mut out = Vec::new();
+    for (kind, list) in [("test", &config.checks.test), ("verify", &config.checks.verify)] {
+        for (k, v) in list.iter().enumerate() {
+            let path = log.join(format!("check-{kind}-{k}"));
+            let ok = run_check(config, &dir, &build, v, &path).0;
+            out.push((v.clone(), ok, path));
+        }
+    }
+    let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(out)
+}
+
 /// Whether trunk's checks accept its head: every test accepts it and Verus
 /// verifies it. Builds trunk for the candidates.
 #[verifier::external_body]

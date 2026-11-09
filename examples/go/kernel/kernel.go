@@ -109,7 +109,9 @@ type Projection struct {
 	// What is wanted and not yet in the spec.
 	Queue *[]QueueLine `json:"queue"`
 	// Queue proposals waiting for engineer: patches bon queue wrote.
-	Proposals []Proposal   `json:"proposals"`
+	Proposals []Proposal `json:"proposals"`
+	// What no search may change: bon's directory, the checks, trusted code.
+	Protected []string     `json:"protected"`
 	Filter    Filter       `json:"filter"`
 	Bounds    Bounds       `json:"bounds"`
 	Spec      *SpecOutline `json:"spec"`
@@ -264,11 +266,13 @@ type Facts struct {
 	Generation *float64 `json:"generation"`
 	Commit     *string  `json:"commit"`
 	Accepted   bool     `json:"accepted"`
-	Verified   bool     `json:"verified"`
-	Rank       *int64   `json:"rank"`
-	Diff       *uint64  `json:"diff"`
-	Added      *uint64  `json:"added"`
-	Removed    *uint64  `json:"removed"`
+	// Verus verified it.
+	Proved   bool    `json:"proved"`
+	Verified bool    `json:"verified"`
+	Rank     *int64  `json:"rank"`
+	Diff     *uint64 `json:"diff"`
+	Added    *uint64 `json:"added"`
+	Removed  *uint64 `json:"removed"`
 	// killed, over limit, price mismatch.
 	Flags   []string `json:"flags"`
 	Logs    []string `json:"logs"`

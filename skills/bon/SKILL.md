@@ -9,6 +9,12 @@ The owner writes what the software must do: the queue, the spec, the checks.
 bon searches for the code. You are the model the owner talks to: you work
 with them on the spec level, and you run bon.
 
+Three roles, three words. **engineer** (the owner) holds the demos and the
+transcripts with customers, and the spec, with you. **The model** (you) runs
+bon and resolves what its searches turn up, including a change a search found
+but may not make; engineer hears only what you cannot resolve. **agent** is the
+POSIX user every agent process runs as; never call yourself that.
+
 ## Working with the owner
 
 1. **Design in chat, one decision at a time.** Get a clear yes, then build all
@@ -109,8 +115,11 @@ The repository holds the words; this skill does not repeat them.
 proofs, the gates' contracts, the tests. A spec change verifies
 (`cargo verus verify`, alone if the code lags) before the owner sees it.
 Trusted code and the checks are yours to keep passing: no search may change
-them, so before a search, run the test checks as agent in a checkout without
-`.git`, as candidates do, with what the search will write stood in.
+them. Before a search, `bon check`: it runs every check on the working tree as
+agent, without `.git`, the way candidates are judged, decides by exit codes,
+and says whether a failure is in protected files (yours to fix) or in files a
+code search may change. What builds after a failing file is hidden until it
+compiles: check again then.
 
 **Implementation level: search decides.** You run bon; you never write a
 candidate yourself.
@@ -125,7 +134,14 @@ those tests as long as the suite still rejects every counterexample. A
 repository that needs end to end gets deterministic simulation under one seed.
 
 **Widths.** Searches are Monte Carlo: go wide; the host's `jobs` caps how
-many run at once. Report the spread, not just the winner.
+many run at once. Report the spread, not just the winner. Size a run to its
+change: a mechanical one (a rename, a doc) runs narrow, `n = [3, 6]`, by a
+commit to `bon.toml`; batch spec changes into one search; a spec change that
+the existing code still satisfies needs no search, and `bon check` shows it.
+
+**Read narrowly; tokens are the cost.** `bon` piped (plain text), `bon spec
+NAME` for one item, `git show <hash>` for a change, DuckDB on the traces; never
+a whole file to find one fact.
 
 ## Setting up a repository
 
@@ -176,6 +192,7 @@ at a time.
 | a new transcript arrived | `bon queue`; show the owner the patch it names and the contested cues; they accept it with `git am` |
 | spare capacity should work | `bon background` (`--plist` for launchd) |
 | a dependency, tool or trusted function changed | `bon sbom`; commit `.bon/sbom.json` |
+| before a search, a commit or a push | `bon check` |
 
 **A run's settings** (`n`, harnesses, limits) are read from `.bon/bon.toml`
 at trunk's head: edit it, commit and push, then run. Each run's settings stay
@@ -195,6 +212,9 @@ Read the trace and bring the finding:
   wrong. Propose where to split it, or name the check.
 - **Verified candidates disagree, or a counterexample splits them:** the spec
   allows two behaviors. Propose the spec or test that decides.
+- **Every accepted, proved candidate changed a protected file:** search found
+  the change but may not make it. `bon` prints the diff; review it, apply it,
+  `bon check`, run again. Bring engineer only what you cannot resolve.
 - **Trunk moved:** run it again.
 
 ## In bon's own repository
@@ -206,7 +226,7 @@ with the gates it was built from, not trunk's.
   `selected`, `not_found`) is searched and pushed by the installed `bon`.
   Change together the gates the next search needs, or it may never push.
 - After that push, reinstall: `cargo install --path . --locked`. Until then
-  the old gates decide.
+  the old gates decide; bon warns when its gates differ from trunk's.
 
 Everywhere else `bon` is a fixed tool, and none of this applies.
 

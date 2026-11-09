@@ -456,7 +456,7 @@ fn detail(app: &App, width: u16) -> Text<'static> {
                     if !facts.is_empty() { t.push(Line::from(Span::styled(format!("    {}", facts.join(" · ")), pal.faint()))); }
                     if !s.params.authority.is_empty() { t.extend(hanging(&format!("may change {}", s.params.authority), 4, width as usize, pal.faint())); }
                     if let Some(d) = disagreement(s) { t.extend(hanging(&d, 4, width as usize, pal.tone(Tone::Red))); }
-                    if s.blocked.is_some() { for l in why_blocked(s) { t.extend(hanging(&l, 4, width as usize, pal.tone(Tone::Yellow))); } }
+                    if s.blocked.is_some() { for l in why_blocked_in(s, &app.p.protected) { t.extend(hanging(&l, 4, width as usize, pal.tone(Tone::Yellow))); } }
                     if !s.candidates.is_empty() {
                         t.push(Line::from(Span::styled(format!("    {}  {}  {}  {}  {}  {}", fit("#", 4), fit("commit", 8), fit("verified", 9), fit("rank", 5), fit("lines", 10), "gen"), pal.faint())));
                         let mut cs: Vec<&Facts> = s.candidates.iter().collect();
@@ -636,9 +636,27 @@ fn groups(s: &SearchTrace) -> Vec<Vec<&Facts>> {
 
 /// Why a search blocked, from what its candidates show: too few verified, or
 /// verified candidates that disagree, each group of agreeing ones by index.
-fn why_blocked(s: &SearchTrace) -> Vec<String> {
+#[cfg(test)]
+fn why_blocked(s: &SearchTrace) -> Vec<String> { why_blocked_in(s, &[]) }
+
+/// The protected paths every accepted, proved, unverified candidate changed:
+/// the change search found but may not make, for the model to review and apply.
+pub(crate) fn needed(s: &SearchTrace, protected: &[String]) -> Option<(Vec<String>, String)> {
+    let under = |p: &String| protected.iter().any(|q| p == q.trim_end_matches('/') || p.starts_with(&format!("{}/", q.trim_end_matches('/'))));
+    let outside: Vec<&Facts> = s.candidates.iter().filter(|c| c.accepted && c.proved && !c.verified).collect();
+    let first = outside.first()?;
+    let mut files: Vec<String> = first.changed.iter().filter(|p| under(p)).cloned().collect();
+    files.retain(|f| outside.iter().all(|c| c.changed.contains(f)));
+    if files.is_empty() { return None; }
+    Some((files.clone(), format!("git diff {} {} -- {}", short(&s.params.base), short(first.commit.as_deref().unwrap_or("")), files.join(" "))))
+}
+
+fn why_blocked_in(s: &SearchTrace, protected: &[String]) -> Vec<String> {
     let v = s.candidates.iter().filter(|c| c.verified).count();
     let mut out = Vec::new();
+    if let Some((files, diff)) = needed(s, protected) {
+        out.push(format!("every accepted, proved candidate changed protected {}: search found the change but may not make it; the model reviews and applies it: {diff}", files.join(", ")));
+    }
     if s.kind == "counterexample" {
         out.push(format!("{v} of its {} tests verified; two are needed to say a counterexample was found or not, so neither", s.candidates.len()));
     } else if v < 2 {
@@ -1120,6 +1138,21 @@ mod tests {
             "candidates": outs.iter().enumerate().map(|(i, o)| serde_json::json!({ "index": i, "accepted": true, "verified": true, "out": [o] })).collect::<Vec<_>>() })).unwrap() };
         assert_eq!(groups(&s(&[7, 7, 7])).len(), 1);
         assert_eq!(groups(&s(&[7, 8, 7])).len(), 2);
+    }
+
+    #[test]
+    fn a_search_blocked_by_protected_files_shows_the_change_it_needed() {
+        // The afternoon of 4f492c6: every candidate changed src/main.rs, which is trusted.
+        let s: SearchTrace = serde_json::from_value(serde_json::json!({ "kind": "code", "blocked": "blocked: fewer than two verified candidates, or they disagree",
+            "params": { "base": "4f492c64b3" },
+            "candidates": ([0, 1].iter().map(|i| serde_json::json!({ "index": i, "accepted": true, "proved": true, "verified": false, "commit": format!("c9638503{i}"),
+                "changed": ["src/encoding.rs", "src/exec.rs", "src/main.rs"] })).collect::<Vec<_>>()) })).unwrap();
+        let protected = vec!["src/main.rs".to_string(), "src/spec.rs".to_string(), ".bon/".to_string()];
+        let (files, diff) = needed(&s, &protected).unwrap();
+        assert_eq!(files, vec!["src/main.rs"]);
+        assert_eq!(diff, "git diff 4f492c6 c963850 -- src/main.rs");
+        assert!(why_blocked_in(&s, &protected)[0].contains("the model reviews and applies it"));
+        assert!(needed(&s, &[]).is_none());
     }
 
     #[test]

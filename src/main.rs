@@ -26,7 +26,8 @@ const USAGE: &str = "usage:
                           run it as an administrator
   bon sbom [--check]      write .bon/sbom.json, or fail if it differs from this machine
   bon types [--check]     write the types programs are built on, or fail if one is stale
-  bon spec [NAME]         the spec's vocabulary and how it reaches the code, or one item";
+  bon spec [NAME]         the spec's vocabulary and how it reaches the code, or one item
+  bon check               every check on the working tree, as agent, the way candidates are judged";
 
 /// The commands that grant capabilities.
 const SEARCHES: [&str; 5] = ["code", "compaction", "counterexample", "queue", "background"];
@@ -40,6 +41,11 @@ fn main() {
         Err(e) => fail(&format!("not in a git repository: {e}")),
     };
     let command = args.first().map(String::as_str).unwrap_or("");
+    // In bon's own repository the installed bon decides with the gates it was built from.
+    if git(Path::new(&root), &["show", "HEAD:Cargo.toml"]).is_ok_and(|t| t.contains("name = \"best-of-n\""))
+        && git(Path::new(&root), &["show", "HEAD:src/gates.rs"]).is_ok_and(|g| stale(&g)) {
+        eprintln!("bon: this bon was built from other gates than trunk's; reinstall: cargo install --path . --locked");
+    }
     // Before a search: every harness it may run is logged in as agent, or the command that fixes it.
     if SEARCHES.contains(&command) {
         let checked = best_of_n::trusted::head(&root).and_then(|h| best_of_n::trusted::manifest(&root, &h)).and_then(|m| best_of_n::trusted::harnesses_logged_in(&m));
@@ -98,6 +104,7 @@ fn dispatch(root: &str, args: &[String]) -> Result<(), String> {
         Some("sbom") => sbom(&root, args.get(1).map(String::as_str) == Some("--check")),
         Some("types") => types::run(&root, args.get(1).map(String::as_str) == Some("--check")),
         Some("spec") => { print!("{}", tui::spec_text(&root, args.get(1).map(String::as_str), 100)?); Ok(()) }
+        Some("check") => check(&root),
         Some("help" | "-h" | "--help") => { println!("{USAGE}"); Ok(()) }
         None if tui::wanted() => tui::run(&root, view::Filter::args(args)?),
         None => status(&root, args),
@@ -132,6 +139,84 @@ fn persist(root: &Path) -> Result<(), String> {
     if remote.is_some() { git(&d, &["push", "-q", "origin", "main"])?; }
     Ok(())
 }
+
+/// The working tree as a commit object, untracked files included and nothing
+/// changed: a temporary index, `git add -A` into it, `write-tree`, `commit-tree`.
+fn snapshot(root: &Path) -> Result<String, String> {
+    let index = std::env::temp_dir().join(format!("bon-check-{}", std::process::id()));
+    let with = |args: &[&str]| -> Result<String, String> {
+        let out = Command::new("git").args(args).current_dir(root).env("GIT_INDEX_FILE", &index).output().map_err(|e| e.to_string())?;
+        if !out.status.success() { return Err(String::from_utf8_lossy(&out.stderr).trim().to_string()); }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let head = git(root, &["rev-parse", "HEAD"])?;
+    with(&["read-tree", &head])?;
+    with(&["add", "-A"])?;
+    let tree = with(&["write-tree"])?;
+    let _ = std::fs::remove_file(&index);
+    git(root, &["-c", "user.name=bon", "-c", "user.email=bon@localhost", "commit-tree", &tree, "-p", &head, "-m", "bon check: the working tree"])
+}
+
+/// Where an error a check printed is: each `--> path:line` and `path:line:col:`.
+fn error_paths(log: &str) -> Vec<String> {
+    // Only an error's location counts, not a warning's: the first `-->` after an `error` line.
+    let mut out: Vec<String> = Vec::new();
+    let mut in_error = false;
+    for l in log.lines() {
+        let t = l.trim_start();
+        if t.starts_with("error") { in_error = true; }
+        else if t.starts_with("warning") { in_error = false; }
+        let at = if let Some(r) = t.strip_prefix("--> ") { in_error.then_some(r) } else if t.contains(": error") { Some(t) } else { None };
+        if let Some(p) = at.and_then(|r| r.split(':').next()).map(str::trim).filter(|p| !p.is_empty() && !p.starts_with('/') && p.contains('.')) {
+            if !out.iter().any(|o| o == p) { out.push(p.to_string()); }
+            in_error = false;
+        }
+    }
+    out
+}
+
+/// A path no search may change (bon's directory, a check, trusted code): only
+/// the model, or engineer, can fix an error there.
+fn protected(manifest: &toml::Value, path: &str) -> bool {
+    let list = |v: Option<&toml::Value>| v.and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect::<Vec<_>>()).unwrap_or_default();
+    let under = |p: &String| path == p.trim_end_matches('/') || path.starts_with(&format!("{}/", p.trim_end_matches('/')));
+    path.starts_with(".bon/") || list(manifest.get("checks").and_then(|c| c.get("paths"))).iter().any(under)
+        || list(manifest.get("sbom").and_then(|s| s.get("trusted"))).iter().any(under)
+}
+
+/// bon check: every check on the working tree, run as agent in a checkout
+/// without `.git`, the way candidates are judged; decided by exit codes. For a
+/// failure, where its errors are: in protected files the model fixes them; in
+/// the rest, a code search can.
+fn check(root: &str) -> Result<(), String> {
+    let r = Path::new(root);
+    let commit = snapshot(r)?;
+    let m = best_of_n::trusted::manifest(root, &commit.chars().collect())?;
+    let manifest: toml::Value = toml::from_str(&git(r, &["show", &format!("{commit}:.bon/bon.toml")])?).map_err(|e| e.to_string())?;
+    println!("checking the working tree ({}) as agent, the way candidates are judged", &commit[..8]);
+    let results = best_of_n::trusted::check(&m, &commit.chars().collect())?;
+    let mut failed = false;
+    for (command, ok, log) in &results {
+        println!("  {} {command}", if *ok { "ok  " } else { "FAIL" });
+        if *ok { continue; }
+        failed = true;
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        let paths = error_paths(&text);
+        let (mine, search): (Vec<&String>, Vec<&String>) = paths.iter().partition(|p| protected(&manifest, p));
+        if !mine.is_empty() { println!("       in protected files, for the model to fix: {}", mine.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")); }
+        if !search.is_empty() {
+            println!("       in files a code search may change: {}", search.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
+            println!("       what builds after these is not checked yet: check again once they compile");
+        }
+        println!("       log: {}", log.strip_prefix(r).unwrap_or(log).display());
+    }
+    if failed { return Err("checks reject the working tree".into()); }
+    println!("every check accepts the working tree");
+    Ok(())
+}
+
+/// Whether trunk's gates differ from the ones this bon was built from.
+fn stale(trunk_gates: &str) -> bool { trunk_gates.trim_end() != include_str!("gates.rs").trim_end() }
 
 /// Mark this repository as having a bon command running, for bon background.
 fn running(root: &str) {
@@ -673,6 +758,21 @@ fn sbom(root: &str, check: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bon_check_says_whose_errors_they_are() {
+        let log = "warning: unused\n   --> src/tui.rs:9:1\nerror[E0063]: missing field\n   --> src/encoding.rs:328:120\nerror: x\n  --> src/main.rs:35:9\nsrc/view.rs:12:3: error: y\nerror: z\n   --> /Users/x/.cargo/registry/serde/lib.rs:1:1";
+        assert_eq!(error_paths(log), vec!["src/encoding.rs", "src/main.rs", "src/view.rs"]);
+        let manifest: toml::Value = toml::from_str("[checks]\npaths = [\"src/spec.rs\"]\n[sbom]\ntrusted = [\"src/main.rs\", \"src/view.rs\"]").unwrap();
+        assert!(protected(&manifest, "src/main.rs") && protected(&manifest, "src/spec.rs") && protected(&manifest, ".bon/bon.toml"));
+        assert!(!protected(&manifest, "src/encoding.rs"));
+    }
+
+    #[test]
+    fn bon_notices_its_own_gates_are_stale() {
+        assert!(!stale(include_str!("gates.rs")));
+        assert!(stale("pub trait Gates {}"));
+    }
 
     #[test]
     fn traces_reach_their_own_private_remote_and_never_the_code_s() {

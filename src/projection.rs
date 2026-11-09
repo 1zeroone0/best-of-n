@@ -20,6 +20,8 @@ pub struct Projection {
     pub queue: Option<Vec<QueueLine>>,
     /// Queue proposals waiting for engineer: patches bon queue wrote.
     pub proposals: Vec<Proposal>,
+    /// What no search may change: bon's directory, the checks, trusted code.
+    pub protected: Vec<String>,
     pub filter: Filter,
     pub bounds: Bounds,
     pub spec: Option<SpecOutline>,
@@ -198,6 +200,8 @@ pub struct Facts {
     pub generation: Option<f64>,
     pub commit: Option<String>,
     pub accepted: bool,
+    /// Verus verified it.
+    pub proved: bool,
     pub verified: bool,
     pub rank: Option<i64>,
     pub diff: Option<u64>,

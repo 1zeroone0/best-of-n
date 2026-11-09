@@ -318,6 +318,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
                     "flags": (["killed", "over_limit", "price_mismatch"]).iter().filter(|k| facts[**k] == true).collect::<Vec<_>>(),
                     "logs": logs,
                     "out": c["out"],
+                    "proved": c["proved"],
                 })))
             }).collect();
             candidates.sort_by_key(|(i, _)| *i);
@@ -532,6 +533,11 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
         "bounds": { "earliest": (earliest != u64::MAX).then_some(earliest), "latest": (latest > 0).then_some(latest) },
         "queue": queue,
         "proposals": proposals(root),
+        // What no search may change: bon's directory, the checks, trusted code.
+        "protected": ([".bon/"].iter().map(|s| s.to_string())
+            .chain(manifest.get("checks").and_then(|c| c.get("paths")).and_then(|p| p.as_array()).into_iter().flatten().filter_map(|v| v.as_str().map(String::from)))
+            .chain(manifest.get("sbom").and_then(|c| c.get("trusted")).and_then(|p| p.as_array()).into_iter().flatten().filter_map(|v| v.as_str().map(String::from)))
+            .collect::<Vec<_>>()),
         "sbom": sbom(root),
         "spec": spec(root, &manifest),
         "system": system(root, &format!("{remote}/{trunk_name}"), &manifest),
@@ -584,6 +590,14 @@ pub fn text(s: &Value) -> String {
         out.push_str(&format!("  {:<14} {:<9} {}\n      {}\n      {}{cost}\n",
             g["kind"].as_str().unwrap_or(""), g["outcome"].as_str().unwrap_or(""), g["title"].as_str().unwrap_or(""),
             g["sentence"].as_str().unwrap_or(""), if n > 1 { format!("{n} bon processes · ") } else { String::new() }));
+        // A blocked search's protected change, which search found but may not make: for the model.
+        let protected: Vec<String> = serde_json::from_value(s["protected"].clone()).unwrap_or_default();
+        let traced: crate::projection::GoalTrace = serde_json::from_value(g.clone()).unwrap_or_default();
+        for search in traced.processes.iter().flat_map(|p| &p.searches).filter(|x| x.blocked.is_some()) {
+            if let Some((files, diff)) = crate::tui::needed(search, &protected) {
+                out.push_str(&format!("      every accepted, proved candidate changed protected {}: review and apply: {diff}\n", files.join(", ")));
+            }
+        }
     }
     if s["queue"].is_null() { out.push_str("\nqueue: none at trunk's head yet (.bon/queue.tsv)\n"); return out; }
     let q = s["queue"].as_array().cloned().unwrap_or_default();

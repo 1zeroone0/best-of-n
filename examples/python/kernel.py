@@ -97,6 +97,8 @@ class Projection(TypedDict):
     queue: list[QueueLine] | None
     # Queue proposals waiting for engineer: patches bon queue wrote.
     proposals: list[Proposal]
+    # What no search may change: bon's directory, the checks, trusted code.
+    protected: list[str]
     filter: Filter
     bounds: Bounds
     spec: SpecOutline | None
@@ -236,6 +238,8 @@ class Facts(TypedDict):
     generation: float | None
     commit: str | None
     accepted: bool
+    # Verus verified it.
+    proved: bool
     verified: bool
     rank: int | None
     diff: int | None

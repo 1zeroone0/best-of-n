@@ -24,7 +24,7 @@ export const NONE = -1;
 /** A gate's answer when the words are not a search (or name no such agent process). */
 export const NOT_A_SEARCH = -2;
 /** Everything bon shows, over the time range in `filter`. */
-export interface Projection { configured: boolean; repo: Repo; totals: Totals; processes: Array<BonProcess>; groups: Array<GoalTrace>; queue: Array<QueueLine> | null; proposals: Array<Proposal>; filter: Filter; bounds: Bounds; spec: SpecOutline | null; system: SpecGraph | null; sbom: SbomFile | null }
+export interface Projection { configured: boolean; repo: Repo; totals: Totals; processes: Array<BonProcess>; groups: Array<GoalTrace>; queue: Array<QueueLine> | null; proposals: Array<Proposal>; protected: Array<string>; filter: Filter; bounds: Bounds; spec: SpecOutline | null; system: SpecGraph | null; sbom: SbomFile | null }
 /** The repository and its trunk. */
 export interface Repo { name: string | null; head: string | null; trunk: string | null; remote: string | null; remote_head: string | null; remote_time: number | null; subject: string | null; last_push: LastPush | null; since_push: SincePush | null; pushed: boolean | null; now: number }
 export interface LastPush { commit: string | null; time: number | null }
@@ -47,7 +47,7 @@ export interface Params { goal: GoalRef; base: string; n: number | null; limit: 
 /** A search's goal: a trunk commit, a selected candidate, or a transcript. */
 export interface GoalRef { trunk: string | null; candidate: string | null; transcript: string | null }
 /** One agent process, from its facts.json. */
-export interface Facts { index: number; harness: string | null; model: string | null; generation: number | null; commit: string | null; accepted: boolean; verified: boolean; rank: number | null; diff: number | null; added: number | null; removed: number | null; flags: Array<string>; logs: Array<string>; changed: Array<string>; out: Array<number> }
+export interface Facts { index: number; harness: string | null; model: string | null; generation: number | null; commit: string | null; accepted: boolean; proved: boolean; verified: boolean; rank: number | null; diff: number | null; added: number | null; removed: number | null; flags: Array<string>; logs: Array<string>; changed: Array<string>; out: Array<number> }
 /** A queue proposal: a patch adding intents, each with the cue it came from. */
 export interface Proposal { name: string; path: string; source: string; intents: Array<ProposedIntent>; contested: Array<string> }
 export interface ProposedIntent { id: number | null; intent: string; cue: string | null }
