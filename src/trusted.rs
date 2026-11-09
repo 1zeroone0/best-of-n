@@ -1452,7 +1452,7 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
                     match text.trim().parse() { Ok(v) if ok => rank = v, _ => measured = false }
                 }
                 if matches!(kind, Kind::Compaction { .. }) {
-                    rejects_counterexamples = rejects_every_counterexample(m, &commit, &build, trace);
+                    rejects_counterexamples = rejects_every_counterexample(m, &commit, start, &build, trace);
                 }
             }
         }
@@ -1541,41 +1541,55 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
     })
 }
 
-/// A compaction candidate's tests still reject every counterexample: for each
-/// counterexample on record, its evidence's code with this commit's tests in
-/// place is rejected by the tests. Evidence that cannot be read counts as not
-/// rejected.
-fn rejects_every_counterexample(m: &Manifest, commit: &str, build: &std::path::Path, trace: &std::path::Path) -> bool {
-    let records: Vec<serde_json::Value> = std::fs::read_to_string(m.root.join(BON).join("traces").join("counterexamples.jsonl"))
-        .unwrap_or_default().lines().filter_map(|l| serde_json::from_str(l).ok()).collect();
+/// A compaction candidate's tests still reject every counterexample. The landed
+/// tests are the files under the counterexample `tests` paths on trunk
+/// (`start`); each one's evidence is the commits recorded when it landed
+/// (counterexamples.jsonl, by its path). Each landed test must still be in the
+/// candidate, and the candidate's version of it, alone at the counterexample
+/// path, must make `counterexample.run` reject each of its evidence. A landed
+/// test with no evidence on record, evidence git cannot read, or a deleted test
+/// fails the check: missing evidence never passes. Why it fails is in the
+/// trace's `counterexample` log.
+fn rejects_every_counterexample(m: &Manifest, commit: &str, start: &str, build: &std::path::Path, trace: &std::path::Path) -> bool {
     let config = &m.config;
-    for (k, r) in records.iter().enumerate() {
-        for (e, evidence) in r["evidence"].as_array().into_iter().flatten().enumerate() {
-            let Some(evidence) = evidence.as_str() else { return false };
-            // Its bundle, if git no longer has it.
-            if git(&m.root, &["cat-file", "-e", &format!("{evidence}^{{commit}}")]).is_err() {
-                let bundles = Command::new("find").arg(m.root.join(BON).join("traces")).args(["-name", "candidate.bundle"])
-                    .output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
-                for b in bundles.lines() { let _ = git(&m.root, &["bundle", "unbundle", b]); }
-                if git(&m.root, &["cat-file", "-e", &format!("{evidence}^{{commit}}")]).is_err() { return false; }
-            }
-            let dir = scratch(&format!("evidence.{k}.{e}/{}", repository_name(&m.root)));
-            if materialize(&m.root, evidence, &dir).is_err() { return false; }
-            // The candidate's tests, over the evidence's code.
-            for t in &config.counterexample.tests {
-                let _ = std::fs::remove_dir_all(dir.join(t.trim_end_matches('/')));
-                if extract(&m.root, commit, &[t.as_str()], &dir).is_err() { return false; }
-            }
-            let _ = Command::new("chgrp").args(["-R", "bon"]).arg(&dir).status();
-            let _ = Command::new("chmod").args(["-R", "a-w,g+rX"]).arg(&dir).status();
-            let accepted = config.checks.test.iter().enumerate()
-                .all(|(c, v)| run_check(config, &dir, build, v, &trace.join(format!("counterexample-{k}-{e}-{c}"))).0);
-            let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
-            let _ = std::fs::remove_dir_all(&dir);
-            if accepted { return false; }
+    let check = || -> Result<(), String> {
+        let mut evidence: HashMap<String, Vec<String>> = HashMap::new();
+        for l in std::fs::read_to_string(m.root.join(BON).join("traces").join("counterexamples.jsonl")).unwrap_or_default().lines() {
+            let Ok(r) = serde_json::from_str::<serde_json::Value>(l) else { continue };
+            let Some(test) = r["test"].as_str() else { continue };
+            evidence.entry(test.to_string()).or_default()
+                .extend(r["evidence"].as_array().into_iter().flatten().filter_map(|e| e.as_str().map(String::from)));
         }
+        let mut args = vec!["ls-tree", "-r", "--name-only", start, "--"];
+        args.extend(config.counterexample.tests.iter().map(String::as_str));
+        let landed = git(&m.root, &args).map_err(|e| format!("the landed tests cannot be listed: {e}"))?;
+        for (k, test) in landed.lines().enumerate() {
+            let commits = evidence.get(test).filter(|e| !e.is_empty())
+                .ok_or_else(|| format!("{test}: landed with no evidence on record"))?;
+            let bytes = Command::new("git").args(["cat-file", "blob", &format!("{commit}:{test}")]).current_dir(&m.root)
+                .stderr(Stdio::null()).output().ok().filter(|o| o.status.success()).map(|o| o.stdout)
+                .ok_or_else(|| format!("{test}: the candidate deleted it"))?;
+            for (e, evidence) in commits.iter().enumerate() {
+                // Its bundle, if git no longer has it.
+                let has = || git(&m.root, &["cat-file", "-e", &format!("{evidence}^{{commit}}")]).is_ok();
+                if !has() {
+                    let bundles = Command::new("find").arg(m.root.join(BON).join("traces")).args(["-name", "candidate.bundle"])
+                        .output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+                    for b in bundles.lines() { let _ = git(&m.root, &["bundle", "unbundle", b]); }
+                    if !has() { return Err(format!("{test}: its evidence {evidence} cannot be read")); }
+                }
+                // test_on materializes with fresh mtimes, so the shared build sees each tree as changed.
+                if test_on(m, evidence, &bytes, build, &config.counterexample.run, &trace.join(format!("counterexample-{k}-{e}"))) {
+                    return Err(format!("{test}: accepts its evidence {evidence}"));
+                }
+            }
+        }
+        Ok(())
+    };
+    match check() {
+        Ok(()) => true,
+        Err(reason) => { write_trace(&trace.join("counterexample"), format!("{reason}\n")); false }
     }
-    true
 }
 
 /// Each file changed from `base` to `commit`: lines added, lines removed, and
@@ -2083,6 +2097,71 @@ mod tests {
         assert!(!ok && killed, "{}", std::fs::read_to_string(&log).unwrap_or_default());
         assert!(start.elapsed() < Duration::from_secs(6), "{:?}", start.elapsed());
         let _ = std::fs::remove_file(&log);
+    }
+
+    /// Trunk with a landed test (accepts only good code) and its evidence (bad
+    /// code), and a commit on trunk made by `change`: (manifest, trunk, commit).
+    fn compaction_fixture(name: &str, record: bool, change: &dyn Fn(&std::path::Path)) -> (Manifest, String, String) {
+        let d = std::env::temp_dir().join(format!("bon-compaction-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let commit = |message: &str| -> String {
+            git(&d, &["add", "-A"]).unwrap();
+            git(&d, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", message]).unwrap();
+            git(&d, &["rev-parse", "HEAD"]).unwrap()
+        };
+        git(&d, &["init", "-q", "-b", "main"]).unwrap();
+        std::fs::write(d.join("code"), "bad\n").unwrap();
+        let bad = commit("bad code");
+        std::fs::write(d.join("code"), "good\n").unwrap();
+        std::fs::create_dir_all(d.join("tests")).unwrap();
+        std::fs::write(d.join("tests/c_1.sh"), "grep -q good code\n").unwrap();
+        let trunk = commit("good code and its test");
+        change(&d);
+        let candidate = commit("compaction");
+        if record {
+            std::fs::create_dir_all(d.join(BON).join("traces")).unwrap();
+            std::fs::write(d.join(BON).join("traces").join("counterexamples.jsonl"),
+                           format!("{}\n", serde_json::json!({ "test": "tests/c_1.sh", "evidence": [bad] }))).unwrap();
+        }
+        let mut config = config();
+        config.counterexample.run = "/bin/sh tests/c.sh".into();
+        (Manifest { config, root: d }, trunk, candidate)
+    }
+
+    #[test]
+    fn compaction_keeps_rejecting_each_landed_test_s_evidence() {
+        // queue 41: each landed test, alone, still rejects its evidence.
+        let (m, trunk, candidate) = compaction_fixture("keeps", true, &|_| {});
+        let trace = m.root.join("trace");
+        assert!(rejects_every_counterexample(&m, &candidate, &trunk, std::path::Path::new("/tmp"), &trace),
+                "{}", std::fs::read_to_string(trace.join("counterexample")).unwrap_or_default());
+        let _ = std::fs::remove_dir_all(&m.root);
+    }
+
+    #[test]
+    fn compaction_that_deletes_or_weakens_a_landed_test_fails() {
+        // queue 41.
+        let (m, trunk, deleted) = compaction_fixture("deletes", true, &|d| std::fs::remove_file(d.join("tests/c_1.sh")).unwrap());
+        let trace = m.root.join("trace");
+        assert!(!rejects_every_counterexample(&m, &deleted, &trunk, std::path::Path::new("/tmp"), &trace));
+        assert!(std::fs::read_to_string(trace.join("counterexample")).unwrap().contains("deleted"));
+        let _ = std::fs::remove_dir_all(&m.root);
+        let (m, trunk, weakened) = compaction_fixture("weakens", true, &|d| std::fs::write(d.join("tests/c_1.sh"), "exit 0\n").unwrap());
+        let trace = m.root.join("trace");
+        assert!(!rejects_every_counterexample(&m, &weakened, &trunk, std::path::Path::new("/tmp"), &trace));
+        assert!(std::fs::read_to_string(trace.join("counterexample")).unwrap().contains("accepts its evidence"));
+        let _ = std::fs::remove_dir_all(&m.root);
+    }
+
+    #[test]
+    fn a_landed_test_with_no_evidence_on_record_fails_closed() {
+        // queue 41: a fresh clone has no record; that never passes.
+        let (m, trunk, candidate) = compaction_fixture("unrecorded", false, &|_| {});
+        let trace = m.root.join("trace");
+        assert!(!rejects_every_counterexample(&m, &candidate, &trunk, std::path::Path::new("/tmp"), &trace));
+        assert!(std::fs::read_to_string(trace.join("counterexample")).unwrap().contains("no evidence on record"));
+        let _ = std::fs::remove_dir_all(&m.root);
     }
 
     #[test]
