@@ -471,6 +471,40 @@ fn splits(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
     false
 }
 
+/// c's test rejects every member of t.
+fn rejects_every(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
+    requires t.results.len() == t.n, vt.len() == t.n,
+        forall|j: int| 0 <= j < t.n ==> vt[j] == spec::verified_at(t@, j),
+    ensures r == spec::rejects_every(c@, t@),
+{
+    if matches!(&t.kind, Kind::Compaction { .. }) {
+        if accepts_on(c, None) != Some(false) {
+            assert(spec::member(t@, -1));
+            return false;
+        }
+    }
+    let mut j = 0;
+    while j < vt.len()
+        invariant
+            t.results.len() == t.n, vt.len() == t.n, 0 <= j <= vt.len(),
+            forall|m: int| 0 <= m < t.n ==> vt[m] == spec::verified_at(t@, m),
+            t@.kind is Compaction ==> c@.accepts.contains_key(-1) && !c@.accepts[-1],
+            forall|m: int| 0 <= m < j && vt[m] ==> c@.accepts.contains_key(m) && !c@.accepts[m],
+        decreases vt.len() - j,
+    {
+        if vt[j] && accepts_on(c, Some(j)) != Some(false) {
+            assert(spec::member(t@, j as int));
+            return false;
+        }
+        j += 1;
+    }
+    assert forall|m: int| spec::member(t@, m) implies c@.accepts.contains_key(m) && !c@.accepts[m] by {
+        if m != -1 { assert(0 <= m < t.n); }
+    }
+    true
+}
+
+#[verifier::rlimit(100)]
 pub fn not_found(x: &Search, t: &Search) -> (r: bool)
     requires x.results.len() == x.n, t.results.len() == t.n,
     ensures r == spec::not_found(x@, t@),
@@ -494,21 +528,21 @@ pub fn not_found(x: &Search, t: &Search) -> (r: bool)
             count == 1 ==> exists|a: int| 0 <= a < i && vx[a]
                 && forall|b: int| 0 <= b < i && vx[b] ==> a == b,
             count == 2 ==> exists|a: int, b: int| 0 <= a < i && 0 <= b < i && a != b && vx[a] && vx[b],
-            forall|m: int| 0 <= m < i && spec::verified_at(xv, m) ==> !spec::splits(spec::at(xv, m), t@),
+            forall|m: int| 0 <= m < i && spec::verified_at(xv, m) ==> !spec::splits(spec::at(xv, m), t@) && !spec::rejects_every(spec::at(xv, m), t@),
         decreases vx.len() - i,
     {
         if vx[i] {
             if count < 2 { count += 1; }
             let c = candidate(x, i);
-            if splits(t, &vt, c) {
-                assert(spec::verified_at(xv, i as int) && spec::splits(spec::at(xv, i as int), t@));
+            if splits(t, &vt, c) || rejects_every(t, &vt, c) {
+                assert(spec::verified_at(xv, i as int));
                 return false;
             }
         }
         i += 1;
     }
     proof {
-        assert forall|m: int| spec::verified_at(xv, m) implies !spec::splits(spec::at(xv, m), t@) by {
+        assert forall|m: int| spec::verified_at(xv, m) implies !spec::splits(spec::at(xv, m), t@) && !spec::rejects_every(spec::at(xv, m), t@) by {
             assert(0 <= m < x.n);
         }
     }
