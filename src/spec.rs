@@ -399,9 +399,11 @@ pub enum Blocked {
     RejectsEvery,
     /// Otherwise: fewer than two verified tests judge every candidate and reject a foil.
     Undiscriminating,
-    /// The gates allowed the push, and trunk moved during the search. (git)
+    /// The gates allowed a push or a landing, and the remote's head is no
+    /// longer the search's base: trunk moved during the search. (git)
     TrunkMoved,
-    /// The gates allowed a push or a landing, and git refused it. (git)
+    /// The gates allowed a push or a landing, the remote's head is still the
+    /// search's base, and git refused it. (git)
     Refused,
 }
 
@@ -417,8 +419,9 @@ pub open spec fn allowed(tested: Search, i: int, counterexample: Search, foils: 
 }
 
 /// reason is why the attempt on tested blocked, its counterexample and foil
-/// searches being counterexample and foils.
-pub open spec fn blocked(reason: Blocked, tested: Search, counterexample: Search, foils: Search) -> bool {
+/// searches being counterexample and foils, and remote the remote's head as
+/// trusted code observed it. Only the git reasons depend on remote.
+pub open spec fn blocked(reason: Blocked, tested: Search, counterexample: Search, foils: Search, remote: Commit) -> bool {
     let checked = complete(counterexample) && !found(counterexample, tested);
     match reason {
         Blocked::TooFewVerified => complete(tested) && !two_verified(tested),
@@ -429,16 +432,20 @@ pub open spec fn blocked(reason: Blocked, tested: Search, counterexample: Search
         Blocked::Undiscriminating => checked && complete(foils) && two_verified(counterexample)
             && (forall|i: int| verified_at(counterexample, i) ==> !rejects_every(at(counterexample, i), tested))
             && !not_found(counterexample, tested, foils),
-        Blocked::TrunkMoved => exists|i: int| allowed(tested, i, counterexample, foils),
-        Blocked::Refused => (exists|i: int| allowed(tested, i, counterexample, foils))
-            || exists|j: int| lands_on(counterexample, tested, j),
+        Blocked::TrunkMoved => ((exists|i: int| allowed(tested, i, counterexample, foils))
+            || exists|j: int| lands_on(counterexample, tested, j))
+            && remote != tested.base,
+        Blocked::Refused => ((exists|i: int| allowed(tested, i, counterexample, foils))
+            || exists|j: int| lands_on(counterexample, tested, j))
+            && remote == tested.base,
     }
 }
 
 /// Why the attempt on tested blocked, decided by the kernel: on the selection
 /// (no counterexample search yet), or on the counterexample search and the
 /// foil search on it. None where it did not block, or has not finished. The
-/// two git reasons, trunk moved and refused, are git's to say, not this.
+/// two git reasons, trunk moved and refused, are decided from the remote's
+/// head, not by this.
 pub open spec fn reason(tested: Search, counterexample: Option<Search>, foils: Option<Search>) -> Option<Blocked> {
     match counterexample {
         None =>
@@ -459,24 +466,26 @@ pub open spec fn reason(tested: Search, counterexample: Option<Search>, foils: O
     }
 }
 
-/// The reason the kernel gives is one `blocked` holds for: what a block records.
-pub proof fn reason_is_blocked(tested: Search, counterexample: Option<Search>, foils: Option<Search>)
+/// The reason the kernel gives is one `blocked` holds for, whatever the
+/// remote's head: what a block records.
+pub proof fn reason_is_blocked(tested: Search, counterexample: Option<Search>, foils: Option<Search>, remote: Commit)
     ensures
         reason(tested, counterexample, foils) matches Some(r) ==>
-            blocked(r, tested, match counterexample { Some(c) => c, None => tested }, match foils { Some(f) => f, None => tested }),
+            blocked(r, tested, match counterexample { Some(c) => c, None => tested }, match foils { Some(f) => f, None => tested }, remote),
 {
 }
 
 /// A counterexample search on a selection that neither found a counterexample
-/// nor found none blocked for exactly one of the counterexample reasons.
-pub proof fn blocked_has_one_reason(counterexample: Search, tested: Search, foils: Search)
+/// nor found none blocked for exactly one of the counterexample reasons,
+/// whatever the remote's head.
+pub proof fn blocked_has_one_reason(counterexample: Search, tested: Search, foils: Search, remote: Commit)
     requires
         complete(counterexample), complete(foils),
         !found(counterexample, tested), !not_found(counterexample, tested, foils),
     ensures
-        blocked(Blocked::TooFewTests, tested, counterexample, foils)
-        || blocked(Blocked::RejectsEvery, tested, counterexample, foils)
-        || blocked(Blocked::Undiscriminating, tested, counterexample, foils),
+        blocked(Blocked::TooFewTests, tested, counterexample, foils, remote)
+        || blocked(Blocked::RejectsEvery, tested, counterexample, foils, remote)
+        || blocked(Blocked::Undiscriminating, tested, counterexample, foils, remote),
 {
 }
 
@@ -592,13 +601,18 @@ tokenized_state_machine!{ bon {
     /// one's limit. One search runs at a time; its agent processes run in parallel.
     /// Every search starts from trunk's head: a counterexample's test is written
     /// from the spec, never from candidate code. A foil search alone starts
-    /// from the selected candidate it changes.
-    transition!{ grant(kind: Kind, n: nat, agent_process_limit: nat, observed: Map<Object, Permission>) {
+    /// from the selected candidate it changes. checks_accept is whether trunk's
+    /// checks accept its head, as trusted code observed it: every test check
+    /// and verify check accepted it. Code is granted on a trunk they reject;
+    /// compaction and a counterexample on trunk, on one they accept.
+    transition!{ grant(kind: Kind, n: nat, agent_process_limit: nat, observed: Map<Object, Permission>, checks_accept: bool) {
         require isolated(observed);
         require forall|search_index: int| 0 <= search_index < pre.searches.len() ==> complete(#[trigger] pre.searches[search_index]);
         require pre.spent + pre.reserved + agent_process_limit * n <= pre.limit;
         require kind matches Kind::Code { goal } ==> goal == pre.trunk.last();
         require kind matches Kind::Compaction { goal, .. } ==> goal == pre.trunk.last();
+        require kind is Code ==> !checks_accept;
+        require kind is Compaction || kind == (Kind::Counterexample { goal: None }) ==> checks_accept;
         require kind matches Kind::Counterexample { goal: Some(agent_process) } ==>
             0 <= agent_process.search < pre.searches.len()
             && selected(pre.searches[agent_process.search], agent_process.index)
@@ -734,7 +748,7 @@ tokenized_state_machine!{ bon {
     fn advance_inductive(pre: Self, post: Self, commit: Commit, checks: Set<Path>, tests: Set<Path>, trusted: Set<Path>) {}
 
     #[inductive(grant)]
-    fn grant_inductive(pre: Self, post: Self, kind: Kind, n: nat, agent_process_limit: nat, observed: Map<Object, Permission>) {
+    fn grant_inductive(pre: Self, post: Self, kind: Kind, n: nat, agent_process_limit: nat, observed: Map<Object, Permission>, checks_accept: bool) {
         let search_index = pre.searches.len() as int;
         let processes = agent_processes(search_index, n);
         // Every earlier search is complete, so no capability is outstanding.

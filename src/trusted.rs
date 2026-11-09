@@ -1090,11 +1090,13 @@ pub fn record_initialize(m: &Manifest, root: &Commit, limit: u64) {
 }
 
 /// grant: its width, when, each agent process's limit, its kind and goal. The
-/// last search is the one granted.
+/// last search is the one granted, on the trunk verdict its kind needs.
 #[verifier::external_body]
-pub fn record_grant(m: &Manifest, kind: &Kind, n: usize, agent_process_limit: u64, Ghost(searches): Ghost<Seq<spec::Search>>)
+pub fn record_grant(m: &Manifest, kind: &Kind, n: usize, agent_process_limit: u64, Ghost(checks_accept): Ghost<bool>, Ghost(searches): Ghost<Seq<spec::Search>>)
     requires
         searches.len() > 0,
+        kind@ is Code ==> !checks_accept,
+        kind@ is Compaction || kind@ == (spec::Kind::Counterexample { goal: None }) ==> checks_accept,
         searches.last().kind == kind@,
         searches.last().n == n as nat,
         searches.last().limit == agent_process_limit as nat,
@@ -1144,11 +1146,13 @@ pub fn record_land(m: &Manifest, counterexample_index: usize, i: usize, Ghost(se
 
 /// An attempt blocked, and the one reason why, which Verus checks against the
 /// searches it names: tested, and the counterexample and foil searches on its
-/// selection (any search, for a reason that does not reach them).
+/// selection (any search, for a reason that does not reach them), and the
+/// remote's head, which decides trunk moved from refused.
 #[verifier::external_body]
 pub fn record_blocked(m: &Manifest, reason: spec::Blocked, Ghost(tested): Ghost<spec::Search>,
-                      Ghost(counterexample): Ghost<spec::Search>, Ghost(foils): Ghost<spec::Search>)
-    requires spec::blocked(reason, tested, counterexample, foils),
+                      Ghost(counterexample): Ghost<spec::Search>, Ghost(foils): Ghost<spec::Search>,
+                      Ghost(remote): Ghost<spec::Commit>)
+    requires spec::blocked(reason, tested, counterexample, foils, remote),
 {
     let (word, sentence) = match reason {
         spec::Blocked::TooFewVerified => ("too_few_verified", "fewer than two verified candidates"),
