@@ -199,6 +199,10 @@ at a time.
 at trunk's head: edit it, commit and push, then run. Each run's settings stay
 in git beside its result.
 
+bon works on git's objects and the remote's trunk, never your working tree:
+edit and commit while it searches, and `git pull --ff-only` to follow. A push
+to trunk mid-search blocks that search as trunk moved, and it runs again.
+
 **In Rex** (`REX_SESSION` is set), a search runs in its own pane, so it
 outlives this agent, the app and the connection:
 `rex run -s "$REX_SESSION" -- bon code`. Read it with `rex capture`; the

@@ -670,6 +670,44 @@ fn at(h: &Harness, a: usize) -> usize { h.n.get(a).or(h.n.last()).copied().unwra
 #[verifier::external]
 fn workers(jobs: usize, width: usize) -> usize { jobs.max(1).min(width) }
 
+/// One of the host's `jobs`, held while an agent process runs, shared by every
+/// bon process on the host: a file per slot under the working directories,
+/// naming the pid that holds it. A slot whose pid is gone is free.
+#[verifier::external]
+struct Slot(PathBuf);
+
+#[verifier::external]
+impl Slot {
+    fn take(jobs: usize) -> Slot { Slot::take_in(&PathBuf::from(WORKING_DIRECTORIES), jobs) }
+
+    fn take_in(base: &std::path::Path, jobs: usize) -> Slot {
+        let pid = std::process::id().to_string();
+        loop {
+            for k in 0..jobs.max(1) {
+                let p = base.join(format!("job.{k}"));
+                // Twice: a slot freed from a holder that is gone is taken at once.
+                for _ in 0..2 {
+                    if let Ok(mut f) = std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
+                        use std::io::Write;
+                        let _ = write!(f, "{pid}");
+                        return Slot(p);
+                    }
+                    let holder = std::fs::read_to_string(&p).unwrap_or_default();
+                    let alive = Command::new("ps").args(["-p", holder.trim()]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+                    if alive || holder.trim().is_empty() { break; }
+                    let _ = std::fs::remove_file(&p);
+                }
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+}
+
+#[verifier::external]
+impl Drop for Slot {
+    fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
+}
+
 /// Whether a harness's own status command says it is logged in, from its exit and output.
 #[verifier::external]
 fn logged_in(harness: &str, ok: bool, out: &str) -> bool {
@@ -752,35 +790,36 @@ pub fn land(m: &Manifest, x: &Search, i: usize, t: Option<&Search>) -> (r: Resul
     let (r, tr) = (&m.config.remote, &m.config.trunk);
     git(&m.root, &["push", "--quiet", r, &format!("{commit}:refs/heads/{tr}")])
         .map_err(|e| format!("blocked: {r}/{tr} moved during the search, so the test could not land; run it again ({e})"))?;
-    git(&m.root, &["merge", "--ff-only", "--quiet", &commit])?;
+    git(&m.root, &["update-ref", &format!("refs/remotes/{r}/{tr}"), &commit])?;
     append(&m.root.join(BON).join("traces").join("counterexamples.jsonl"),
            &serde_json::json!({ "test": path, "evidence": evidence }));
     Ok(())
 }
 
-/// trunk's head, if trunk is checked out with no uncommitted changes to tracked files.
+/// The remote and trunk the manifest names (default origin and main), read
+/// from the commit checked out: names only, so any branch will do.
+#[verifier::external]
+fn remote_trunk(root: &std::path::Path) -> (String, String) {
+    let manifest: Option<toml::Value> = git(root, &["show", &format!("HEAD:{BON}/bon.toml")]).ok().and_then(|t| toml::from_str(&t).ok());
+    let key = |k: &str, d: &str| manifest.as_ref().and_then(|m| m.get(k)).and_then(|v| v.as_str()).unwrap_or(d).to_string();
+    (key("remote", "origin"), key("trunk", "main"))
+}
+
+/// trunk's head: the remote's trunk, just fetched. bon works on git's objects
+/// and the remote's ref, never a working tree, so what is checked out, and
+/// whether it has changes, does not matter.
 #[verifier::external_body]
 pub fn head(root: &str) -> (r: Result<Commit, String>) {
     let root = PathBuf::from(root);
-    let h = git(&root, &["rev-parse", "HEAD"])?;
-    if !git(&root, &["status", "--porcelain", "--untracked-files=no"])?.is_empty() {
-        return Err("trunk has uncommitted changes to tracked files".into());
-    }
-    Ok(h.chars().collect())
+    let (r, t) = remote_trunk(&root);
+    git(&root, &["fetch", "--quiet", &r, &t]).map_err(|e| format!("fetch {r} {t}: {e}"))?;
+    Ok(git(&root, &["rev-parse", &format!("refs/remotes/{r}/{t}")])?.chars().collect())
 }
 
-/// The branch that is checked out must be trunk.
+/// Nothing to check: bon works on the remote's trunk from any branch.
 #[verifier::external_body]
 pub fn on_trunk(m: &Manifest) -> (r: Result<(), String>) {
-    let b = git(&m.root, &["symbolic-ref", "--short", "HEAD"])?;
-    if b != m.config.trunk { return Err(format!("on {b}; bon works on trunk ({})", m.config.trunk)); }
-    let (r, t) = (&m.config.remote, &m.config.trunk);
-    git(&m.root, &["fetch", "--quiet", r, t]).map_err(|e| format!("fetch {r} {t}: {e}"))?;
-    let local = git(&m.root, &["rev-parse", "HEAD"])?;
-    let remote = git(&m.root, &["rev-parse", &format!("{r}/{t}")])?;
-    if local != remote {
-        return Err(format!("trunk differs from {r}/{t}; pull or push so they match, then run again"));
-    }
+    let _ = m;
     Ok(())
 }
 
@@ -872,6 +911,7 @@ pub fn run(m: &Manifest, kind: &Kind, a: usize, start: &Commit, target: Option<&
             scope.spawn(|| loop {
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let Some(h) = slots.get(i) else { break };
+                let _slot = Slot::take(m.config.jobs);
                 *out[i].lock().unwrap() = agent_process(m, kind, search, i, h, &start, target, foils, &traces.join(i.to_string()));
             });
         }
@@ -879,16 +919,16 @@ pub fn run(m: &Manifest, kind: &Kind, a: usize, start: &Commit, target: Option<&
     out.into_iter().map(|c| c.into_inner().unwrap_or((None, 0))).collect()
 }
 
-/// The selected candidate is pushed to the remote's trunk, then the local trunk
-/// follows. The push is fast-forward only: if the remote's trunk moved, it is
-/// refused and nothing changes. (TCB: git, the remote)
+/// The selected candidate is pushed to the remote's trunk. The push is
+/// fast-forward only: if the remote's trunk moved, it is refused and nothing
+/// changes. The engineer's branch is left alone: pull to follow. (TCB: git, the remote)
 #[verifier::external_body]
 pub fn push(m: &Manifest, commit: &Commit) -> (r: Result<(), String>) {
     let c: String = commit.iter().collect();
     let (r, t) = (&m.config.remote, &m.config.trunk);
     git(&m.root, &["push", "--quiet", r, &format!("{c}:refs/heads/{t}")])
         .map_err(|e| format!("blocked: {r}/{t} moved during the search, so the push was refused; run it again ({e})"))?;
-    git(&m.root, &["merge", "--ff-only", "--quiet", &c])?;
+    git(&m.root, &["update-ref", &format!("refs/remotes/{r}/{t}"), &c])?;
     record_cost(m, &c);
     Ok(())
 }
@@ -1466,6 +1506,29 @@ pub fn parse_cue(t: &str) -> Option<u64> {
 mod tests {
 
     #[test]
+    fn the_hosts_jobs_are_shared_slots_and_a_dead_holders_slot_is_free() {
+        let d = std::env::temp_dir().join(format!("bon-slots-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        // A slot held by a pid that is gone is taken over.
+        std::fs::write(d.join("job.0"), "999999").unwrap();
+        let a = Slot::take_in(&d, 2);
+        assert_eq!(std::fs::read_to_string(d.join("job.0")).unwrap(), std::process::id().to_string());
+        // The next takes the other slot; a third waits until one is dropped.
+        let b = Slot::take_in(&d, 2);
+        assert!(d.join("job.1").exists());
+        let waiter = { let d = d.clone(); std::thread::spawn(move || { let _c = Slot::take_in(&d, 2); }) };
+        std::thread::sleep(Duration::from_millis(1500));
+        assert!(!waiter.is_finished());
+        drop(a);
+        waiter.join().unwrap();
+        drop(b);
+        assert!(!d.join("job.0").exists() && !d.join("job.1").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+
+    #[test]
     fn a_materialized_commit_is_newer_than_any_build_before_it() {
         let d = std::env::temp_dir().join(format!("bon-mtime-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -1596,7 +1659,8 @@ mod tests {
         land(&m, &rejecting_trunk(&base, &test), 0, None).unwrap();
         let rev = |dir: &std::path::Path, r: &str| git(dir, &["rev-parse", r]).unwrap();
         assert_eq!(rev(&remote, "main"), test, "the remote's trunk is the test's commit");
-        assert_eq!(rev(&work, "HEAD"), test, "the local trunk follows");
+        assert_eq!(rev(&work, "refs/remotes/origin/main"), test, "the remote's ref follows");
+        assert_eq!(rev(&work, "HEAD"), base, "the engineer's branch is left alone");
         let record = std::fs::read_to_string(work.join(BON).join("traces").join("counterexamples.jsonl")).unwrap();
         assert_eq!(record.trim(), serde_json::json!({ "test": "tests/c_1.sh", "evidence": [base] }).to_string());
         let _ = std::fs::remove_dir_all(work.parent().unwrap());

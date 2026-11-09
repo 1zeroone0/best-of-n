@@ -52,11 +52,12 @@ fn main() {
         let checked = best_of_n::trusted::head(&root).and_then(|h| best_of_n::trusted::manifest(&root, &h)).and_then(|m| best_of_n::trusted::harnesses_logged_in(&m));
         if let Err(e) = checked { fail(&e) }
     }
-    if SEARCHES.contains(&command) && command != "background" { running(&root); }
-    let before = git(Path::new(&root), &["rev-parse", "HEAD"]).unwrap_or_default();
+    // Trunk is the remote's: what the last fetch or push left in its ref.
+    let trunk = || best_of_n::trusted::head(&root).map(|h| h.iter().collect::<String>()).unwrap_or_default();
+    let before = if SEARCHES.contains(&command) { trunk() } else { String::new() };
     let result = dispatch(&root, &args);
     // A push or a landed test moved trunk: the cost file follows it, as its own commit.
-    if SEARCHES.contains(&command) && result.is_ok() && git(Path::new(&root), &["rev-parse", "HEAD"]).is_ok_and(|h| h != before) {
+    if SEARCHES.contains(&command) && result.is_ok() && trunk() != before {
         if let Err(e) = record_cost(Path::new(&root)) { eprintln!("bon: .bon/cost.toml not updated: {e}"); }
     }
     // Only commands that grant capabilities make directories under /tmp/bon, so
@@ -254,23 +255,42 @@ generation_per_verified_candidate = {}\ngeneration_per_push = {}\npushes = {}\nv
 fn record_cost(root: &Path) -> Result<(), String> {
     let p = projection::read(root, &view::Filter::default())?;
     let text = cost_toml(&p);
-    std::fs::write(root.join(".bon/cost.toml"), &text).map_err(|e| e.to_string())?;
-    let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(root.join(".bon/bon.toml")).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    // On the remote's trunk, with git's objects alone: no working tree is touched.
+    let head = best_of_n::trusted::head(&root.to_string_lossy()).map(|h| h.iter().collect::<String>())?;
+    let manifest: toml::Value = toml::from_str(&git(root, &["show", &format!("{head}:.bon/bon.toml")])?).map_err(|e| e.to_string())?;
     let remote = manifest.get("remote").and_then(|v| v.as_str()).unwrap_or("origin");
     let trunk = manifest.get("trunk").and_then(|v| v.as_str()).unwrap_or("main");
-    let head = git(root, &["rev-parse", "--short", "HEAD"])?;
-    git(root, &["add", ".bon/cost.toml"])?;
-    if git(root, &["diff", "--cached", "--quiet"]).is_ok() { return Ok(()); }
-    git(root, &["commit", "-q", "-m", &format!("cost: ${:.2} to reach {head}", p.totals.cost), "--", ".bon/cost.toml"])?;
-    git(root, &["push", "-q", remote, &format!("HEAD:{trunk}")])?;
+    if git(root, &["show", &format!("{head}:.bon/cost.toml")]).is_ok_and(|old| old.trim_end() == text.trim_end()) { return Ok(()); }
+    let t = &p.totals;
+    let message = format!("cost: ${:.2} generation + ${:.2} time = ${:.2} to reach {}", t.generation, t.time_cost, t.cost, &head[..7]);
+    let commit = commit_file(root, &head, ".bon/cost.toml", &text, &message)?;
+    git(root, &["push", "-q", remote, &format!("{commit}:refs/heads/{trunk}")])?;
+    git(root, &["update-ref", &format!("refs/remotes/{remote}/{trunk}"), &commit])?;
     Ok(())
 }
 
-/// Mark this repository as having a bon command running, for bon background.
-fn running(root: &str) {
-    let d = Path::new(root).join(".bon/traces");
-    let _ = std::fs::create_dir_all(&d);
-    let _ = std::fs::write(d.join("running"), std::process::id().to_string());
+/// A commit on parent that changes only path, to text, made with a temporary
+/// index: no working tree, and no branch moves.
+fn commit_file(root: &Path, parent: &str, path: &str, text: &str, message: &str) -> Result<String, String> {
+    use std::io::Write;
+    let run = |args: &[&str], input: Option<&str>, index: Option<&Path>| -> Result<String, String> {
+        let mut c = Command::new("git");
+        c.args(args).current_dir(root).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        if let Some(i) = index { c.env("GIT_INDEX_FILE", i); }
+        if input.is_some() { c.stdin(std::process::Stdio::piped()); }
+        let mut child = c.spawn().map_err(|e| e.to_string())?;
+        if let Some(t) = input { child.stdin.take().unwrap().write_all(t.as_bytes()).map_err(|e| e.to_string())?; }
+        let out = child.wait_with_output().map_err(|e| e.to_string())?;
+        if !out.status.success() { return Err(String::from_utf8_lossy(&out.stderr).trim().to_string()); }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let index = std::env::temp_dir().join(format!("bon-index-{}", std::process::id()));
+    let blob = run(&["hash-object", "-w", "--stdin"], Some(text), None)?;
+    run(&["read-tree", parent], None, Some(&index))?;
+    run(&["update-index", "--add", "--cacheinfo", &format!("100644,{blob},{path}")], None, Some(&index))?;
+    let tree = run(&["write-tree"], None, Some(&index));
+    let _ = std::fs::remove_file(&index);
+    run(&["commit-tree", &tree?, "-p", parent, "-m", message], None, None)
 }
 
 /// bon counterexample: if trunk shows a behavior the spec forbids, the test that
@@ -289,9 +309,12 @@ fn counterexample(root: &str) -> Result<(), String> {
 fn background(root: &str) -> Result<(), String> {
     let r = Path::new(root);
     // Spare capacity: no bon command running here, and load below the host's jobs.
-    let busy = std::fs::read_to_string(r.join(".bon/traces/running")).ok()
-        .filter(|pid| Command::new("ps").args(["-p", pid.trim()]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success()));
-    if busy.is_some() { println!("busy: a bon command is running here"); return Ok(()); }
+    // A bon process is running while its pid, which names its traces, is alive.
+    let me = std::process::id().to_string();
+    let busy = std::fs::read_dir(r.join(".bon/traces")).into_iter().flatten().flatten()
+        .filter_map(|e| e.file_name().to_str().filter(|n| n.chars().all(|c| c.is_ascii_digit())).map(String::from))
+        .any(|pid| pid != me && Command::new("ps").args(["-p", &pid]).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).status().is_ok_and(|s| s.success()));
+    if busy { println!("busy: a bon command is running here"); return Ok(()); }
     let jobs = std::fs::read_to_string(best_of_n::trusted::HOST).ok()
         .and_then(|d| d.lines().find_map(|l| l.strip_prefix("jobs").and_then(|v| v.trim_start_matches([' ', '=']).trim().parse::<f64>().ok())))
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1.0, |n| (n.get() / 2).max(1) as f64));
@@ -312,7 +335,6 @@ fn background(root: &str) -> Result<(), String> {
         .and_then(|c| c.trim().parse::<u64>().ok()).unwrap_or(total));
     let (compaction, counter) = (since(last("compaction", None)), since(last("counterexample", Some("trunk"))));
     if compaction == 0 && counter == 0 { println!("nothing stale"); return Ok(()); }
-    running(root);
     // No one waits on background work: its time is charged at rate 0.
     best_of_n::trusted::background();
     if counter >= compaction {
@@ -829,6 +851,37 @@ fn sbom(root: &str, check: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bon_works_on_the_remotes_trunk_and_never_touches_the_working_tree() {
+        let d = std::env::temp_dir().join(format!("bon-remote-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (work, remote) = (d.join("work"), d.join("remote.git"));
+        std::fs::create_dir_all(&work).unwrap();
+        git(&d, &["init", "-q", "--bare", "-b", "main", remote.to_str().unwrap()]).unwrap();
+        git(&work, &["init", "-q", "-b", "main"]).unwrap();
+        git(&work, &["remote", "add", "origin", remote.to_str().unwrap()]).unwrap();
+        std::fs::create_dir_all(work.join(".bon")).unwrap();
+        std::fs::write(work.join(".bon/bon.toml"), "remote = \"origin\"\ntrunk = \"main\"\n").unwrap();
+        git(&work, &["add", "."]).unwrap();
+        git(&work, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "one"]).unwrap();
+        git(&work, &["push", "-q", "origin", "main"]).unwrap();
+        // The engineer is on another branch, with an uncommitted change.
+        git(&work, &["checkout", "-q", "-b", "mine"]).unwrap();
+        std::fs::write(work.join(".bon/bon.toml"), "remote = \"origin\"\ntrunk = \"main\"\n# editing\n").unwrap();
+        let head: String = best_of_n::trusted::head(work.to_str().unwrap()).unwrap().iter().collect();
+        assert_eq!(head, git(&remote, &["rev-parse", "main"]).unwrap());
+        // A commit on trunk made from git's objects alone, pushed to the remote.
+        let c = commit_file(&work, &head, ".bon/cost.toml", "cost = 1.00\n", "cost").unwrap();
+        git(&work, &["push", "-q", "origin", &format!("{c}:refs/heads/main")]).unwrap();
+        assert_eq!(git(&remote, &["rev-parse", "main"]).unwrap(), c);
+        assert_eq!(git(&remote, &["show", "main:.bon/cost.toml"]).unwrap(), "cost = 1.00");
+        // Nothing the engineer has moved: their branch, and their edit.
+        assert_eq!(git(&work, &["symbolic-ref", "--short", "HEAD"]).unwrap(), "mine");
+        assert!(std::fs::read_to_string(work.join(".bon/bon.toml")).unwrap().contains("# editing"));
+        assert!(!work.join(".bon/cost.toml").exists());
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn a_retired_queue_id_is_never_reused_and_an_edit_keeps_its_id() {
