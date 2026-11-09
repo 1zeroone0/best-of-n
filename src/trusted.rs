@@ -1426,7 +1426,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
             "commit": text(&c.commit), "base": text(&c.base), "accepted": c.accepted, "proved": c.proved,
             "changed": c.changed.iter().map(|p| text(p)).collect::<Vec<_>>(), "diff": c.diff, "added": added, "removed": removed, "rank": c.rank,
             "out": c.out.iter().map(|h| h.0).collect::<Vec<u64>>(), "accepts": c.accepts, "accepts_foils": c.accepts_foils, "rejects_counterexamples": c.rejects_counterexamples,
-            "measured": c.measured, "added": c.added.iter().map(|p| text(p)).collect::<Vec<_>>(),
+            "measured": c.measured, "added_paths": c.added.iter().map(|p| text(p)).collect::<Vec<_>>(),
             "intents": c.intents.iter().map(|(q, i)| (q, text(i))).collect::<Vec<_>>(),
         })),
     });
@@ -1970,6 +1970,8 @@ mod tests {
         "#).unwrap();
         let d: Host = toml::from_str(r#"
             path = ["/usr/bin"]
+            rustup_home = "/opt/bon/rustup"
+            cargo_home = "/opt/bon/cargo-home"
             [prices]
             "claude-haiku-5-5" = { input = 0.10, cached_input = 0.01, output = 0.50, cache_write = 0.125, cache_write_long = 0.20 }
             "gpt-6.1-sol" = { input = 2.00, cached_input = 0.10, output = 10.00, cache_write = 2.50, cache_write_long = 5.00 }
