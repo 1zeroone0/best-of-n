@@ -35,8 +35,9 @@ beside the command's stdout, stderr and traces.
 the prompt on stdin, sleeps `SLEEP` seconds (the model), then by the prompt's
 kind:
 
-- **code**: fixes `max`, one of `VARIANTS` ways by its index, so stubs whose
-  indices agree modulo `VARIANTS` write byte-identical trees;
+- **code**: fixes `max`, one of `VARIANTS` ways by its index (past four, the
+  same fix with its own comment), so stubs whose indices agree modulo
+  `VARIANTS` write byte-identical trees;
 - **foil**: puts the wrong body back: the tests accept it, Verus does not;
 - **counterexample**: writes a test that the right `max` passes and the
   foil fails, one of `TEST_VARIANTS` ways.
@@ -65,3 +66,31 @@ small, so a warm check is seconds.
 | `BON` | `target/debug/bon` | the binary (built first when unset) |
 
 bon's pool knobs pass through the environment (see `src/trusted.rs`, `Pools`).
+
+## Results
+
+This Mac mini (14 cores, 64 GB), `SLEEP=30 K=1 CX_WIDTH=4 VARIANTS=4
+TEST_VARIANTS=2`, 2026-11-12, other sessions sharing the host. `bon code`
+(code, foil and counterexample searches, push). CPU is `cpu_rusage`; checks
+are the judge's logs, executed / answered by the cache. Baseline is 03d9da4
+(one `jobs` slot pool of 7, cold agent builds, no cache, serial verdicts).
+
+| width | build | wall s | CPU s | peak RSS MB | checks run / cached |
+|---|---|---|---|---|---|
+| 8 | baseline | 290 | 984 | 13344 | 142 / 0 |
+| 8 | after | 161 | 126 | 1990 | 38 / 104 |
+| 32 | baseline | 527 | 2758 | 6252 | 430 / 0 |
+| 32 | after | 200 | 204 | 1998 | 38 / 392 |
+| 128 | after | 357 | 399 | 2027 | 38 / 1544 |
+| 500 | after | 986 | 1007 | 1994 | 38 / 6008 |
+| 32 | after, 24 GB / 12-core pools | 206 | 206 | 2051 | 38 / 392 |
+| 128 | after, 24 GB / 12-core pools | 356 | 401 | 1977 | 38 / 1544 |
+| 32, every tree distinct | baseline | 517 | 2712 | 6330 | 430 / 0 |
+| 32, every tree distinct | after | 310 | 289 | 1944 | 394 / 36 |
+| 128 | after, `BON_CHECKS=14 BON_CHECK_THREADS=1` | 356 | 399 | 2293 | 38 / 1544 |
+
+"24 GB / 12-core pools" is `BON_CORES=12 BON_MEMORY_GB=16`: 6 checks of 2
+threads, 64 sessions. "Every tree distinct" is `VARIANTS=32 TEST_VARIANTS=4`:
+the warm builds and pools without the cache's help. `bon counterexample` on
+the pushed trunk: 59 s / 70 CPU-s / 2.3 GB before, 69 s / 65 CPU-s / 2.0 GB
+after (its few checks now get 2 threads each, not the machine).

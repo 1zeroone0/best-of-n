@@ -33,6 +33,9 @@ case "$kind" in
       *) fix='    if a < b { b } else { a }' ;;
     esac
     sed -i '' "s/^    if a > b { a } else { a }\$/$fix/" src/lib.rs
+    # Past four, a variant is the same fix with its own comment: its own tree.
+    v=$((index % VARIANTS))
+    if [ "$v" -ge 4 ]; then echo "// variant $v" >> src/lib.rs; fi
     ;;
   foil)
     # Every foil is the same wrong reading: the tests miss it, Verus does not.
