@@ -391,7 +391,9 @@ fn scratch(name: &str) -> PathBuf {
     if !base.exists() {
         let _ = std::fs::create_dir_all(&base);
     }
-    let _ = Command::new("chmod").arg("0711").arg(&base).stderr(Stdio::null()).status();
+    // Its mode once per bon process (it was a fork on every call).
+    static BASE: std::sync::Once = std::sync::Once::new();
+    BASE.call_once(|| { let _ = Command::new("chmod").arg("0711").arg(&base).stderr(Stdio::null()).status(); });
     let (owner, rest) = name.split_once('/').unwrap_or((name, ""));
     let dir = base.join(format!("{}.{owner}", std::process::id()));
     if !dir.exists() {
@@ -714,8 +716,28 @@ fn clone_build(config: &Config, from: Option<&std::path::Path>, name: &str) -> R
     Ok(d)
 }
 
+/// A judge's build directory, named but not yet made: it is made (a fresh
+/// clone of trunk's) by the first check that must run in it, so a judge whose
+/// checks the verdict cache answers costs no clone and no removal.
+fn judge_build(name: &str) -> PathBuf { scratch(name) }
+
+/// Make `d` a fresh clone of trunk's build unless it exists. One at a time per directory.
+fn ensure_build(config: &Config, d: &std::path::Path) -> bool {
+    let one = flight(&format!("build\0{}", d.display()));
+    let _one = one.lock().unwrap_or_else(|e| e.into_inner());
+    if d.exists() { return true; }
+    let warm = WARM.get().cloned().flatten();
+    let made = writable_dir(d).is_ok() && warm.is_none_or(|w| {
+        let argv: Vec<String> = vec!["cp".into(), "-cR".into(), format!("{}/", w.display()), d.to_string_lossy().into()];
+        as_agent(config, std::path::Path::new("/tmp"), &[], &argv).status().is_ok_and(|s| s.success())
+    });
+    if !made { remove_build(config, d); let _ = std::fs::remove_dir(d); }
+    made
+}
+
 /// agent empties a build directory; engineer removes the directory itself at cleanup.
 fn remove_build(config: &Config, d: &std::path::Path) {
+    if !d.exists() { return; }
     let _ = as_agent(config, std::path::Path::new("/tmp"), &[], &["rm".into(), "-rf".into(), d.to_string_lossy().into()])
         .stderr(Stdio::null()).status();
 }
@@ -1058,6 +1080,11 @@ fn run_check_with(config: &Config, on: &On, threads: usize, dir: &std::path::Pat
     let one = key.as_deref().map(flight);
     let _one = one.as_ref().map(|f| f.lock().unwrap_or_else(|e| e.into_inner()));
     if let Some((ok, out)) = answer(config, on, command, log) { return (ok, out, false); }
+    // A judge's build is made now, when a check must run in it.
+    if !ensure_build(config, target) {
+        write_trace(log, format!("no build directory: {} could not be made", target.display()));
+        return (false, String::new(), false);
+    }
     let argv = vec!["/bin/sh".to_string(), "-c".to_string(), command.to_string()];
     let t = target.to_string_lossy().to_string();
     let env = [("BON_BUILD", t.clone()), ("CARGO_TARGET_DIR", t), ("CARGO_BUILD_JOBS", threads.to_string()), ("BON_CHECK_SLOT", "held".to_string())];
@@ -1844,14 +1871,12 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
     // Without token counts there is no measured cost: charge the whole limit.
     let (spent, harness_cost, prices) = generation(h, config, &stdout).unwrap_or((micro(config.agent_process.limit), None, HashMap::new()));
     if killed { write_trace(&trace.join("killed"), "time limit"); }
-    // The judge's build: a fresh clone of trunk's, which no agent process wrote.
-    let candidate = build_directory(config, &format!("{search}.{index}.judge/build"))
-        .and_then(|judge| {
-            let c = capture(m, kind, search, index, start, &dir, &judge, target, foils, trace);
-            remove_build(config, &judge);
-            c
-        })
+    // The judge's build: a fresh clone of trunk's, which no agent process wrote,
+    // made only if a check must run (the verdict cache may answer them all).
+    let judge = judge_build(&format!("{search}.{index}.judge/build"));
+    let candidate = capture(m, kind, search, index, start, &dir, &judge, target, foils, trace)
         .map_err(|e| { write_trace(&trace.join("error"), &e); }).ok();
+    remove_build(config, &judge);
     let _ = Command::new("chmod").args(["-R", "-N"]).arg(&dir).stderr(Stdio::null()).status();
     let _ = std::fs::remove_dir_all(&dir);
     let text = |v: &[char]| v.iter().collect::<String>();
@@ -2196,7 +2221,10 @@ fn verdicts(m: &Manifest, tasks: &[(String, PathBuf)], test: &[u8], build: &std:
                     let (commit, log) = &tasks[i];
                     let made: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
                     let make = || {
-                        let d = clone_build(config, Some(build), &format!("{name}.verdict.{i}/build")).ok()?;
+                        // From the judge's build if a check made it, else from trunk's.
+                        let warm = WARM.get().cloned().flatten();
+                        let from = if build.exists() { Some(build) } else { warm.as_deref() };
+                        let d = clone_build(config, from, &format!("{name}.verdict.{i}/build")).ok()?;
                         *made.lock().unwrap() = Some(d.clone());
                         Some(d)
                     };
