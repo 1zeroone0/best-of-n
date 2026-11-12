@@ -16,6 +16,10 @@
 #   TIME           each agent process's time limit, seconds [1800]
 #   PROJECT        kernel: the small crate in bench/sandbox; bon: bon's own
 #                  source at this commit, one function broken [kernel]
+#   HARNESS        the code search's harness, a TOML inline table's fields
+#                  without n [the stub]; e.g. a real one, through bon-sample:
+#                  'name = "claude", model = "claude-haiku-5-5", command = [...]'
+#   CX_HARNESS     the counterexample and foil searches' harness, likewise [the stub]
 # and bon's own pool knobs, passed through: BON_GENERATION, BON_CHECKS,
 # BON_CHECK_THREADS, BON_CORES, BON_MEMORY_GB.
 set -eu
@@ -30,6 +34,9 @@ VARIANTS=${VARIANTS:-4}
 TEST_VARIANTS=${TEST_VARIANTS:-2}
 TIME=${TIME:-1800}
 PROJECT=${PROJECT:-kernel}
+STUB='name = "stub", model = "stub", command = ["/bin/sh", ".bon/stub.sh"]'
+HARNESS=${HARNESS:-$STUB}
+CX_HARNESS=${CX_HARNESS:-$STUB}
 if [ -z "${BON:-}" ]; then
   (cd "$REPO" && cargo build -q --offline)
   BON=$REPO/target/debug/bon
@@ -71,6 +78,7 @@ cat > "$WORK/.bon/bon.toml" <<EOF
 # The benchmark's sandbox: stub agents, a local bare origin, no traces remote.
 limit = 1000.0
 rate = 0
+harness = [{ $HARNESS, n = [$WIDTH] }]
 
 [agent_process]
 limit = 1.0
@@ -83,14 +91,8 @@ verify = ["cargo verus verify"]
 agree = ["cargo run -q --example kernel"]
 rank = { code = "echo 0" }
 
-[[harness]]
-name = "stub"
-model = "stub"
-command = ["/bin/sh", ".bon/stub.sh"]
-n = [$WIDTH]
-
 [counterexample]
-harness = [{ name = "stub", model = "stub", command = ["/bin/sh", ".bon/stub.sh"], n = [$CX_WIDTH] }]
+harness = [{ $CX_HARNESS, n = [$CX_WIDTH] }]
 path = "tests/counterexample.rs"
 build = "cargo test -q --no-run --test counterexample"
 run = "cargo test -q --test counterexample"
