@@ -217,7 +217,7 @@ Read the trace and bring the finding:
 
 - **Fewer than two verified:** the spec change is too big, or a check is
   wrong. Propose where to split it, or name the check.
-- **Disagree:** verified candidates showed more than one behavior, at least
+- **Undecided:** verified candidates showed more than one behavior, at least
   two blind tests judged every one, and none split them: the spec allows each.
   Propose the spec or test that decides. (A test that did split them already
   landed, and the next attempt ran from it.)

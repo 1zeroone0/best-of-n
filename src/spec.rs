@@ -446,7 +446,7 @@ pub enum Blocked {
     /// Otherwise, on candidates that disagree: at least two verified tests
     /// judge every candidate and none splits them, so the spec does not decide
     /// between their behaviors.
-    Disagree,
+    Undecided,
     /// Otherwise, on a selection: fewer than two verified tests judge every
     /// candidate and reject a foil.
     Undiscriminating,
@@ -487,7 +487,7 @@ pub open spec fn blocked(reason: Blocked, tested: Search, counterexample: Search
         Blocked::TooFewTests => checked && !enough,
         Blocked::RejectsEvery => checked && enough
             && exists|i: int| verified_at(counterexample, i) && rejects_every(at(counterexample, i), tested),
-        Blocked::Disagree => checked && disagree(tested) && enough
+        Blocked::Undecided => checked && disagree(tested) && enough
             && (forall|i: int| verified_at(counterexample, i) ==> !rejects_every(at(counterexample, i), tested)),
         Blocked::Undiscriminating => checked && complete(foils) && enough
             && (forall|i: int| verified_at(counterexample, i) ==> !rejects_every(at(counterexample, i), tested))
@@ -520,7 +520,7 @@ pub open spec fn reason(tested: Search, counterexample: Option<Search>, foils: O
             else {
                 match foils {
                     Some(foils) => if complete(foils) && !not_found(counterexample, tested, foils) { Some(Blocked::Undiscriminating) } else { None },
-                    None => if disagree(tested) { Some(Blocked::Disagree) } else { None },
+                    None => if disagree(tested) { Some(Blocked::Undecided) } else { None },
                 }
             },
     }
@@ -550,7 +550,7 @@ pub proof fn blocked_has_one_reason(counterexample: Search, tested: Search, foil
 }
 
 /// A counterexample search on candidates that disagree that found no split
-/// blocked for exactly one of too few tests, rejects every and disagree,
+/// blocked for exactly one of too few tests, rejects every and undecided,
 /// whatever the foil search and the remote's head.
 pub proof fn disagreement_has_one_reason(counterexample: Search, tested: Search, foils: Search, remote: Commit)
     requires
@@ -558,10 +558,10 @@ pub proof fn disagreement_has_one_reason(counterexample: Search, tested: Search,
     ensures
         blocked(Blocked::TooFewTests, tested, counterexample, foils, remote)
         || blocked(Blocked::RejectsEvery, tested, counterexample, foils, remote)
-        || blocked(Blocked::Disagree, tested, counterexample, foils, remote),
+        || blocked(Blocked::Undecided, tested, counterexample, foils, remote),
         !(blocked(Blocked::TooFewTests, tested, counterexample, foils, remote) && blocked(Blocked::RejectsEvery, tested, counterexample, foils, remote)),
-        !(blocked(Blocked::TooFewTests, tested, counterexample, foils, remote) && blocked(Blocked::Disagree, tested, counterexample, foils, remote)),
-        !(blocked(Blocked::RejectsEvery, tested, counterexample, foils, remote) && blocked(Blocked::Disagree, tested, counterexample, foils, remote)),
+        !(blocked(Blocked::TooFewTests, tested, counterexample, foils, remote) && blocked(Blocked::Undecided, tested, counterexample, foils, remote)),
+        !(blocked(Blocked::RejectsEvery, tested, counterexample, foils, remote) && blocked(Blocked::Undecided, tested, counterexample, foils, remote)),
 {
 }
 

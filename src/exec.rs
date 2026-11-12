@@ -903,7 +903,7 @@ pub fn blocked(t: &Search, counterexample: Option<&Search>, f: Option<&Search>) 
                     proof { complete(f); }
                     if !not_found(x, t, f) { Some(spec::Blocked::Undiscriminating) } else { None }
                 }
-                None => if disagree(t) { Some(spec::Blocked::Disagree) } else { None },
+                None => if disagree(t) { Some(spec::Blocked::Undecided) } else { None },
             }
         }
     }

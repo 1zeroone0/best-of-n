@@ -1667,7 +1667,7 @@ pub fn record_blocked(m: &Manifest, reason: spec::Blocked, Ghost(tested): Ghost<
 {
     let (word, sentence) = match reason {
         spec::Blocked::TooFewVerified => ("too_few_verified", "fewer than two verified candidates"),
-        spec::Blocked::Disagree => ("disagree", "the verified candidates disagree, two tests judged every one, and none splits them: the spec does not decide between them"),
+        spec::Blocked::Undecided => ("undecided", "the verified candidates disagree, two tests judged every one, and none splits them: the spec does not decide between them"),
         spec::Blocked::TooFewTests => ("too_few_tests", "fewer than two verified tests, or on candidates that disagree fewer than two that judge every one, and none splits the candidates"),
         spec::Blocked::RejectsEvery => ("rejects_every", "a verified test rejects every candidate"),
         spec::Blocked::Undiscriminating => ("undiscriminating", "fewer than two verified tests judge every candidate and reject a foil"),

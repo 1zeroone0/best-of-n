@@ -31,7 +31,7 @@ fn word(reason: Option<best_of_n::spec::Blocked>) -> &'static str {
     use best_of_n::spec::Blocked::*;
     match reason {
         None => "none", Some(TooFewVerified) => "too_few_verified", Some(TooFewTests) => "too_few_tests", Some(RejectsEvery) => "rejects_every",
-        Some(Disagree) => "disagree", Some(Undiscriminating) => "undiscriminating", Some(TrunkMoved) => "trunk_moved", Some(Refused) => "refused",
+        Some(Undecided) => "undecided", Some(Undiscriminating) => "undiscriminating", Some(TrunkMoved) => "trunk_moved", Some(Refused) => "refused",
     }
 }
 
