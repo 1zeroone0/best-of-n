@@ -145,8 +145,8 @@ fn check_seconds<'a>(dir: &Path, logs: impl Iterator<Item = &'a str>) -> Option<
 /// by its sentence.
 const REASONS: [(&str, &str); 7] = [
     ("too_few_verified", "fewer than two verified candidates"),
-    ("disagree", "the verified candidates show more than one behavior, and no test splits them: the spec does not decide between them"),
-    ("too_few_tests", "fewer than two verified tests, and none splits the candidates"),
+    ("disagree", "the verified candidates disagree, two tests judged every one, and none splits them: the spec does not decide between them"),
+    ("too_few_tests", "fewer than two verified tests, or on candidates that disagree fewer than two that judge every one, and none splits the candidates"),
     ("rejects_every", "a verified test rejects every candidate"),
     ("undiscriminating", "fewer than two verified tests judge every candidate and reject a foil"),
     ("trunk_moved", "trunk moved during the search; run it again"),
@@ -1327,11 +1327,11 @@ mod tests {
     }
 
     #[test]
-    fn an_attempt_that_diverged_ends_in_its_counterexample_search() {
+    fn an_attempt_whose_candidates_disagree_ends_in_its_counterexample_search() {
         // No selection, no foil search: a counterexample search on the code search, then a landing or a block.
         let searches = [s("code", true), s("counterexample", true), s("code", true), s("counterexample", true)];
-        let lines = ls(&[&["grant", "diverged 0 1"], &["grant", "land 1 3"], &["grant", "diverged 2 0"],
-            &["grant", "blocked: disagree: the verified candidates show more than one behavior, and no test splits them: the spec does not decide between them"]]);
+        let lines = ls(&[&["grant", "disagreed 0 1"], &["grant", "land 1 3"], &["grant", "disagreed 2 0"],
+            &["grant", "blocked: disagree: the verified candidates disagree, two tests judged every one, and none splits them: the spec does not decide between them"]]);
         let ends: Vec<End> = attempt_ends(&searches, &lines, false, &none).into_iter().map(|(_, e)| e).collect();
         assert_eq!(ends, [end("landed", None, None), end("blocked", Some("disagree"), Some("recorded"))]);
         assert_eq!(by_sentence(REASONS[1].1, &json!({}), None), Some("disagree"));

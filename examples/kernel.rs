@@ -1,5 +1,5 @@
 //! An agree check: the kernel's encoding and emission of fixed searches, and
-//! its decisions on a search that diverges. The contracts in gates.rs fix them
+//! its decisions on a search whose verified candidates disagree. The contracts in gates.rs fix them
 //! exactly, so every verified candidate prints the same; a candidate that
 //! differs is wrong.
 
@@ -63,11 +63,12 @@ fn main() {
         kind, base: t("b0"), n: results.len(), checks: vec![t("src/spec.rs")], tests: vec![t("tests/")], trusted: vec![t("src/trusted.rs")], limit: 9, results,
     };
     let tested = search(Kind::Code { goal: t("c0ffee") }, vec![Some(candidate("x1", 7, 1)), None, Some(candidate("y2", 8, -2))]);
-    println!("diverges: selected {:?}, blocked {}", Kernel::selected(&tested), word(Kernel::blocked(&tested, None, None)));
+    println!("disagree: selected {:?}, blocked {}", Kernel::selected(&tested), word(Kernel::blocked(&tested, None, None)));
     let on = || Kind::Counterexample { goal: Some(AgentProcess { search: 0, index: 0 }) };
     let cases = [
         ("a test splits them", vec![Some(test("s1", vec![(0, true), (2, false)])), Some(test("s2", vec![(0, true), (2, true)]))]),
-        ("no test splits them", vec![Some(test("s1", vec![(0, true), (2, true)])), Some(test("s2", vec![(0, true)]))]),
+        ("no test splits them", vec![Some(test("s1", vec![(0, true), (2, true)])), Some(test("s2", vec![(0, true), (2, true)]))]),
+        ("a test has no verdict on one", vec![Some(test("s1", vec![(0, true), (2, true)])), Some(test("s2", vec![(0, true)]))]),
         ("one verified test", vec![Some(test("s1", vec![(0, true), (2, true)])), None]),
         ("a test rejects both", vec![Some(test("s1", vec![(0, false), (2, false)])), Some(test("s2", vec![(0, true), (2, true)]))]),
     ];
