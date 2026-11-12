@@ -503,22 +503,48 @@ proof fn kind_correct(k: Kind)
         Kind::Compaction { goal, out } => { text_words(goal.0); hashes_words(out); },
     }
 }
-#[verifier::rlimit(1000)]
+proof fn intents_words(xs: Vec<(u64,Intent)>)
+    ensures <Vec<(u64,Intent)> as Wire>::words(xs.model())
+        == seq![xs.len() as u64] + xs@.map_values(|pair: (Cue, Intent)| seq![pair.0] + text(pair.1.0@)).flatten(),
+{
+    assert forall|i: int| 0 <= i < xs.len() implies <(u64,Intent) as Wire>::words(xs@[i].model()) == seq![xs@[i].0] + text(xs@[i].1.0@) by { text_words(xs@[i].1.0); }
+    many_matches::<(u64,Intent)>(xs@, |e: (u64,Intent)| seq![e.0] + text(e.1.0@));
+}
+proof fn accepts_words(xs: Vec<(i64,bool)>)
+    ensures <Vec<(i64,bool)> as Wire>::words(xs.model())
+        == seq![xs.len() as u64] + xs@.map_values(|pair: (i64, bool)| seq![pair.0 as u64, bit(pair.1)]).flatten(),
+{
+    assert forall|i: int| 0 <= i < xs.len() implies <(i64,bool) as Wire>::words(xs@[i].model()) == seq![xs@[i].0 as u64, bit(xs@[i].1)] by {
+        assert(seq![xs@[i].0 as u64] + seq![bit(xs@[i].1)] =~= seq![xs@[i].0 as u64, bit(xs@[i].1)]);
+    }
+    many_matches::<(i64,bool)>(xs@, |e: (i64,bool)| seq![e.0 as u64, bit(e.1)]);
+}
+/// A candidate's words as CandidateWire nests its fields are candidate_words' pieces in order.
+proof fn candidate_layout(commit: Seq<u64>, base: Seq<u64>, accepted: u64, proved: u64, changed: Seq<u64>,
+    out_len: u64, out: Seq<u64>, intents_len: u64, intents: Seq<u64>, accepts_len: u64, accepts: Seq<u64>,
+    foils_len: u64, foils: Seq<u64>, rejects: u64, measured: u64, added: Seq<u64>, rank: u64, diff: u64)
+    ensures
+        ((commit + (base + seq![accepted])) + ((seq![proved] + changed) + ((seq![out_len] + out) + (seq![intents_len] + intents))))
+        + (((seq![accepts_len] + accepts) + ((seq![foils_len] + foils) + seq![rejects])) + ((seq![measured] + added) + (seq![rank] + seq![diff])))
+        == commit + base + seq![accepted, proved] + changed + seq![out_len] + out + seq![intents_len] + intents
+            + seq![accepts_len] + accepts + seq![foils_len] + foils + seq![rejects, measured] + added + seq![rank, diff],
+{
+    assert(((commit + (base + seq![accepted])) + ((seq![proved] + changed) + ((seq![out_len] + out) + (seq![intents_len] + intents))))
+        + (((seq![accepts_len] + accepts) + ((seq![foils_len] + foils) + seq![rejects])) + ((seq![measured] + added) + (seq![rank] + seq![diff])))
+        =~= commit + base + seq![accepted, proved] + changed + seq![out_len] + out + seq![intents_len] + intents
+            + seq![accepts_len] + accepts + seq![foils_len] + foils + seq![rejects, measured] + added + seq![rank, diff]);
+}
 proof fn candidate_correct(c: Candidate)
     ensures Candidate::words(c.model()) == candidate_words(c),
 {
     text_words(c.commit.0); text_words(c.base.0); texts_words(c.changed); texts_words(c.added); hashes_words(c.out);
-    assert forall|i: int| 0 <= i < c.intents.len() implies <(u64,Intent) as Wire>::words(c.intents@[i].model()) == seq![c.intents@[i].0] + text(c.intents@[i].1.0@) by { text_words(c.intents@[i].1.0); }
-    many_matches::<(u64,Intent)>(c.intents@, |e: (u64,Intent)| seq![e.0] + text(e.1.0@));
-    assert forall|i: int| 0 <= i < c.accepts.len() implies <(i64,bool) as Wire>::words(c.accepts@[i].model()) == seq![c.accepts@[i].0 as u64, bit(c.accepts@[i].1)] by {
-        assert(seq![c.accepts@[i].0 as u64] + seq![bit(c.accepts@[i].1)] =~= seq![c.accepts@[i].0 as u64, bit(c.accepts@[i].1)]);
-    }
-    many_matches::<(i64,bool)>(c.accepts@, |e: (i64,bool)| seq![e.0 as u64, bit(e.1)]);
-    assert forall|i: int| 0 <= i < c.accepts_foils.len() implies <(i64,bool) as Wire>::words(c.accepts_foils@[i].model()) == seq![c.accepts_foils@[i].0 as u64, bit(c.accepts_foils@[i].1)] by {
-        assert(seq![c.accepts_foils@[i].0 as u64] + seq![bit(c.accepts_foils@[i].1)] =~= seq![c.accepts_foils@[i].0 as u64, bit(c.accepts_foils@[i].1)]);
-    }
-    many_matches::<(i64,bool)>(c.accepts_foils@, |e: (i64,bool)| seq![e.0 as u64, bit(e.1)]);
-    assert(Candidate::words(c.model()) =~= candidate_words(c));
+    intents_words(c.intents); accepts_words(c.accepts); accepts_words(c.accepts_foils);
+    candidate_layout(text(c.commit.0@), text(c.base.0@), bit(c.accepted), bit(c.proved), texts(c.changed@),
+        c.out.len() as u64, c.out@.map_values(|hash: Hash| hash.0),
+        c.intents.len() as u64, c.intents@.map_values(|pair: (Cue, Intent)| seq![pair.0] + text(pair.1.0@)).flatten(),
+        c.accepts.len() as u64, c.accepts@.map_values(|pair: (i64, bool)| seq![pair.0 as u64, bit(pair.1)]).flatten(),
+        c.accepts_foils.len() as u64, c.accepts_foils@.map_values(|pair: (i64, bool)| seq![pair.0 as u64, bit(pair.1)]).flatten(),
+        bit(c.rejects_counterexamples), bit(c.measured), texts(c.added@), c.rank as u64, c.diff);
 }
 proof fn result_correct(r: Option<Candidate>)
     ensures <Option<Candidate> as Wire>::words(r.model()) == result_words(r),
