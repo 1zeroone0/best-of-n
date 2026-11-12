@@ -335,6 +335,7 @@ pub fn selected(s: &Search) -> (r: Option<usize>)
         r is None ==> forall|i: int| !spec::selected(s@, i),
         r is None ==> !spec::agree(s@),
 {
+    hide(first_by_key);
     let v = verified_each(s);
     let ghost sv = s@;
     // Only code and compaction searches select.
@@ -528,6 +529,7 @@ fn discriminates(c: &Candidate, f: &Search) -> (r: bool)
     requires f.results.len() == f.n,
     ensures r == spec::discriminates(c@, f@),
 {
+    hide(first_by_key);
     let mut j = 0;
     while j < f.n
         invariant f.results.len() == f.n, 0 <= j <= f.n,
@@ -558,6 +560,8 @@ fn splits(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
         forall|j: int| 0 <= j < t.n ==> vt[j] == spec::verified_at(t@, j),
     ensures r == spec::splits(c@, t@),
 {
+    hide(first_by_key);
+    hide(spec::verified);
     let ghost tv = t@;
     let ghost tp = c@.accepts;
     let mut value: Option<bool> = None;
@@ -618,6 +622,7 @@ fn rejects_every(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
         forall|j: int| 0 <= j < t.n ==> vt[j] == spec::verified_at(t@, j),
     ensures r == spec::rejects_every(c@, t@),
 {
+    hide(first_by_key);
     if matches!(&t.kind, Kind::Compaction { .. }) {
         if accepts_on(c, None) != Some(false) {
             assert(spec::member(t@, -1));
@@ -651,6 +656,7 @@ fn judges(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
         forall|j: int| 0 <= j < t.n ==> vt[j] == spec::verified_at(t@, j),
     ensures r == spec::judges(c@, t@),
 {
+    hide(first_by_key);
     if matches!(&t.kind, Kind::Compaction { .. }) && accepts_on(c, None).is_none() {
         assert(spec::member(t@, -1));
         return false;
@@ -680,6 +686,11 @@ pub fn not_found(x: &Search, t: &Search, f: &Search) -> (r: bool)
     requires x.results.len() == x.n, t.results.len() == t.n, f.results.len() == f.n,
     ensures r == spec::not_found(x@, t@, f@),
 {
+    hide(first_by_key);
+    hide(spec::verified);
+    hide(spec::splits);
+    hide(spec::rejects_every);
+    hide(spec::judges);
     hide(spec::discriminates);
     let ghost xv = x@;
     assert(spec::complete(xv)) by {
@@ -727,6 +738,7 @@ fn two_verified(s: &Search) -> (r: bool)
     requires s.results.len() == s.n,
     ensures r == spec::two_verified(s@),
 {
+    hide(first_by_key);
     let v = verified_each(s);
     let mut first: Option<usize> = None;
     let mut i = 0;
@@ -759,6 +771,17 @@ pub fn blocked(t: &Search, counterexample: Option<&Search>, f: Option<&Search>) 
     ensures r == spec::reason(t@, match counterexample { Some(c) => Some(c@), None => None },
         match f { Some(c) => Some(c@), None => None }),
 {
+    hide(first_by_key);
+    hide(spec::verified);
+    hide(spec::splits);
+    hide(spec::judges);
+    hide(spec::discriminates);
+    hide(spec::rejects_every);
+    hide(spec::not_found);
+    hide(spec::agree);
+    hide(spec::two_verified);
+    hide(spec::isolated);
+    hide(spec::authority);
     proof { complete(t); }
     match counterexample {
         None => {
@@ -812,6 +835,9 @@ pub fn landing(x: &Search, t: &Search) -> (r: Option<usize>)
         r is None ==> forall|i: int| !spec::lands_on(x@, t@, i),
         r is None ==> !spec::found(x@, t@),
 {
+    hide(first_by_key);
+    hide(spec::verified);
+    hide(spec::splits);
     let ghost xv = x@;
     let ghost tv = t@;
     assert(spec::complete(xv)) by {
@@ -883,6 +909,7 @@ fn rejects_trunk(x: &Search, vx: &Vec<bool>, i: usize) -> (r: bool)
         forall|m: int| 0 <= m < x.n ==> vx[m] == spec::verified_at(x@, m),
     ensures r == spec::rejects_trunk(x@, i as int),
 {
+    hide(first_by_key);
     if !vx[i] { return false; }
     let c = candidate(x, i);
     match accepts_on(c, None) { Some(b) => !b, None => false }
@@ -895,6 +922,8 @@ pub fn found_on_trunk(x: &Search) -> (r: Option<usize>)
         r matches Some(i) ==> spec::found_on_trunk(x@, i as int),
         r is None ==> forall|i: int| !spec::found_on_trunk(x@, i),
 {
+    hide(first_by_key);
+    hide(spec::verified);
     let ghost xv = x@;
     assert(spec::complete(xv)) by {
         assert forall|i: int| 0 <= i < x.n implies xv.results.contains_key(i) by {}
@@ -1012,6 +1041,7 @@ fn cites(s: &Search, v: &Vec<bool>, q: Cue) -> (r: (Option<usize>, Option<usize>
         r.1 matches Some(g) ==> (r.0 matches Some(f) && f != g && spec::cites(s@, g as int, q as nat)),
         r.1 is None ==> (r.0 matches Some(f) ==> forall|i: int| spec::cites(s@, i, q as nat) ==> i == f),
 {
+    hide(first_by_key);
     let ghost sv = s@;
     let mut first: Option<usize> = None;
     let mut second: Option<usize> = None;
@@ -1073,6 +1103,7 @@ fn cues(s: &Search, v: &Vec<bool>) -> (r: Vec<Cue>)
         forall|q: Cue, i: int| spec::cites(s@, i, q as nat) ==> r@.contains(q),
         forall|a: int, b: int| 0 <= a < b < r.len() ==> r[a] < r[b],
 {
+    hide(first_by_key);
     let ghost sv = s@;
     let mut r: Vec<Cue> = Vec::new();
     let mut i = 0;
@@ -1134,7 +1165,7 @@ fn cues(s: &Search, v: &Vec<bool>) -> (r: Vec<Cue>)
                 assert forall|q: Cue| spec::cites(sv, i as int, q as nat) implies r@.contains(q) by {
                     let keys = m.map_values(|e: (nat, spec::Intent)| e.0);
                     assert(c@.intents.contains_key(q as nat));
-                    assert(keys.to_set().contains(q as nat));
+                    assert(keys.to_set().contains(q as nat)) by { reveal(first_by_key); }
                     assert(keys.contains(q as nat));
                     let p = choose|p: int| 0 <= p < keys.len() && keys[p] == q as nat;
                     assert(c.intents@[p].0 == q);
@@ -1169,6 +1200,7 @@ pub fn proposed(s: &Search) -> (r: Vec<(Cue, Intent)>)
             exists|k: int| 0 <= k < r.len() && r[k].0 == q,
         forall|a: int, b: int| 0 <= a < b < r.len() ==> r[a].0 < r[b].0,
 {
+    hide(first_by_key);
     hide(spec::proposed);
     hide(spec::agreed);
     let ghost sv = s@;
@@ -1237,6 +1269,7 @@ pub fn contested(s: &Search) -> (r: Vec<Cue>)
         forall|q: Cue| spec::contested(s@, q as nat) ==> r@.contains(q),
         forall|a: int, b: int| 0 <= a < b < r.len() ==> r[a] < r[b],
 {
+    hide(first_by_key);
     let ghost sv = s@;
     proof { complete(s); }
     let v = verified_each(s);
