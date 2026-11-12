@@ -4,7 +4,8 @@
 //! the files it names; it decides nothing.
 //!
 //! Color has one meaning, position on the chain: red needs attention, violet
-//! is settled. Everything else is ink, muted or faint, light and dark.
+//! is settled. Everything else is ink, muted or faint, light and dark. `Tone`
+//! holds the legend: what each color means where it is used.
 
 use std::io::IsTerminal;
 use std::sync::mpsc;
@@ -38,6 +39,32 @@ const LIGHT: Palette = Palette {
 };
 
 /// Position on the chain, red to violet. Green has its place on the chain but no use yet.
+///
+/// The legend: what each tone means where the view uses it. Everything not
+/// listed is ink (a value), muted (a label), faint (what only locates a value:
+/// a path, a line, a commit beside an intent), the rule's line, or the hover
+/// background of the focused row.
+///
+/// - Red, needs attention: a bon process that exited (stopped with no final
+///   transition) and the line saying so on its attempt; a counterexample found
+///   on trunk (outcome `found`); a goal's list dot where the kernel's selection
+///   differs from the trace's, and that disagreement's line; an agent process's
+///   flags (killed, over limit, price mismatch); No push in Where It Went; an
+///   error reading the projection, in the footer.
+/// - Orange, under way: a running bon process or search; Running N in the
+///   header; In flight in Where It Went.
+/// - Yellow, stopped short and waiting on someone: a blocked goal or search,
+///   why it blocked and a reason inferred for it; a proposal waiting for
+///   engineer (its dot and ● Waiting); a code or compaction search that neither
+///   selected nor blocked nor runs; any outcome without a tone of its own.
+///   Also, in Spec, "Differs from trunk" on an item, which is about the working
+///   tree, not the chain: a second meaning.
+/// - Blue, selected: the selected candidate (its index and ★), a search that
+///   selected. Also the focus bar ▎ of the list's focused row, which is the
+///   view's cursor, not a selection: a second meaning.
+/// - Indigo, cleared: a foil or counterexample search that did not block; a
+///   counterexample search on trunk that found none (outcome `not found`).
+/// - Violet, settled: a pushed goal; Reached a push in Where It Went.
 #[derive(Clone, Copy)]
 #[allow(dead_code)]
 enum Tone { Red, Orange, Yellow, Green, Blue, Indigo, Violet }
