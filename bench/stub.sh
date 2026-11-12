@@ -10,6 +10,7 @@
 #   VARIANTS       code edits: index % VARIANTS picks one, so stubs whose
 #                  indices agree modulo VARIANTS write byte-identical trees
 #   TEST_VARIANTS  counterexample tests, likewise
+#   PROJECT        kernel (bench/sandbox's max) or bon (bon's own exec::eq)
 set -u
 . ./.bon/stub.env
 prompt=$(cat)
@@ -23,6 +24,33 @@ case "$prompt" in
   *) kind=other ;;
 esac
 sleep "$SLEEP"
+PROJECT=${PROJECT:-kernel}
+v=$((index % VARIANTS))
+if [ "$PROJECT" = bon ]; then
+  # bon's own source: trunk's exec::eq is wrong; .bon/fix/ holds it right,
+  # .bon/foil/ as trunk has it. Variant v > 0 is the fix with its own comment.
+  case "$kind" in
+    code)
+      cp .bon/fix/src/exec.rs src/exec.rs
+      if [ "$v" -gt 0 ]; then echo "// variant $v" >> src/exec.rs; fi
+      ;;
+    foil) cp .bon/foil/src/exec.rs src/exec.rs ;;
+    counterexample)
+      t=$((index % TEST_VARIANTS))
+      mkdir -p tests
+      {
+        echo "// A blind test of exec::eq (variant $t)."
+        echo "fn text(s: &str) -> Vec<char> { s.chars().collect() }"
+        echo "#[test]"
+        echo 'fn a_prefix_is_not_equal() { assert!(!best_of_n::exec::eq(&text("ab"), &text("abc"))); }'
+        if [ "$t" -ne 0 ]; then
+          echo "#[test]"
+          echo "fn equal() { assert!(best_of_n::exec::eq(&text(\"$t\"), &text(\"$t\"))); }"
+        fi
+      } > tests/counterexample.rs
+      ;;
+  esac
+else
 wrong='    if a > b { a } else { a }'
 case "$kind" in
   code)
@@ -34,7 +62,6 @@ case "$kind" in
     esac
     sed -i '' "s/^    if a > b { a } else { a }\$/$fix/" src/lib.rs
     # Past four, a variant is the same fix with its own comment: its own tree.
-    v=$((index % VARIANTS))
     if [ "$v" -ge 4 ]; then echo "// variant $v" >> src/lib.rs; fi
     ;;
   foil)
@@ -55,6 +82,7 @@ case "$kind" in
     } > tests/counterexample.rs
     ;;
 esac
+fi
 # The agent iterating: its own runs of the checks, timed (a check slot's wait
 # included), so a benchmark can say where a session's time went.
 now() { /usr/bin/perl -MTime::HiRes=time -e 'printf "%.2f", time'; }

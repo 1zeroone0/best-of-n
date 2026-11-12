@@ -14,6 +14,8 @@
 #   VARIANTS       distinct code edits; the rest are byte-identical [4]
 #   TEST_VARIANTS  distinct counterexample tests [2]
 #   TIME           each agent process's time limit, seconds [1800]
+#   PROJECT        kernel: the small crate in bench/sandbox; bon: bon's own
+#                  source at this commit, one function broken [kernel]
 # and bon's own pool knobs, passed through: BON_GENERATION, BON_CHECKS,
 # BON_CHECK_THREADS, BON_CORES, BON_MEMORY_GB.
 set -eu
@@ -27,6 +29,7 @@ K=${K:-1}
 VARIANTS=${VARIANTS:-4}
 TEST_VARIANTS=${TEST_VARIANTS:-2}
 TIME=${TIME:-1800}
+PROJECT=${PROJECT:-kernel}
 if [ -z "${BON:-}" ]; then
   (cd "$REPO" && cargo build -q --offline)
   BON=$REPO/target/debug/bon
@@ -37,12 +40,31 @@ SANDBOX=$BENCH/sandbox-$TAG
 rm -rf "$SANDBOX"
 mkdir -p "$SANDBOX"
 ORIGIN=$SANDBOX/origin.git
-WORK=$SANDBOX/kernel
 git init -q --bare -b main "$ORIGIN"
-cp -R "$REPO/bench/sandbox" "$WORK"
-mkdir -p "$WORK/.bon"
+case "$PROJECT" in
+  kernel)
+    WORK=$SANDBOX/kernel
+    cp -R "$REPO/bench/sandbox" "$WORK"
+    mkdir -p "$WORK/.bon"
+    PATHS='"src/spec.rs", "tests/trunk.rs", "examples/kernel.rs"'
+    ;;
+  bon)
+    # bon's source at HEAD, its own .bon/ replaced by the benchmark's. On its
+    # trunk exec::eq says a strict prefix equals the longer text: the tests
+    # miss it, Verus does not. The stub restores the file kept in .bon/fix/.
+    WORK=$SANDBOX/bon
+    mkdir -p "$WORK"
+    (cd "$REPO" && git archive HEAD) | tar -x -C "$WORK"
+    rm -rf "$WORK/.bon" && mkdir -p "$WORK/.bon/fix/src" "$WORK/.bon/foil/src"
+    cp "$WORK/src/exec.rs" "$WORK/.bon/fix/src/exec.rs"
+    perl -0pi -e 's/    a\.len\(\) == b\.len\(\) && is_prefix_of\(a, b\)\n/    a.len() <= b.len() && is_prefix_of(a, b)\n/ or die "exec::eq not found\n"' "$WORK/src/exec.rs"
+    cp "$WORK/src/exec.rs" "$WORK/.bon/foil/src/exec.rs"
+    PATHS='"src/spec.rs", "src/gates.rs", "examples/kernel.rs"'
+    ;;
+  *) echo "PROJECT is kernel or bon" >&2; exit 1 ;;
+esac
 cp "$REPO/bench/stub.sh" "$WORK/.bon/stub.sh"
-printf 'SLEEP=%s\nK=%s\nVARIANTS=%s\nTEST_VARIANTS=%s\n' "$SLEEP" "$K" "$VARIANTS" "$TEST_VARIANTS" > "$WORK/.bon/stub.env"
+printf 'PROJECT=%s\nSLEEP=%s\nK=%s\nVARIANTS=%s\nTEST_VARIANTS=%s\n' "$PROJECT" "$SLEEP" "$K" "$VARIANTS" "$TEST_VARIANTS" > "$WORK/.bon/stub.env"
 printf '/target\n/.bon/traces/\n' > "$WORK/.gitignore"
 printf 'id\tintent\n' > "$WORK/.bon/queue.tsv"
 cat > "$WORK/.bon/bon.toml" <<EOF
@@ -55,7 +77,7 @@ limit = 1.0
 time = $TIME
 
 [checks]
-paths = ["src/spec.rs", "tests/trunk.rs", "examples/kernel.rs"]
+paths = [$PATHS]
 test = ["cargo test -q"]
 verify = ["cargo verus verify"]
 agree = ["cargo run -q --example kernel"]
@@ -75,8 +97,8 @@ run = "cargo test -q --test counterexample"
 tests = ["tests/"]
 visible = ["Cargo.toml", "Cargo.lock"]
 EOF
-# The lockfile, offline, from whatever cargo home this shell has.
-(cd "$WORK" && cp "$REPO/Cargo.lock" . && cargo generate-lockfile --offline -q)
+# The kernel's lockfile, offline, from whatever cargo home this shell has (bon's is its own).
+if [ "$PROJECT" = kernel ]; then (cd "$WORK" && cp "$REPO/Cargo.lock" . && cargo generate-lockfile --offline -q); fi
 (cd "$WORK" && git init -q -b main && git add -A \
   && git -c user.name=bench -c user.email=bench@localhost commit -q -m "a kernel whose max Verus rejects" \
   && git remote add origin "$ORIGIN" && git push -q origin main)

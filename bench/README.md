@@ -45,6 +45,18 @@ kind:
 A code or foil stub then runs `cargo test` and `cargo verus verify` itself `K`
 times, as an agent iterating does.
 
+## bon itself
+
+`PROJECT=bon` makes the sandbox bon's own source at HEAD instead: its
+`.bon/` replaced by the benchmark's (the stub harness, the local bare origin,
+no `traces` key), and on its trunk `exec::eq` broken to say a strict prefix
+equals the longer text: bon's tests miss it, Verus does not. A code stub
+copies the right file back from `.bon/fix/` (variant v > 0 appends
+`// variant v`, so `VARIANTS` sets how many distinct trees); a foil copies
+trunk's wrong one from `.bon/foil/`; a counterexample tests
+`best_of_n::exec::eq` on a prefix. The checks are `cargo test -q`,
+`cargo verus verify` and the kernel example: a real check's cost and memory.
+
 ## Why a crate of its own
 
 bon's own `cargo verus verify` is ~190 CPU-s warm; at width 32 with the
@@ -63,6 +75,7 @@ small, so a warm check is seconds.
 | `VARIANTS` | 4 | distinct code edits |
 | `TEST_VARIANTS` | 2 | distinct counterexample tests |
 | `TIME` | 1800 | each agent process's time limit |
+| `PROJECT` | `kernel` | `kernel` (bench/sandbox) or `bon` (bon's own source) |
 | `BON` | `target/debug/bon` | the binary (built first when unset) |
 
 bon's pool knobs pass through the environment (see `src/trusted.rs`, `Pools`).
