@@ -145,11 +145,16 @@ pub struct Checks {
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Harness {
-    /// "claude" or "codex".
+    /// "claude", "codex", or "stub" (a program that costs nothing: see `command`).
     pub name: String,
     /// The canonical model id (e.g. claude-haiku-5-5, gpt-6.1-sol), never an alias:
-    /// it is passed to the harness and keys the price table.
+    /// it is passed to the harness and keys the price table. A stub's needs no price.
     pub model: String,
+    /// The program to run instead of the built-in one: an argv, run as agent in
+    /// the working directory, the prompt on its stdin. Its cost is parsed by
+    /// `name`; a stub's is zero.
+    #[serde(default)]
+    pub command: Option<Vec<String>>,
     /// Agent processes per attempt: attempt a runs n[a]; a shorter list repeats
     /// its last value. The longest list sets how many attempts a command makes.
     pub n: Vec<usize>,
@@ -618,8 +623,11 @@ fn build_directory(config: &Config, name: &str) -> Result<PathBuf, String> {
 /// process no longer running. Each holds files of two owners: engineer's check
 /// files (with an ACL denying agent) and agent's build output. So: engineer
 /// removes its ACLs, agent removes what it can, engineer removes the rest.
+/// With BON_CLEANUP=own in bon's environment, only this process's own (a host
+/// shared with other bon processes, as the benchmark's is).
 pub fn cleanup(path: &[String]) {
     let me = std::process::id().to_string();
+    let own = std::env::var("BON_CLEANUP").is_ok_and(|v| v == "own");
     // ps, not kill -0: kill -0 fails on another user's live process (EPERM),
     // which would read as dead.
     let running = |pid: &str| pid == me || process_running(pid);
@@ -627,7 +635,7 @@ pub fn cleanup(path: &[String]) {
         let name = e.file_name().to_string_lossy().to_string();
         // <pid>.<owner>; <pid>-<name> from before the working directories were 0711.
         let Some(pid) = name.split(['.', '-']).next() else { continue };
-        if !pid.chars().all(|c| c.is_ascii_digit()) || (pid != me && running(pid)) { continue; }
+        if !pid.chars().all(|c| c.is_ascii_digit()) || (pid != me && (own || running(pid))) { continue; }
         let p = e.path();
         let _ = Command::new("chmod").args(["-R", "-N"]).arg(&p).stderr(Stdio::null()).status();
         let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&p).stderr(Stdio::null()).status();
@@ -655,7 +663,12 @@ fn run_check(config: &Config, dir: &std::path::Path, target: &std::path::Path, c
 
 // ── harnesses ───────────────────────────────────────────
 
+/// A harness that runs no model: its cost is zero, it needs no price and no login.
+fn is_stub(h: &Harness) -> bool { h.name == STUB }
+const STUB: &str = "stub";
+
 fn harness_argv(h: &Harness, config: &Config, dir: &std::path::Path) -> Vec<String> {
+    if let Some(c) = &h.command { return c.clone(); }
     match h.name.as_str() {
         "claude" => vec![
             "claude", "-p", "--output-format", "stream-json", "--verbose",
@@ -681,6 +694,7 @@ fn generation(h: &Harness, config: &Config, stdout: &str) -> Result<(u64, Option
     let rate = |p: &Price, input: f64, cached: f64, output: f64, write: f64, write_long: f64| {
         (input * p.input + cached * p.cached_input + output * p.output + write * p.cache_write + write_long * p.cache_write_long) / 1_000_000.0
     };
+    if is_stub(h) { return Ok((0, Some(0), HashMap::new())); }
     let mut events = stdout.lines().rev().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok());
     if h.name == "claude" {
         let Some(r) = events.find(|v| v["type"] == "result") else { return Err("no result event".into()) };
@@ -793,7 +807,7 @@ pub fn manifest(root: &str, commit: &Commit) -> (r: Result<Manifest, String>) {
     cargo_config_guard(&root)?;
     config.jobs = host.jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1)));
     for h in config.harness.iter().chain(config.counterexample.harness.iter()) {
-        if !config.prices.contains_key(&h.model) {
+        if !is_stub(h) && !config.prices.contains_key(&h.model) {
             return Err(format!("{HOST}: no price for {}; bon.toml must name canonical model ids", h.model));
         }
     }
@@ -895,7 +909,8 @@ fn logged_in(harness: &str, ok: bool, out: &str) -> bool {
 /// the way bon runs it. If one is not, the command that fixes it. (queue 32)
 #[verifier::external_body]
 pub fn harnesses_logged_in(m: &Manifest) -> (r: Result<(), String>) {
-    let mut names: Vec<&str> = m.config.harness.iter().chain(m.config.counterexample.harness.iter()).map(|h| h.name.as_str()).collect();
+    let mut names: Vec<&str> = m.config.harness.iter().chain(m.config.counterexample.harness.iter())
+        .filter(|h| !is_stub(h)).map(|h| h.name.as_str()).collect();
     names.sort(); names.dedup();
     for name in names {
         let argv: Vec<String> = match name { "claude" => vec!["claude".into(), "auth".into(), "status".into()], _ => vec!["codex".into(), "login".into(), "status".into()] };
@@ -2311,6 +2326,20 @@ mod tests {
         assert!(!logged_in("claude", true, "{\n  \"loggedIn\": false\n}"));
         assert!(logged_in("codex", true, "Logged in using ChatGPT"));
         assert!(!logged_in("codex", false, "Not logged in"));
+    }
+
+    #[test]
+    fn a_stub_harness_runs_its_command_and_costs_nothing() {
+        let mut c = config();
+        c.harness[0] = toml::from_str(r#"name = "stub"
+            model = "stub"
+            command = ["/bin/sh", ".bon/stub.sh"]
+            n = [3]"#).unwrap();
+        let h = c.harness[0].clone();
+        assert_eq!(harness_argv(&h, &c, std::path::Path::new("/tmp")), ["/bin/sh", ".bon/stub.sh"]);
+        assert_eq!(generation(&h, &c, "anything at all").unwrap(), (0, Some(0), HashMap::new()));
+        // A built-in harness still needs its token counts.
+        assert!(generation(&c.counterexample.harness[0], &c, "anything at all").is_err());
     }
 
     #[test]
