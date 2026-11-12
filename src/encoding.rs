@@ -422,7 +422,17 @@ impl Wire for Kind {
     } }
 }
 
-type CandidateWire = (((Commit, (Commit, bool)), ((bool, Vec<Path>), (Vec<Hash>, Vec<(u64,Intent)>))), ((Vec<(i64,bool)>, (Vec<(i64,bool)>, bool)), ((bool, Vec<Path>), (i64, u64))));
+/// Fourteen fields' words, nested as CandidateWire nests them, are the same words in order.
+proof fn candidate_wire_flat(a1: Seq<u64>, a2: Seq<u64>, a3: Seq<u64>, a4: Seq<u64>, a5: Seq<u64>, a6: Seq<u64>, a7: Seq<u64>,
+    a8: Seq<u64>, a9: Seq<u64>, a10: Seq<u64>, a11: Seq<u64>, a12: Seq<u64>, a13: Seq<u64>, a14: Seq<u64>)
+    ensures ((a1 + (a2 + a3)) + ((a4 + a5) + (a6 + a7))) + ((a8 + (a9 + a10)) + ((a11 + a12) + (a13 + a14)))
+        == a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13 + a14,
+{
+    assert(((a1 + (a2 + a3)) + ((a4 + a5) + (a6 + a7))) + ((a8 + (a9 + a10)) + ((a11 + a12) + (a13 + a14)))
+        =~= a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13 + a14);
+}
+
+type CandidateWire =(((Commit, (Commit, bool)), ((bool, Vec<Path>), (Vec<Hash>, Vec<(u64,Intent)>))), ((Vec<(i64,bool)>, (Vec<(i64,bool)>, bool)), ((bool, Vec<Path>), (i64, u64))));
 impl Wire for Candidate {
     type Model = <CandidateWire as Wire>::Model;
     spec fn model(&self) -> Self::Model { (((self.commit.model(), (self.base.model(), self.accepted.model())), ((self.proved.model(), self.changed.model()), (self.out.model(), self.intents.model()))), ((self.accepts.model(), (self.accepts_foils.model(), self.rejects_counterexamples.model())), ((self.measured.model(), self.added.model()), (self.rank.model(), self.diff.model())))) }
@@ -431,8 +441,19 @@ impl Wire for Candidate {
     spec fn words(m: Self::Model) -> Seq<u64> { CandidateWire::words(m) }
     spec fn parse(w: Seq<u64>) -> Option<(Self::Model, Seq<u64>)> { CandidateWire::parse(w) }
     proof fn roundtrip(m: Self::Model, tail: Seq<u64>) { CandidateWire::roundtrip(m, tail); }
-    #[verifier::rlimit(300)]
-    fn write(&self) -> (r: Vec<u64>) { let mut r = self.commit.write(); append(&mut r, &self.base.write()); append(&mut r, &self.accepted.write()); append(&mut r, &self.proved.write()); append(&mut r, &self.changed.write()); append(&mut r, &self.out.write()); append(&mut r, &self.intents.write()); append(&mut r, &self.accepts.write()); append(&mut r, &self.accepts_foils.write()); append(&mut r, &self.rejects_counterexamples.write()); append(&mut r, &self.measured.write()); append(&mut r, &self.added.write()); append(&mut r, &self.rank.write()); append(&mut r, &self.diff.write()); r }
+    fn write(&self) -> (r: Vec<u64>) {
+        let mut r = self.commit.write(); append(&mut r, &self.base.write()); append(&mut r, &self.accepted.write()); append(&mut r, &self.proved.write()); append(&mut r, &self.changed.write()); append(&mut r, &self.out.write()); append(&mut r, &self.intents.write()); append(&mut r, &self.accepts.write()); append(&mut r, &self.accepts_foils.write()); append(&mut r, &self.rejects_counterexamples.write()); append(&mut r, &self.measured.write()); append(&mut r, &self.added.write()); append(&mut r, &self.rank.write()); append(&mut r, &self.diff.write());
+        proof {
+            candidate_wire_flat(<Commit as Wire>::words(self.commit.model()), <Commit as Wire>::words(self.base.model()),
+                <bool as Wire>::words(self.accepted.model()), <bool as Wire>::words(self.proved.model()),
+                <Vec<Path> as Wire>::words(self.changed.model()), <Vec<Hash> as Wire>::words(self.out.model()),
+                <Vec<(u64,Intent)> as Wire>::words(self.intents.model()), <Vec<(i64,bool)> as Wire>::words(self.accepts.model()),
+                <Vec<(i64,bool)> as Wire>::words(self.accepts_foils.model()), <bool as Wire>::words(self.rejects_counterexamples.model()),
+                <bool as Wire>::words(self.measured.model()), <Vec<Path> as Wire>::words(self.added.model()),
+                <i64 as Wire>::words(self.rank.model()), <u64 as Wire>::words(self.diff.model()));
+        }
+        r
+    }
     #[verifier::rlimit(300)]
     fn read(w: &Vec<u64>) -> (r: Option<(Self, Vec<u64>)>) { match CandidateWire::read(w) { Some(((((commit, (base, accepted)), ((proved, changed), (out, intents))), ((accepts, (accepts_foils, rejects_counterexamples)), ((measured, added), (rank, diff)))), tail)) => Some((Self { commit, base, accepted, proved, changed, out, intents, accepts, accepts_foils, rejects_counterexamples, measured, added, rank, diff }, tail)), None => None } }
 }
@@ -551,13 +572,29 @@ proof fn result_correct(r: Option<Candidate>)
 {
     if let Some(c) = r { candidate_correct(c); }
 }
-#[verifier::rlimit(150)]
+/// A search's words as SearchWire nests its fields are encoded's pieces in order.
+proof fn search_layout(kind: Seq<u64>, base: Seq<u64>, n: u64, checks: Seq<u64>, tests: Seq<u64>, trusted: Seq<u64>, limit: u64,
+    results_len: u64, results: Seq<u64>)
+    ensures kind + (base + (seq![n] + (checks + (tests + (trusted + (seq![limit] + (seq![results_len] + results)))))))
+        == kind + base + seq![n] + checks + tests + trusted + seq![limit] + seq![results_len] + results,
+{
+    assert(kind + (base + (seq![n] + (checks + (tests + (trusted + (seq![limit] + (seq![results_len] + results)))))))
+        =~= kind + base + seq![n] + checks + tests + trusted + seq![limit] + seq![results_len] + results);
+}
+proof fn results_words(rs: Vec<Option<Candidate>>)
+    ensures <Vec<Option<Candidate>> as Wire>::words(rs.model())
+        == seq![rs.len() as u64] + rs@.map_values(|result: Option<Candidate>| result_words(result)).flatten(),
+{
+    assert forall|i: int| 0 <= i < rs.len() implies <Option<Candidate> as Wire>::words(rs@[i].model()) == result_words(rs@[i]) by { result_correct(rs@[i]); }
+    many_matches::<Option<Candidate>>(rs@, |r: Option<Candidate>| result_words(r));
+}
 proof fn search_correct(s: Search)
     ensures Search::words(s.model()) == encoded(s),
 {
     kind_correct(s.kind); text_words(s.base.0); texts_words(s.checks); texts_words(s.tests); texts_words(s.trusted);
-    assert forall|i: int| 0 <= i < s.results.len() implies <Option<Candidate> as Wire>::words(s.results@[i].model()) == result_words(s.results@[i]) by { result_correct(s.results@[i]); }
-    many_matches::<Option<Candidate>>(s.results@, |r: Option<Candidate>| result_words(r));
+    results_words(s.results);
+    search_layout(kind_words(s.kind), text(s.base.0@), s.n as u64, texts(s.checks@), texts(s.tests@), texts(s.trusted@), s.limit,
+        s.results.len() as u64, s.results@.map_values(|result: Option<Candidate>| result_words(result)).flatten());
 }
 fn equal_words(a: &Vec<u64>, b: &Vec<u64>) -> (r: bool)
     ensures r == (a@ == b@),
