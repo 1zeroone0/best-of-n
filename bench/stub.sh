@@ -55,7 +55,10 @@ case "$kind" in
     } > tests/counterexample.rs
     ;;
 esac
-# The agent iterating: its own runs of the checks.
+# The agent iterating: its own runs of the checks, timed (a check slot's wait
+# included), so a benchmark can say where a session's time went.
+now() { /usr/bin/perl -MTime::HiRes=time -e 'printf "%.2f", time'; }
+t0=$(now)
 if [ "$kind" = code ] || [ "$kind" = foil ]; then
   i=0
   while [ "$i" -lt "$K" ]; do
@@ -64,4 +67,6 @@ if [ "$kind" = code ] || [ "$kind" = foil ]; then
     i=$((i + 1))
   done
 fi
+t1=$(now)
 echo "stub $kind $index: changed what the prompt asked"
+/usr/bin/perl -e 'printf "stub-seconds: sleep %s own-checks %.2f\n", @ARGV' "$SLEEP" "$(/usr/bin/perl -e 'print $ARGV[1] - $ARGV[0]' "$t0" "$t1")"
