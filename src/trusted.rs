@@ -2451,6 +2451,8 @@ mod tests {
         c.agent_process.time = 2;
         let tree = format!("test-tree-{}-{:?}", std::process::id(), Instant::now());
         let on = On { tree: tree.clone(), test: None, read: true };
+        // Run as agent (bon's judge runs bon's own tests so), bon keeps no cache at all.
+        if is_agent() { assert_eq!(verdict_key(&c, &on, "echo hi"), None); return; }
         let key = verdict_key(&c, &on, "echo hi").unwrap();
         // Each part of the key changes it; no tree, no key.
         assert_ne!(Some(key.clone()), verdict_key(&c, &on, "echo ho"));
