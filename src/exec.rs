@@ -782,6 +782,26 @@ fn two_verified(s: &Search) -> (r: bool)
     false
 }
 
+/// Whether a complete search diverges: code or compaction, two verified, and
+/// they do not agree.
+// The selection, i, is read only by the proof, which cargo erases.
+#[allow(unused_variables)]
+fn diverges(s: &Search) -> (r: bool)
+    requires s.results.len() == s.n,
+    ensures r == spec::diverges(s@),
+{
+    hide(first_by_key);
+    hide(spec::verified);
+    proof { complete(s); }
+    if !matches!(&s.kind, Kind::Code { .. } | Kind::Compaction { .. }) { return false; }
+    if !two_verified(s) { return false; }
+    proof { spec::diverges_unless_agree(s@); }
+    match selected(s) {
+        Some(i) => { assert(spec::agree(s@)) by { assert(spec::selected(s@, i as int)); } false }
+        None => true,
+    }
+}
+
 /// The kernel's reason for a completed block.
 pub fn blocked(t: &Search, counterexample: Option<&Search>, f: Option<&Search>) -> (r: Option<spec::Blocked>)
     requires t.results.len() == t.n,
@@ -805,7 +825,6 @@ pub fn blocked(t: &Search, counterexample: Option<&Search>, f: Option<&Search>) 
     match counterexample {
         None => {
             if !two_verified(t) { return Some(spec::Blocked::TooFewVerified); }
-            if selected(t).is_none() { return Some(spec::Blocked::Disagree); }
             None
         }
         Some(x) => {
@@ -838,7 +857,7 @@ pub fn blocked(t: &Search, counterexample: Option<&Search>, f: Option<&Search>) 
                     proof { complete(f); }
                     if !not_found(x, t, f) { Some(spec::Blocked::Undiscriminating) } else { None }
                 }
-                None => None,
+                None => if diverges(t) { Some(spec::Blocked::Disagree) } else { None },
             }
         }
     }
