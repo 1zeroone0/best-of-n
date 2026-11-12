@@ -20,7 +20,7 @@ export interface Candidate { commit: Commit; base: Commit; accepted: boolean; pr
 /** One search, once every agent process has returned: `results[i]` is what agent process i returned. */
 export interface Search { kind: Kind; base: Commit; n: number; checks: Array<Path>; tests: Array<Path>; trusted: Array<Path>; limit: number; results: Array<Candidate | null> }
 /** Everything bon shows, over the time range in `filter`. */
-export interface Projection { configured: boolean; repo: Repo; totals: Totals; processes: Array<BonProcess>; groups: Array<GoalTrace>; queue: Array<QueueLine> | null; proposals: Array<Proposal>; protected: Array<string>; filter: Filter; bounds: Bounds; spec: SpecOutline | null; system: SpecGraph | null; sbom: SbomFile | null }
+export interface Projection { configured: boolean; repo: Repo; totals: Totals; processes: Array<BonProcess>; groups: Array<GoalTrace>; queue: Array<QueueLine> | null; proposals: Array<Proposal>; retired: Array<Retired>; protected: Array<string>; filter: Filter; bounds: Bounds; spec: SpecOutline | null; system: SpecGraph | null; sbom: SbomFile | null }
 /** The repository and its trunk. */
 export interface Repo { name: string | null; head: string | null; trunk: string | null; remote: string | null; remote_head: string | null; remote_time: number | null; subject: string | null; last_push: LastPush | null; since_push: SincePush | null; pushed: boolean | null; now: number }
 export interface LastPush { commit: string | null; time: number | null }
@@ -53,6 +53,8 @@ export interface Facts { index: number; harness: string | null; model: string | 
 /** A queue proposal: a patch adding intents, each with the cue it came from. */
 export interface Proposal { name: string; path: string; source: string; intents: Array<ProposedIntent>; contested: Array<string> }
 export interface ProposedIntent { id: number | null; intent: string; cue: string | null }
+/** An intent taken off the queue: by the commit on trunk's history whose diff removed its line, with that commit's subject and time. */
+export interface Retired { id: number; intent: string; commit: string; subject: string; time: number | null }
 /** One line of the queue. */
 export interface QueueLine { id: number; intent: string }
 /** The time range bon was asked for. */

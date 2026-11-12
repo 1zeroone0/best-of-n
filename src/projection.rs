@@ -20,6 +20,8 @@ pub struct Projection {
     pub queue: Option<Vec<QueueLine>>,
     /// Queue proposals waiting for engineer: patches bon queue wrote.
     pub proposals: Vec<Proposal>,
+    /// Intents no longer on the queue, and the commit that took each off, newest first.
+    pub retired: Vec<Retired>,
     /// What no search may change: bon's directory, the checks, trusted code.
     pub protected: Vec<String>,
     pub filter: Filter,
@@ -317,6 +319,18 @@ pub struct ProposedIntent {
     pub id: Option<u64>,
     pub intent: String,
     pub cue: Option<String>,
+}
+
+/// An intent taken off the queue: by the commit on trunk's history whose diff
+/// removed its line, with that commit's subject and time.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Retired {
+    pub id: u64,
+    pub intent: String,
+    pub commit: String,
+    pub subject: String,
+    pub time: Option<i64>,
 }
 
 /// One line of the queue.

@@ -102,6 +102,8 @@ class Projection(TypedDict):
     queue: list[QueueLine] | None
     # Queue proposals waiting for engineer: patches bon queue wrote.
     proposals: list[Proposal]
+    # Intents no longer on the queue, and the commit that took each off, newest first.
+    retired: list[Retired]
     # What no search may change: bon's directory, the checks, trusted code.
     protected: list[str]
     filter: Filter
@@ -345,6 +347,15 @@ class ProposedIntent(TypedDict):
     id: int | None
     intent: str
     cue: str | None
+
+# An intent taken off the queue: by the commit on trunk's history whose diff
+# removed its line, with that commit's subject and time.
+class Retired(TypedDict):
+    id: int
+    intent: str
+    commit: str
+    subject: str
+    time: int | None
 
 # One line of the queue.
 class QueueLine(TypedDict):

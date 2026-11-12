@@ -140,7 +140,7 @@ const TABS: [Tab; 4] = [Tab::Project, Tab::Spec, Tab::Queue, Tab::Traces];
 
 /// What a focusable row stands for, so its detail is found by key, not by position.
 #[derive(Clone, PartialEq)]
-enum Key { Goal(usize), Queue(usize), Proposal(usize), Item(usize), Grid, Trusted(usize), Sbom(&'static str) }
+enum Key { Goal(usize), Queue(usize), Retired(usize), Proposal(usize), Item(usize), Grid, Trusted(usize), Sbom(&'static str) }
 
 /// One row of a list: what it shows, and the item it stands for, if it can be focused.
 struct Row { line: Line<'static>, key: Option<Key> }
@@ -458,12 +458,21 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
                     out.push(Row { line: spread(vec![Span::styled("  ● ", pal.tone(Tone::Yellow)), Span::styled(fit(&pr.source, room), pal.ink())], counts, w), key: Some(Key::Proposal(pi)) });
                 }
                 out.push(blank());
-                out.push(header("Queued", Some(p.queue.as_ref().map_or(0, |q| q.len()))));
             }
+            if !p.proposals.is_empty() || !p.retired.is_empty() { out.push(header("Queued", Some(p.queue.as_ref().map_or(0, |q| q.len())))); }
             for (qi, q) in p.queue.iter().flatten().enumerate() {
                 out.push(Row { line: Line::from(vec![Span::styled(format!(" {}", fit(&format!("#{}", q.id), 6)), pal.muted()), Span::styled(fit(&q.intent, w.saturating_sub(7)), pal.ink())]), key: Some(Key::Queue(qi)) });
             }
             if p.queue.as_ref().is_none_or(|q| q.is_empty()) { out.push(Row::text(Line::from(Span::styled(" Nothing queued", pal.muted())))); }
+            // Intents taken off the queue, newest first, each with the commit that took it off.
+            if !p.retired.is_empty() {
+                out.push(blank());
+                out.push(header("Retired", Some(p.retired.len())));
+                for (ri, r) in p.retired.iter().enumerate() {
+                    out.push(Row { line: Line::from(vec![Span::styled(format!(" {}", fit(&format!("#{}", r.id), 6)), pal.muted()), Span::styled(fit(&short(&r.commit), 9), pal.faint()),
+                        Span::styled(fit(&r.intent, w.saturating_sub(16)), pal.muted())]), key: Some(Key::Retired(ri)) });
+                }
+            }
         }
         Tab::Spec => {
             let Some(spec) = &p.spec else { out.push(Row::text(Line::from(Span::styled(" No spec found", pal.muted())))); return out };
@@ -882,6 +891,15 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
                     t.push(title(format!("#{}", q.id)));
                     t.push(blank());
                     t.extend(hanging(&q.intent, 0, wd, pal.ink()));
+                }
+                Some(Key::Retired(ri)) => {
+                    let Some(r) = app.p.retired.get(ri) else { return (Text::default(), marks) };
+                    t.push(spread(vec![Span::styled(format!("#{}", r.id), pal.strong())], vec![Span::styled("Retired", pal.muted())], wd));
+                    t.push(blank());
+                    t.extend(hanging(&r.intent, 0, wd, pal.ink()));
+                    t.push(blank());
+                    t.push(kv("Taken off by", vec![Span::styled(short(&r.commit), pal.ink()), Span::styled(r.time.map_or(String::new(), |x| format!("   {}", ago(app.p.repo.now, x))), pal.muted())]));
+                    t.extend(kv_wrap(&pal, wd, "Subject", &r.subject, pal.ink()));
                 }
                 Some(Key::Proposal(pi)) => {
                     let Some(pr) = app.p.proposals.get(pi) else { return (Text::default(), marks) };

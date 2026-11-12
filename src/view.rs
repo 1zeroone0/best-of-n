@@ -37,6 +37,33 @@ fn proposals(root: &Path) -> Vec<Value> {
     out
 }
 
+/// Each intent no longer on the queue, with the commit on trunk's history that
+/// took it off (its latest removal; a removal that adds the same id back is a
+/// rewording, not a retirement), newest first, from `git log -p` of the queue.
+fn retired(root: &Path, queued: &[u64]) -> Vec<Value> {
+    retired_in(&git(root, &["log", "HEAD", "-p", "--format=%x00%H %ct %s", "--", ".bon/queue.tsv"]), queued)
+}
+
+fn retired_in(log: &str, queued: &[u64]) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    for commit in log.split('\0').filter(|c| !c.trim().is_empty()) {
+        let mut lines = commit.lines();
+        let head = lines.next().unwrap_or("");
+        let mut words = head.splitn(3, ' ');
+        let (hash, time, subject) = (words.next().unwrap_or(""), words.next().and_then(|t| t.parse::<u64>().ok()), words.next().unwrap_or(""));
+        let body: Vec<&str> = lines.collect();
+        let line_id = |l: &str| l.split_once('\t').and_then(|(id, _)| id.trim().parse::<u64>().ok());
+        let added: Vec<u64> = body.iter().filter(|l| l.starts_with('+') && !l.starts_with("+++")).filter_map(|l| line_id(&l[1..])).collect();
+        for l in body.iter().filter(|l| l.starts_with('-') && !l.starts_with("---")) {
+            let Some(id) = line_id(&l[1..]) else { continue };
+            if added.contains(&id) || queued.contains(&id) || out.iter().any(|r| r["id"] == id) { continue; }
+            let intent = l[1..].split_once('\t').map_or("", |(_, i)| i.trim());
+            out.push(json!({ "id": id, "intent": intent, "commit": hash, "subject": subject, "time": time }));
+        }
+    }
+    out
+}
+
 fn jsonl(path: &Path) -> Vec<Value> {
     std::fs::read_to_string(path).unwrap_or_default().lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
 }
@@ -582,6 +609,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
         // The range shown, and the range there is, so a view can offer it.
         "filter": { "since": filter.since, "until": filter.until, "find": filter.find },
         "bounds": { "earliest": (earliest != u64::MAX).then_some(earliest), "latest": (latest > 0).then_some(latest) },
+        "retired": retired(root, &queue.iter().flatten().filter_map(|q| q["id"].as_u64()).collect::<Vec<_>>()),
         "queue": queue,
         "proposals": proposals(root),
         // What no search may change: bon's directory, the checks, trusted code.
@@ -1321,6 +1349,17 @@ mod tests {
         assert_eq!(by_sentence(tests, &json!({}), Some(&json!({ "recorded_verified": 2 }))), Some("none_splits"));
         assert_eq!(by_sentence("a verified test rejects every candidate", &json!({}), None), Some("rejects_every"));
         assert_eq!(by_sentence("something else", &json!({}), None), None);
+    }
+
+    #[test]
+    fn a_retired_intent_is_the_latest_commit_that_took_it_off() {
+        let log = "\0bbb 20 queue: 28 reworded; 36 is in the spec\n\ndiff\n--- a/.bon/queue.tsv\n+++ b/.bon/queue.tsv\n-28\tolder words\n+28\tnewer words\n-36\tbon works on git's objects\n\
+                   \0aaa 10 queue: 36, 37\n\ndiff\n--- a/.bon/queue.tsv\n+++ b/.bon/queue.tsv\n-36\tbon works on git's objects\n-37\tchecks run with root's toolchain\n";
+        let r = retired_in(log, &[28]);
+        // 28 was reworded and is queued; 36's latest removal is bbb; 37 left in aaa.
+        assert_eq!(r.len(), 2);
+        assert_eq!((r[0]["id"].as_u64(), r[0]["commit"].as_str(), r[0]["subject"].as_str()), (Some(36), Some("bbb"), Some("queue: 28 reworded; 36 is in the spec")));
+        assert_eq!((r[1]["id"].as_u64(), r[1]["intent"].as_str(), r[1]["time"].as_u64()), (Some(37), Some("checks run with root's toolchain"), Some(10)));
     }
 
     /// A bon process of `kind` that ended `outcome`, its attempts each ended as given.

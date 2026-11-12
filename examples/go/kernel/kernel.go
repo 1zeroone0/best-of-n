@@ -117,6 +117,8 @@ type Projection struct {
 	Queue *[]QueueLine `json:"queue"`
 	// Queue proposals waiting for engineer: patches bon queue wrote.
 	Proposals []Proposal `json:"proposals"`
+	// Intents no longer on the queue, and the commit that took each off, newest first.
+	Retired []Retired `json:"retired"`
 	// What no search may change: bon's directory, the checks, trusted code.
 	Protected []string     `json:"protected"`
 	Filter    Filter       `json:"filter"`
@@ -380,6 +382,16 @@ type ProposedIntent struct {
 	Id     *uint64 `json:"id"`
 	Intent string  `json:"intent"`
 	Cue    *string `json:"cue"`
+}
+
+// An intent taken off the queue: by the commit on trunk's history whose diff
+// removed its line, with that commit's subject and time.
+type Retired struct {
+	Id      uint64 `json:"id"`
+	Intent  string `json:"intent"`
+	Commit  string `json:"commit"`
+	Subject string `json:"subject"`
+	Time    *int64 `json:"time"`
 }
 
 // One line of the queue.
