@@ -37,7 +37,7 @@ visible = ["Cargo.toml", "Cargo.lock"]
 [sbom]
 name = "best-of-n"
 trusted = ["src/trusted.rs", "src/main.rs", "src/view.rs", "src/types.rs", "src/projection.rs", "src/tui.rs"]
-tools = { rustc = "rustc --version", verus = "verus --version", git = "git --version", sudo = "printf 'macOS '; sw_vers -buildVersion", tar = "tar --version", claude = "claude --version", codex = "codex --version" }
+tools = { rustc = "rustc --version", verus = "verus --version", git = "git --version", sudo = "printf 'macOS '; sw_vers -buildVersion", tar = "tar --version", perl = "perl -e 'print $^V'", claude = "claude --version", codex = "codex --version" }
 
 [programs]
 # The types programs are built on: bon types emits them from these files, and checks them.

@@ -703,9 +703,16 @@ fn setup(dry_run: bool, user: Option<String>) -> Result<(), String> {
 const HOST_TEMPLATE: &str = r#"# bon's host file: facts about this host, not about any repository.
 # Owned by root; edit with sudo. Every trace records the prices it was costed at.
 
-# How many agent processes run at once (default: half the cores). Width per
-# search stays what each repository's bon.toml says.
-jobs = 7
+# Two pools, each shared by every bon process on this host; width per search
+# stays what each repository's bon.toml says. generation: model sessions at
+# once (default 64; a session waits on the model). checks: CPU-heavy commands
+# at once, the judge's checks and every cargo an agent process runs (default
+# cores / check_threads, never more than free memory / 1.5 GB). check_threads:
+# threads one check may use (default 2). BON_GENERATION, BON_CHECKS and
+# BON_CHECK_THREADS in bon's environment override them.
+# generation = 64
+# checks = 7
+# check_threads = 2
 
 # PATH for agent processes and checks. Nothing else is inherited. Checks drop
 # every entry under agent's home: they run only what no agent process can write.
