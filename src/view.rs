@@ -37,6 +37,33 @@ fn proposals(root: &Path) -> Vec<Value> {
     out
 }
 
+/// Each intent no longer on the queue, with the commit on trunk's history that
+/// took it off (its latest removal; a removal that adds the same id back is a
+/// rewording, not a retirement), newest first, from `git log -p` of the queue.
+fn retired(root: &Path, queued: &[u64]) -> Vec<Value> {
+    retired_in(&git(root, &["log", "HEAD", "-p", "--format=%x00%H %ct %s", "--", ".bon/queue.tsv"]), queued)
+}
+
+fn retired_in(log: &str, queued: &[u64]) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    for commit in log.split('\0').filter(|c| !c.trim().is_empty()) {
+        let mut lines = commit.lines();
+        let head = lines.next().unwrap_or("");
+        let mut words = head.splitn(3, ' ');
+        let (hash, time, subject) = (words.next().unwrap_or(""), words.next().and_then(|t| t.parse::<u64>().ok()), words.next().unwrap_or(""));
+        let body: Vec<&str> = lines.collect();
+        let line_id = |l: &str| l.split_once('\t').and_then(|(id, _)| id.trim().parse::<u64>().ok());
+        let added: Vec<u64> = body.iter().filter(|l| l.starts_with('+') && !l.starts_with("+++")).filter_map(|l| line_id(&l[1..])).collect();
+        for l in body.iter().filter(|l| l.starts_with('-') && !l.starts_with("---")) {
+            let Some(id) = line_id(&l[1..]) else { continue };
+            if added.contains(&id) || queued.contains(&id) || out.iter().any(|r| r["id"] == id) { continue; }
+            let intent = l[1..].split_once('\t').map_or("", |(_, i)| i.trim());
+            out.push(json!({ "id": id, "intent": intent, "commit": hash, "subject": subject, "time": time }));
+        }
+    }
+    out
+}
+
 fn jsonl(path: &Path) -> Vec<Value> {
     std::fs::read_to_string(path).unwrap_or_default().lines().filter_map(|l| serde_json::from_str(l).ok()).collect()
 }
@@ -95,6 +122,116 @@ fn run_order(name: &str) -> (usize, u64, String) {
         _ => (name, 0),
     };
     (ORDER.iter().position(|o| *o == stem).unwrap_or(ORDER.len()), n, name.to_string())
+}
+
+/// A log's seconds, from its head: each check's and harness's log starts
+/// `exit: X` then `seconds: Y`. None for a log without them (argv, prompt).
+fn log_seconds(p: &Path) -> Option<f64> {
+    use std::io::BufRead;
+    let f = std::fs::File::open(p).ok()?;
+    std::io::BufReader::new(f).lines().take(2).map_while(Result::ok)
+        .find_map(|l| l.strip_prefix("seconds: ").and_then(|s| s.trim().parse().ok()))
+}
+
+/// The seconds of the check logs among `logs` in `dir`: every log with a
+/// `seconds:` head but the harness's. None when none has one.
+fn check_seconds<'a>(dir: &Path, logs: impl Iterator<Item = &'a str>) -> Option<f64> {
+    let s: Vec<f64> = logs.filter(|l| *l != "harness").filter_map(|l| log_seconds(&dir.join(l))).collect();
+    (!s.is_empty()).then(|| s.iter().sum())
+}
+
+/// Each reason's word and the sentence trusted code records it with
+/// (`record_blocked`), so a trace from before reasons were words can be read
+/// by its sentence.
+const REASONS: [(&str, &str); 7] = [
+    ("too_few_verified", "fewer than two verified candidates"),
+    ("disagree", "the verified candidates disagree"),
+    ("too_few_tests", "fewer than two verified tests, and none splits the candidates"),
+    ("rejects_every", "a verified test rejects every candidate"),
+    ("undiscriminating", "fewer than two verified tests judge every candidate and reject a foil"),
+    ("trunk_moved", "trunk moved during the search; run it again"),
+    ("refused", "git refused what the gates allowed"),
+];
+
+/// A reason's word, as trusted code records it.
+fn blocked_word(b: best_of_n::spec::Blocked) -> &'static str {
+    use best_of_n::spec::Blocked::*;
+    match b {
+        TooFewVerified => "too_few_verified", Disagree => "disagree", TooFewTests => "too_few_tests",
+        RejectsEvery => "rejects_every", Undiscriminating => "undiscriminating", TrunkMoved => "trunk_moved", Refused => "refused",
+    }
+}
+
+/// How one attempt ended: pushed, landed (a counterexample's test landed on
+/// trunk and the process went on), blocked, exited (its bon process stopped
+/// during it, with no transition), or running. A block's reason is the word
+/// the trace recorded; for a trace from before reasons were words, the one
+/// the kernel derives from its searches' words, else the one its sentence
+/// names; else none (unrecorded).
+#[derive(Debug, PartialEq)]
+struct End { end: &'static str, reason: Option<String>, from: Option<&'static str> }
+
+/// How each attempt of a bon process ended, by the position of its code or
+/// compaction search in `searches`. An attempt is that search and the foil and
+/// counterexample searches after it, up to the next attempt. `lines` are each
+/// search's transitions, by position; `derive` is the kernel's reason for the
+/// tested search, counterexample and foil searches at those positions, where
+/// every one reported and its words decode.
+fn attempt_ends(searches: &[Value], lines: &[Vec<String>], running: bool,
+                derive: &dyn std::ops::Fn(usize, Option<usize>, Option<usize>) -> Option<&'static str>) -> Vec<(usize, End)> {
+    let mains: Vec<usize> = (0..searches.len()).filter(|&i| matches!(searches[i]["kind"].as_str(), Some("code" | "compaction"))).collect();
+    let mut out = Vec::new();
+    for (k, &m) in mains.iter().enumerate() {
+        let to = mains.get(k + 1).copied().unwrap_or(searches.len());
+        let last = k + 1 == mains.len();
+        let ls: Vec<&String> = (m..to).flat_map(|i| lines.get(i).into_iter().flatten()).collect();
+        let of = |kind: &str| (m + 1..to).find(|&i| searches[i]["kind"] == kind);
+        let derived = || derive(m, of("counterexample"), of("foil"));
+        let end = if ls.iter().any(|t| t.starts_with("push")) { End { end: "pushed", reason: None, from: None } }
+        else if ls.iter().any(|t| t.starts_with("land ")) { End { end: "landed", reason: None, from: None } }
+        else if let Some(b) = ls.iter().find(|t| t.starts_with("blocked")) {
+            let rest = b.trim_start_matches("blocked:").trim();
+            let word = rest.split_once(": ").map(|(w, _)| w).filter(|w| w.chars().all(|c| c.is_ascii_lowercase() || c == '_'));
+            let (reason, from) = match word {
+                Some(w) => (Some(w.to_string()), Some("recorded")),
+                None => match derived() {
+                    Some(w) => (Some(w.to_string()), Some("kernel")),
+                    None => match by_sentence(rest, &searches[m], of("counterexample").map(|i| &searches[i])) { Some(w) => (Some(w.to_string()), Some("sentence")), None => (None, None) },
+                },
+            };
+            End { end: "blocked", reason, from }
+        }
+        else if last && running { End { end: "running", reason: None, from: None } }
+        else if let Some(w) = derived() { End { end: "blocked", reason: Some(w.to_string()), from: Some("kernel") } }
+        // Followed by another attempt, it ended without a push: a block no word or sentence names.
+        else if !last { End { end: "blocked", reason: None, from: None } }
+        // Its bon process stopped with no transition: during a search, or after every search of it reported.
+        else {
+            let reported = (m..to).all(|i| !searches[i]["time"].is_null());
+            End { end: "exited", reason: Some(if reported { "after_its_searches" } else { "during_a_search" }.into()), from: None }
+        };
+        out.push((m, end));
+    }
+    out
+}
+
+/// The reason a trace's sentence names, from before reasons were words, told
+/// apart by the counts of verified candidates and tests the trace recorded
+/// where the sentence named more than one: "fewer than two verified candidates,
+/// or they disagree"; and "fewer than two verified tests, and none splits the
+/// candidates", which, with two verified tests, is none_splits (no test split
+/// the candidates by the rules of then; today's kernel would say rejects_every
+/// or undiscriminating, which only it can tell apart). Otherwise the word of
+/// today's sentence it is.
+fn by_sentence(sentence: &str, tested: &Value, counterexample: Option<&Value>) -> Option<&'static str> {
+    let verified = |s: &Value| s["recorded_verified"].as_u64().or(s["verified"].as_u64());
+    if sentence == "fewer than two verified candidates, or they disagree" {
+        return Some(if verified(tested)? < 2 { "too_few_verified" } else { "disagree" });
+    }
+    if sentence == "fewer than two verified tests, and none splits the candidates" {
+        return Some(if verified(counterexample?)? < 2 { "too_few_tests" } else { "none_splits" });
+    }
+    REASONS.iter().find(|(_, s)| *s == sentence).map(|(w, _)| *w)
 }
 
 /// A unix time as its UTC date, YYYY-MM-DD.
@@ -178,6 +315,9 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
             .filter_map(|e| Some((e.file_name().to_string_lossy().parse::<usize>().ok()?, e.path()))).collect();
         runs.sort_by_key(|(n, _)| *n);
         let mut searches = Vec::new();
+        // Each search's decoded words (where it reported) and its transitions, by position.
+        let mut decoded: Vec<Option<best_of_n::gates::Search>> = Vec::new();
+        let mut lines: Vec<Vec<String>> = Vec::new();
         for (n, rdir) in runs {
             let summary = summaries.iter().find(|s| s["search"] == n).cloned().unwrap_or(Value::Null);
             let segment = segments.get(n).cloned().unwrap_or_default();
@@ -202,6 +342,9 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
                     .filter(|f| !matches!(f.as_str(), "index" | "facts.json" | "candidate.bundle")).collect();
                 let mut logs = logs;
                 logs.sort_by_key(|f| run_order(f));
+                // Its model session and its checks, each by its log's seconds.
+                let harness_seconds = log_seconds(&e.path().join("harness"));
+                let checks_seconds = check_seconds(&e.path(), logs.iter().map(String::as_str));
                 let c = &facts["candidate"];
                 let accepted = c["accepted"].as_bool().unwrap_or(false);
                 let verified = match &kernel {
@@ -218,6 +361,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
                     "removed": c["removed"].as_u64(),
                     "flags": (["killed", "over_limit", "price_mismatch"]).iter().filter(|k| facts[**k] == true).collect::<Vec<_>>(),
                     "logs": logs,
+                    "harness_seconds": harness_seconds, "check_seconds": checks_seconds,
                     "out": c["out"],
                     "proved": c["proved"],
                     // A trace from before tests ran on foils (or a candidate that is no test) has none.
@@ -268,11 +412,24 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
                 "generation": generation, "time_cost": time_cost, "rate": summary["rate"], "background": summary["background"] == true,
                 "search": n, "kind": kind, "goal": goal_text, "width": width, "started": started,
                 "returned": returned, "accepted": accepted, "verified": verified,
-                "selected": selected, "recorded_selected": recorded,
+                "selected": selected, "recorded_selected": recorded, "recorded_verified": summary["verified"],
                 "kernel": if kernel.is_some() { "derived" } else if rdir.join("search.words").exists() { "unreadable" } else { "none" },
                 "blocked": blocked, "cost": cost, "seconds": seconds, "time": summary["time"], "running": live,
                 "candidates": candidates.into_iter().map(|(_, c)| c).collect::<Vec<_>>(),
             }));
+            decoded.push((!summary.is_null()).then_some(kernel).flatten());
+            lines.push(segment);
+        }
+        // How each attempt ended, and why it blocked: on its code or compaction search.
+        let derive = |t: usize, x: Option<usize>, f: Option<usize>| -> Option<&'static str> {
+            let get = |i: Option<usize>| -> Result<Option<&best_of_n::gates::Search>, ()> { match i { None => Ok(None), Some(i) => decoded.get(i).and_then(|d| d.as_ref()).map(Some).ok_or(()) } };
+            let (Ok(Some(t)), Ok(x), Ok(f)) = (get(Some(t)), get(x), get(f)) else { return None };
+            Kernel::blocked(t, x, f).map(blocked_word)
+        };
+        for (m, e) in attempt_ends(&searches, &lines, running, &derive) {
+            searches[m]["end"] = json!(e.end);
+            searches[m]["reason"] = json!(e.reason);
+            searches[m]["reason_from"] = json!(e.from);
         }
         // A bon process's kind is its first recorded non-counterexample kind,
         // or its first recorded kind when it only searched for counterexamples.
@@ -363,6 +520,9 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
             "pid": pid, "trace": trace, "running": running, "kind": kind, "goal": goal, "title": title, "about": about, "base": base, "outcome": outcome, "sentence": sentence,
             "cost": cost, "generation": generation, "time_cost": time_cost, "push": push, "limit": limit, "time": time,
             "transitions": transitions, "searches": searches,
+            // Its checks of trunk before its first search: trunk-test-K, trunk-verify-K, goal-agree-K.
+            "check_seconds": check_seconds(&dir, std::fs::read_dir(&dir).into_iter().flatten().flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string()).filter(|f| f.starts_with("trunk-") || f.starts_with("goal-")).collect::<Vec<_>>().iter().map(String::as_str)),
         }));
     }
 
@@ -443,12 +603,13 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
             "per_push": (!push_costs.is_empty()).then(|| push_costs.iter().sum::<f64>() / push_costs.len() as f64),
             "pushes": push_costs.len(),
             "verified": verified_all, "candidates": candidates_all,
-            "attempts": attempts(&processes), "ended": ended(&processes), "reasons": reasons(&processes),
+            "attempts": attempts(&processes), "ended": ended(&processes), "reasons": reasons(&processes, "blocked"), "exits": reasons(&processes, "exited"),
         },
         "processes": processes,
         // The range shown, and the range there is, so a view can offer it.
         "filter": { "since": filter.since, "until": filter.until, "find": filter.find },
         "bounds": { "earliest": (earliest != u64::MAX).then_some(earliest), "latest": (latest > 0).then_some(latest) },
+        "retired": retired(root, &queue.iter().flatten().filter_map(|q| q["id"].as_u64()).collect::<Vec<_>>()),
         "queue": queue,
         "proposals": proposals(root),
         // What no search may change: bon's directory, the checks, trusted code.
@@ -480,107 +641,174 @@ fn main_searches(p: &Value) -> Vec<&Value> {
     p["searches"].as_array().map_or(Vec::new(), |s| s.iter().filter(|s| matches!(s["kind"].as_str(), Some("code" | "compaction"))).collect())
 }
 
-/// Attempts by kind and width. An attempt counts once it ran to an end: a
-/// later attempt followed it, or its bon process pushed or blocked.
+/// Attempts by kind and width, each counted once by how it ended (the `end`
+/// of its code or compaction search): pushed, blocked, landed, exited or
+/// running. `attempts` is their sum.
 fn attempts(processes: &[Value]) -> Vec<Value> {
-    let mut by: BTreeMap<(String, u64), (u64, u64)> = BTreeMap::new();
+    let mut by: BTreeMap<(String, u64), [u64; 5]> = BTreeMap::new();
     for p in processes {
-        let outcome = p["outcome"].as_str().unwrap_or_default();
-        let main = main_searches(p);
-        for (k, s) in main.iter().enumerate() {
-            let last = k + 1 == main.len();
-            if last && !matches!(outcome, "pushed" | "blocked") { continue; }
+        for s in main_searches(p) {
             let e = by.entry((s["kind"].as_str().unwrap_or_default().to_string(), s["width"].as_u64().unwrap_or(0))).or_default();
-            e.0 += 1;
-            if last && outcome == "pushed" { e.1 += 1; }
+            let at = match s["end"].as_str() { Some("pushed") => 0, Some("blocked") => 1, Some("landed") => 2, Some("running") => 4, _ => 3 };
+            e[at] += 1;
         }
     }
-    by.into_iter().map(|((kind, width), (attempts, pushed))| json!({ "kind": kind, "width": width, "attempts": attempts, "pushed": pushed })).collect()
+    by.into_iter().map(|((kind, width), [pushed, blocked, landed, exited, running])| json!({ "kind": kind, "width": width,
+        "attempts": pushed + blocked + landed + exited + running, "pushed": pushed, "blocked": blocked, "landed": landed, "exited": exited, "running": running })).collect()
 }
 
-/// How bon processes ended, by kind, and the share (1-p)^k predicts blocked.
+/// How bon processes ended, by kind, and how many of those that pushed or
+/// blocked (1-p)^k predicts would have blocked.
 fn ended(processes: &[Value]) -> Vec<Value> {
-    let mut by: BTreeMap<String, (u64, u64, u64, Vec<u64>)> = BTreeMap::new();
+    let mut by: BTreeMap<String, (u64, u64, u64, u64, Vec<u64>)> = BTreeMap::new();
     for p in processes {
         let main = main_searches(p);
         let Some(kind) = main.first().and_then(|s| s["kind"].as_str()) else { continue };
         let e = by.entry(kind.to_string()).or_default();
         match p["outcome"].as_str() {
-            Some("pushed") => { e.0 += 1; e.3.push(main.len() as u64); }
-            Some("blocked") => { e.1 += 1; e.3.push(main.len() as u64); }
-            Some("running") => {}
+            Some("pushed") => { e.0 += 1; e.4.push(main.len() as u64); }
+            Some("blocked") => { e.1 += 1; e.4.push(main.len() as u64); }
+            Some("running") => e.3 += 1,
             _ => e.2 += 1,
         }
     }
     let rows = attempts(processes);
-    by.into_iter().map(|(kind, (pushed, blocked, exited, ks))| {
-        let (a, s) = rows.iter().filter(|r| r["kind"] == kind.as_str())
-            .fold((0, 0), |(a, s), r| (a + r["attempts"].as_u64().unwrap_or(0), s + r["pushed"].as_u64().unwrap_or(0)));
-        let p = (a > 0).then(|| s as f64 / a as f64);
+    by.into_iter().map(|(kind, (pushed, blocked, exited, running, ks))| {
+        let (ran, s) = rows.iter().filter(|r| r["kind"] == kind.as_str()).fold((0, 0), |(a, s), r| {
+            let n = |k: &str| r[k].as_u64().unwrap_or(0);
+            (a + n("pushed") + n("blocked") + n("landed"), s + n("pushed"))
+        });
+        let p = (ran > 0).then(|| s as f64 / ran as f64);
         let expected = p.filter(|_| !ks.is_empty()).map(|p| ks.iter().map(|k| (1.0 - p).powi(*k as i32)).sum::<f64>() / ks.len() as f64);
-        json!({ "kind": kind, "pushed": pushed, "blocked": blocked, "exited": exited, "expected": expected })
+        json!({ "kind": kind, "pushed": pushed, "blocked": blocked, "exited": exited, "running": running, "expected": expected })
     }).collect()
 }
 
-/// How many attempts each reason blocked: the word after "blocked: " in the
-/// trace, or "unrecorded" for a trace from before reasons were words.
-fn reasons(processes: &[Value]) -> Vec<Value> {
-    let mut by: BTreeMap<String, u64> = BTreeMap::new();
+/// How many attempts of each kind each reason blocked (`end` blocked), and how
+/// many of those the reason was inferred for (its trace has no word: the
+/// kernel's, or its sentence's); a block nothing names is "unrecorded". With
+/// `end` exited: how many exited during a search, and after its searches reported.
+fn reasons(processes: &[Value], end: &str) -> Vec<Value> {
+    let mut by: BTreeMap<(String, String), (u64, u64)> = BTreeMap::new();
     for p in processes {
-        for t in p["transitions"].as_array().into_iter().flatten().filter_map(|t| t.as_str()) {
-            let Some(rest) = t.strip_prefix("blocked: ") else { continue };
-            let word = rest.split_once(": ").map(|(w, _)| w).filter(|w| w.chars().all(|c| c.is_ascii_lowercase() || c == '_')).unwrap_or("unrecorded");
-            *by.entry(word.to_string()).or_default() += 1;
+        for s in main_searches(p).into_iter().filter(|s| s["end"] == end) {
+            let e = by.entry((s["kind"].as_str().unwrap_or_default().to_string(), s["reason"].as_str().unwrap_or("unrecorded").to_string())).or_default();
+            e.0 += 1;
+            if !s["reason_from"].is_null() && s["reason_from"] != "recorded" { e.1 += 1; }
         }
     }
-    by.into_iter().map(|(reason, count)| json!({ "reason": reason, "count": count })).collect()
+    by.into_iter().map(|((kind, reason), (count, inferred))| json!({ "kind": kind, "reason": reason, "count": count, "inferred": inferred })).collect()
 }
 
-/// The columns of the outcomes table.
-pub const OUTCOME_COLUMNS: [&str; 7] = ["Outcomes", "Attempts", "Pushed", "Push rate", "Ended blocked", "Expected", "Exited"];
-
-/// A reason attempts blocked, in words, with its count: `Too few verified (1)`.
+/// A reason attempts blocked, in words, with its count and how many of those
+/// were inferred: `Too few verified (1)`, `Too few tests (5, 5 inferred)`.
 pub fn reason_count(r: &crate::projection::Reason) -> String {
     let mut w = r.reason.replace('_', " ");
     if let Some(f) = w.get_mut(0..1) { f.make_ascii_uppercase(); }
-    format!("{w} ({})", r.count)
+    if r.inferred > 0 { format!("{w} ({}, {} inferred)", r.count, r.inferred) } else { format!("{w} ({})", r.count) }
 }
 
-/// Attempts and how bon processes ended, by kind: one row per kind, and one
-/// per width under it when the kind ran at more than one. Attempts, pushed
-/// and push rate (p) count attempts; ended blocked and exited count bon processes;
-/// expected is how many of them (1-p)^k predicts would end blocked.
-pub fn outcome_table(t: &crate::projection::Totals) -> Vec<[String; 7]> {
-    let mut out = Vec::new();
-    // Push rate: pushed over attempts (p), as a percentage.
-    let p = |a: u64, s: u64| if a > 0 { format!("{:.0}%", 100.0 * s as f64 / a as f64) } else { "—".into() };
-    for e in &t.ended {
-        let rows: Vec<_> = t.attempts.iter().filter(|r| r.kind == e.kind).collect();
-        let (a, s) = rows.iter().fold((0, 0), |(a, s), r| (a + r.attempts, s + r.pushed));
-        let expected = e.expected.map_or("—".into(), |x| format!("{:.1}", x * (e.pushed + e.blocked) as f64));
-        let mut kind = e.kind.clone();
-        if let Some(f) = kind.get_mut(0..1) { f.make_ascii_uppercase(); }
-        out.push([kind, a.to_string(), s.to_string(), p(a, s), e.blocked.to_string(), expected, e.exited.to_string()]);
-        if rows.len() > 1 {
-            for r in rows { out.push([format!("  Width {}", r.width), r.attempts.to_string(), r.pushed.to_string(), p(r.attempts, r.pushed), String::new(), String::new(), String::new()]); }
-        }
+fn cap(s: &str) -> String { let mut c = s.chars(); c.next().map_or(String::new(), |f| f.to_uppercase().chain(c).collect()) }
+
+/// The attempts table, its header first: one row per kind, and one per width
+/// under it when the kind ran at more than one. Every attempt is in exactly
+/// one of pushed, blocked, landed, exited and running, and All is their sum;
+/// a column no attempt is in is left out, but for pushed, blocked and exited.
+/// Push rate (p) is pushed over the attempts that ran to an end (pushed,
+/// blocked, landed).
+pub fn attempt_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
+    if t.attempts.is_empty() { return Vec::new(); }
+    let landed = t.attempts.iter().any(|r| r.landed > 0);
+    let running = t.attempts.iter().any(|r| r.running > 0);
+    let mut head = vec!["Attempts", "All", "Pushed", "Blocked"];
+    if landed { head.push("Landed"); }
+    head.push("Exited");
+    if running { head.push("Running"); }
+    head.push("Push rate");
+    let mut out = vec![head.into_iter().map(String::from).collect::<Vec<_>>()];
+    let row = |label: String, r: &[&crate::projection::Attempts]| {
+        let n = |f: fn(&crate::projection::Attempts) -> u64| r.iter().map(|x| f(x)).sum::<u64>();
+        let (pushed, blocked, l, exited, run) = (n(|x| x.pushed), n(|x| x.blocked), n(|x| x.landed), n(|x| x.exited), n(|x| x.running));
+        let ran = pushed + blocked + l;
+        let mut v = vec![label, (pushed + blocked + l + exited + run).to_string(), pushed.to_string(), blocked.to_string()];
+        if landed { v.push(l.to_string()); }
+        v.push(exited.to_string());
+        if running { v.push(run.to_string()); }
+        v.push(if ran > 0 { format!("{:.0}%", 100.0 * pushed as f64 / ran as f64) } else { "—".into() });
+        v
+    };
+    let mut kinds: Vec<&str> = t.attempts.iter().map(|r| r.kind.as_str()).collect();
+    kinds.dedup();
+    for k in kinds {
+        let rows: Vec<&crate::projection::Attempts> = t.attempts.iter().filter(|r| r.kind == k).collect();
+        out.push(row(cap(k), &rows));
+        if rows.len() > 1 { for r in &rows { out.push(row(format!("  Width {}", r.width), &[r])); } }
     }
     out
 }
 
-/// The outcomes table as aligned text, and the reasons attempts blocked.
-pub fn outcome_lines(t: &crate::projection::Totals) -> Vec<String> {
-    let rows = outcome_table(t);
-    if rows.is_empty() { return Vec::new(); }
-    let all: Vec<[String; 7]> = std::iter::once(OUTCOME_COLUMNS.map(String::from)).chain(rows).collect();
-    let w: Vec<usize> = (0..7).map(|i| all.iter().map(|r| r[i].chars().count()).max().unwrap_or(0)).collect();
-    let mut lines: Vec<String> = all.iter().map(|r| {
+/// The bon processes table, its header first: one row per kind of how its bon
+/// processes ended, All their sum. Expected is how many of those that pushed or
+/// blocked would have blocked, were each attempt to push at the push rate p:
+/// the sum over them of (1-p)^k, k its attempts.
+pub fn process_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
+    if t.ended.is_empty() { return Vec::new(); }
+    let running = t.ended.iter().any(|e| e.running > 0);
+    let mut head = vec!["Bon processes", "All", "Pushed", "Blocked", "Exited"];
+    if running { head.push("Running"); }
+    head.push("Expected blocked");
+    let mut out = vec![head.into_iter().map(String::from).collect::<Vec<_>>()];
+    for e in &t.ended {
+        let mut v = vec![cap(&e.kind), (e.pushed + e.blocked + e.exited + e.running).to_string(), e.pushed.to_string(), e.blocked.to_string(), e.exited.to_string()];
+        if running { v.push(e.running.to_string()); }
+        v.push(e.expected.map_or("—".into(), |x| format!("{:.1}", x * (e.pushed + e.blocked) as f64)));
+        out.push(v);
+    }
+    out
+}
+
+/// Each kind's blocked attempts by reason, which sum to its Blocked; then each
+/// kind's exited attempts by when they stopped, which sum to its Exited.
+pub fn reason_rows(t: &crate::projection::Totals) -> Vec<(String, Vec<String>)> {
+    let mut out = Vec::new();
+    for (list, how) in [(&t.reasons, "blocked by"), (&t.exits, "exited")] {
+        let mut kinds: Vec<&str> = list.iter().map(|r| r.kind.as_str()).collect();
+        kinds.dedup();
+        out.extend(kinds.into_iter().map(|k| (format!("{} {how}", cap(k)), list.iter().filter(|r| r.kind == k).map(reason_count).collect())));
+    }
+    out
+}
+
+/// What the outcome tables' words mean, for a key reference or a footnote.
+pub const OUTCOME_NOTES: [(&str, &str); 5] = [
+    ("All", "Pushed + blocked + exited (+ landed, running)"),
+    ("Exited", "Its bon process stopped: no transition, no error"),
+    ("Push rate", "Pushed ÷ attempts that ended"),
+    ("Expected", "Σ (1 − push rate)^attempts, over processes"),
+    ("Inferred", "No word: the kernel's, or the sentence's"),
+];
+
+/// A table as aligned text: the first column left, the rest right.
+fn aligned(rows: &[Vec<String>]) -> Vec<String> {
+    let n = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+    let w: Vec<usize> = (0..n).map(|i| rows.iter().map(|r| r.get(i).map_or(0, |c| c.chars().count())).max().unwrap_or(0)).collect();
+    rows.iter().map(|r| {
         let mut l = format!("{:<1$}", r[0], w[0]);
-        for i in 1..7 { l += &format!("  {:>1$}", r[i], w[i]); }
+        for i in 1..r.len() { l += &format!("  {:>1$}", r[i], w[i]); }
         l.trim_end().to_string()
-    }).collect();
-    let reasons = t.reasons.iter().map(reason_count).collect::<Vec<_>>();
-    if !reasons.is_empty() { lines.push(format!("Attempts blocked by  {}", reasons.join(" · "))); }
+    }).collect()
+}
+
+/// The outcome tables as aligned text, each kind's reasons, and what the words mean.
+pub fn outcome_lines(t: &crate::projection::Totals) -> Vec<String> {
+    let attempts = attempt_table(t);
+    if attempts.is_empty() { return Vec::new(); }
+    let mut lines = aligned(&attempts);
+    for (label, items) in reason_rows(t) { lines.push(format!("{label}  {}", items.join(" · "))); }
+    lines.push(String::new());
+    lines.extend(aligned(&process_table(t)));
+    lines.push(String::new());
+    lines.extend(OUTCOME_NOTES.iter().map(|(k, v)| format!("{k}: {v}")));
     lines
 }
 
@@ -1072,4 +1300,95 @@ fn system(root: &Path, base: &str, manifest: &toml::Value) -> Value {
         .map(|(tf, t)| json!({ "name": t.name, "file": tf, "line": t.start, "doc": t.doc, "changed": hit(tf, t.start, t.end) })).collect();
     json!({ "nodes": spec_nodes, "edges": edges, "trusted": trusted,
         "counts": { "predicates": preds.len(), "private": private, "trusted": trusted_fns.len() } })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A search as the projection holds it: its kind, and whether it reported.
+    fn s(kind: &str, reported: bool) -> Value { json!({ "kind": kind, "time": if reported { json!(1) } else { Value::Null } }) }
+    fn ls(v: &[&[&str]]) -> Vec<Vec<String>> { v.iter().map(|l| l.iter().map(|x| x.to_string()).collect()).collect() }
+    fn none(_: usize, _: Option<usize>, _: Option<usize>) -> Option<&'static str> { None }
+    fn end(e: &'static str, reason: Option<&str>, from: Option<&'static str>) -> End { End { end: e, reason: reason.map(String::from), from } }
+
+    #[test]
+    fn every_attempt_ends_one_way() {
+        // A block in today's words, then a block in an old sentence, then a push.
+        let mut searches = [s("code", true), s("foil", true), s("counterexample", true), s("code", true), s("foil", true), s("counterexample", true), s("code", true), s("counterexample", true)];
+        searches[5]["recorded_verified"] = json!(1);
+        let lines = ls(&[&["grant"], &["grant"], &["grant", "blocked: undiscriminating: fewer than two verified tests judge every candidate and reject a foil"],
+            &["grant"], &["grant"], &["grant", "blocked: fewer than two verified tests, and none splits the candidates"], &["grant"], &["grant", "push 6 1 7"]]);
+        let ends: Vec<End> = attempt_ends(&searches, &lines, false, &none).into_iter().map(|(_, e)| e).collect();
+        assert_eq!(ends, [end("blocked", Some("undiscriminating"), Some("recorded")), end("blocked", Some("too_few_tests"), Some("sentence")), end("pushed", None, None)]);
+        // The kernel's reason comes before a sentence's.
+        let kernel = |_: usize, _: Option<usize>, _: Option<usize>| Some("rejects_every");
+        assert_eq!(attempt_ends(&searches, &lines, false, &kernel)[1].1, end("blocked", Some("rejects_every"), Some("kernel")));
+    }
+
+    #[test]
+    fn an_attempt_its_bon_process_stopped_in_exited() {
+        // Stopped during its search, or after its searches reported with no transition.
+        let during = attempt_ends(&[s("code", true), s("code", false)], &ls(&[&["grant", "blocked: too_few_verified: fewer than two verified candidates"], &["grant"]]), false, &none);
+        assert_eq!(during[1].1, end("exited", Some("during_a_search"), None));
+        let after = attempt_ends(&[s("code", true), s("counterexample", true)], &ls(&[&["grant"], &["grant"]]), false, &none);
+        assert_eq!(after[0].1, end("exited", Some("after_its_searches"), None));
+        // Running, it has not ended; followed by another attempt with no line, it blocked for no recorded reason.
+        assert_eq!(attempt_ends(&[s("code", false)], &ls(&[&["grant"]]), true, &none)[0].1, end("running", None, None));
+        assert_eq!(attempt_ends(&[s("code", true), s("code", true)], &ls(&[&["grant"], &["grant", "push"]]), false, &none)[0].1, end("blocked", None, None));
+    }
+
+    #[test]
+    fn an_old_sentence_that_named_two_reasons_is_told_apart_by_the_recorded_count() {
+        let sentence = "fewer than two verified candidates, or they disagree";
+        assert_eq!(by_sentence(sentence, &json!({ "recorded_verified": 0, "verified": 8 }), None), Some("too_few_verified"));
+        assert_eq!(by_sentence(sentence, &json!({ "recorded_verified": 5 }), None), Some("disagree"));
+        // Fewer than two verified tests is today's too_few_tests; two that split nothing, none_splits.
+        let tests = "fewer than two verified tests, and none splits the candidates";
+        assert_eq!(by_sentence(tests, &json!({}), Some(&json!({ "recorded_verified": 0 }))), Some("too_few_tests"));
+        assert_eq!(by_sentence(tests, &json!({}), Some(&json!({ "recorded_verified": 2 }))), Some("none_splits"));
+        assert_eq!(by_sentence("a verified test rejects every candidate", &json!({}), None), Some("rejects_every"));
+        assert_eq!(by_sentence("something else", &json!({}), None), None);
+    }
+
+    #[test]
+    fn a_retired_intent_is_the_latest_commit_that_took_it_off() {
+        let log = "\0bbb 20 queue: 28 reworded; 36 is in the spec\n\ndiff\n--- a/.bon/queue.tsv\n+++ b/.bon/queue.tsv\n-28\tolder words\n+28\tnewer words\n-36\tbon works on git's objects\n\
+                   \0aaa 10 queue: 36, 37\n\ndiff\n--- a/.bon/queue.tsv\n+++ b/.bon/queue.tsv\n-36\tbon works on git's objects\n-37\tchecks run with root's toolchain\n";
+        let r = retired_in(log, &[28]);
+        // 28 was reworded and is queued; 36's latest removal is bbb; 37 left in aaa.
+        assert_eq!(r.len(), 2);
+        assert_eq!((r[0]["id"].as_u64(), r[0]["commit"].as_str(), r[0]["subject"].as_str()), (Some(36), Some("bbb"), Some("queue: 28 reworded; 36 is in the spec")));
+        assert_eq!((r[1]["id"].as_u64(), r[1]["intent"].as_str(), r[1]["time"].as_u64()), (Some(37), Some("checks run with root's toolchain"), Some(10)));
+    }
+
+    /// A bon process of `kind` that ended `outcome`, its attempts each ended as given.
+    fn process(kind: &str, outcome: &str, ends: &[(&str, Option<&str>, Option<&str>)]) -> Value {
+        json!({ "outcome": outcome, "searches": ends.iter().map(|(e, r, f)| json!({ "kind": kind, "width": 8, "end": e, "reason": r, "reason_from": f })).collect::<Vec<_>>() })
+    }
+
+    #[test]
+    fn the_outcome_tables_add_up() {
+        let ps = [
+            process("code", "pushed", &[("blocked", Some("too_few_tests"), Some("sentence")), ("pushed", None, None)]),
+            process("code", "exited", &[("blocked", Some("too_few_verified"), Some("recorded")), ("exited", Some("during_a_search"), None)]),
+            process("code", "blocked", &[("blocked", None, None)]),
+            process("code", "pushed", &[("pushed", None, None)]),
+        ];
+        let t: crate::projection::Totals = serde_json::from_value(json!({ "attempts": attempts(&ps), "ended": ended(&ps),
+            "reasons": reasons(&ps, "blocked"), "exits": reasons(&ps, "exited") })).unwrap();
+        let a = attempt_table(&t);
+        assert_eq!(a[0], ["Attempts", "All", "Pushed", "Blocked", "Exited", "Push rate"]);
+        // 6 attempts: 2 pushed, 3 blocked, 1 exited; 2 of the 5 that ended pushed.
+        assert_eq!(a[1], ["Code", "6", "2", "3", "1", "40%"]);
+        // The reasons sum to Blocked, the exits to Exited; an inferred reason says so.
+        let r = reason_rows(&t);
+        assert_eq!(r[0], ("Code blocked by".to_string(), vec!["Too few tests (1, 1 inferred)".to_string(), "Too few verified (1)".into(), "Unrecorded (1)".into()]));
+        assert_eq!(r[1], ("Code exited".to_string(), vec!["During a search (1)".to_string()]));
+        // Bon processes: 4, of which 2 pushed, 1 blocked, 1 exited; expected is over the 3 that pushed or blocked.
+        let p = process_table(&t);
+        assert_eq!(p[0], ["Bon processes", "All", "Pushed", "Blocked", "Exited", "Expected blocked"]);
+        let x = |k: i32| 0.6f64.powi(k);
+        assert_eq!(p[1], ["Code", "4", "2", "1", "1", &format!("{:.1}", x(2) + x(1) + x(1))]);
+    }
 }

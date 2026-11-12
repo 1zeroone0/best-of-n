@@ -102,6 +102,8 @@ class Projection(TypedDict):
     queue: list[QueueLine] | None
     # Queue proposals waiting for engineer: patches bon queue wrote.
     proposals: list[Proposal]
+    # Intents no longer on the queue, and the commit that took each off, newest first.
+    retired: list[Retired]
     # What no search may change: bon's directory, the checks, trusted code.
     protected: list[str]
     filter: Filter
@@ -147,38 +149,54 @@ class Totals(TypedDict):
     pushes: int
     verified: int
     candidates: int
-    # Attempts by kind and width, and how many of them pushed.
+    # Attempts by kind and width, by how each ended.
     attempts: list[Attempts]
     # How bon processes ended, by kind.
     ended: list[Ended]
-    # How many attempts each reason blocked, by its word in the trace.
+    # How many attempts of each kind each reason blocked.
     reasons: list[Reason]
+    # How many attempts of each kind exited, by when: during_a_search, or
+    # after_its_searches (reported, before a transition). The trace holds
+    # no error for either.
+    exits: list[Reason]
 
-# Attempts of one kind at one width: how many ran to an end, and how many
-# of those pushed. An attempt is a code or compaction search with the
-# counterexample (and foil) search on its selection.
+# Attempts of one kind at one width, by how each ended; `attempts` is their
+# sum. An attempt is a code or compaction search with the foil and
+# counterexample searches on its selection. Landed: a counterexample's test
+# landed on trunk and the bon process went on. Exited: its bon process
+# stopped during it, with no transition.
 class Attempts(TypedDict):
     kind: str
     width: int
     attempts: int
     pushed: int
+    blocked: int
+    landed: int
+    exited: int
+    running: int
 
 # How the bon processes of one kind ended. Exited: stopped short of a final
 # transition (killed, interrupted, an error), which is not a block. `expected`
-# is the share (1-p)^k predicts would end blocked, p being this kind's
-# measured success per attempt and k the attempts each process made.
+# is the share of those that pushed or blocked (1-p)^k predicts would end
+# blocked, p being this kind's measured push rate per attempt that ended and
+# k the attempts each process made.
 class Ended(TypedDict):
     kind: str
     pushed: int
     blocked: int
     exited: int
+    running: int
     expected: float | None
 
-# A reason a search blocked, and how many attempts it blocked. Traces from
-# before reasons were recorded count under "unrecorded".
+# A reason attempts of one kind blocked, and how many. `inferred` of them
+# have no word in their trace (from before reasons were words): the kernel
+# derived the reason from the searches' words, or the trace's sentence names
+# it. A block nothing names counts under "unrecorded".
 class Reason(TypedDict):
+    kind: str
     reason: str
     count: int
+    inferred: int
 
 # Where a goal came from: the goal, the commit and its subject.
 About = TypedDict("About", {"goal": str, "from": str, "subject": str})
@@ -232,6 +250,8 @@ class BonProcess(TypedDict):
     # Each line of its transitions file.
     transitions: list[str]
     searches: list[SearchTrace]
+    # Seconds its checks of trunk took before its first search, from their logs.
+    check_seconds: float | None
 
 # One search of a bon process, as its trace recorded it.
 class SearchTrace(TypedDict):
@@ -246,6 +266,8 @@ class SearchTrace(TypedDict):
     verified: int
     selected: int | None
     recorded_selected: int | None
+    # How many verified candidates the trace's summary recorded.
+    recorded_verified: int | None
     # derived (the kernel read its words), unreadable, or none.
     kernel: str
     blocked: str | None
@@ -258,6 +280,14 @@ class SearchTrace(TypedDict):
     running: bool
     background: bool
     candidates: list[Facts]
+    # A code or compaction search: how its attempt ended (pushed, blocked,
+    # landed, exited, running).
+    end: str | None
+    # A blocked attempt's reason, by its word; none where nothing names it.
+    reason: str | None
+    # Where the reason came from: recorded (the trace's word), kernel (derived
+    # from the searches' words) or sentence (the trace's sentence).
+    reason_from: str | None
 
 # What a search was granted with.
 class Params(TypedDict):
@@ -291,6 +321,10 @@ class Facts(TypedDict):
     # killed, over limit, price mismatch.
     flags: list[str]
     logs: list[str]
+    # Seconds of its model session, from its harness log.
+    harness_seconds: float | None
+    # Seconds of its checks, summed from their logs.
+    check_seconds: float | None
     changed: list[str]
     # A hash of each agree check's output: candidates with the same agree.
     out: list[int]
@@ -313,6 +347,15 @@ class ProposedIntent(TypedDict):
     id: int | None
     intent: str
     cue: str | None
+
+# An intent taken off the queue: by the commit on trunk's history whose diff
+# removed its line, with that commit's subject and time.
+class Retired(TypedDict):
+    id: int
+    intent: str
+    commit: str
+    subject: str
+    time: int | None
 
 # One line of the queue.
 class QueueLine(TypedDict):

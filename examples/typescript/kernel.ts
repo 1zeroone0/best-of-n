@@ -20,20 +20,20 @@ export interface Candidate { commit: Commit; base: Commit; accepted: boolean; pr
 /** One search, once every agent process has returned: `results[i]` is what agent process i returned. */
 export interface Search { kind: Kind; base: Commit; n: number; checks: Array<Path>; tests: Array<Path>; trusted: Array<Path>; limit: number; results: Array<Candidate | null> }
 /** Everything bon shows, over the time range in `filter`. */
-export interface Projection { configured: boolean; repo: Repo; totals: Totals; processes: Array<BonProcess>; groups: Array<GoalTrace>; queue: Array<QueueLine> | null; proposals: Array<Proposal>; protected: Array<string>; filter: Filter; bounds: Bounds; spec: SpecOutline | null; system: SpecGraph | null; sbom: SbomFile | null }
+export interface Projection { configured: boolean; repo: Repo; totals: Totals; processes: Array<BonProcess>; groups: Array<GoalTrace>; queue: Array<QueueLine> | null; proposals: Array<Proposal>; retired: Array<Retired>; protected: Array<string>; filter: Filter; bounds: Bounds; spec: SpecOutline | null; system: SpecGraph | null; sbom: SbomFile | null }
 /** The repository and its trunk. */
 export interface Repo { name: string | null; head: string | null; trunk: string | null; remote: string | null; remote_head: string | null; remote_time: number | null; subject: string | null; last_push: LastPush | null; since_push: SincePush | null; pushed: boolean | null; now: number }
 export interface LastPush { commit: string | null; time: number | null }
 /** Commits on trunk since bon last pushed, and who made them. */
 export interface SincePush { commits: number; authors: Array<string> }
 /** What everything in range cost, and what came of it. */
-export interface Totals { cost: number; generation: number; time_cost: number; pushed: number; not_pushed: number; in_flight: number; rate: number | null; per_verified_candidate: number | null; per_push: number | null; pushes: number; verified: number; candidates: number; attempts: Array<Attempts>; ended: Array<Ended>; reasons: Array<Reason> }
-/** Attempts of one kind at one width: how many ran to an end, and how many of those pushed. An attempt is a code or compaction search with the counterexample (and foil) search on its selection. */
-export interface Attempts { kind: string; width: number; attempts: number; pushed: number }
-/** How the bon processes of one kind ended. Exited: stopped short of a final transition (killed, interrupted, an error), which is not a block. `expected` is the share (1-p)^k predicts would end blocked, p being this kind's measured success per attempt and k the attempts each process made. */
-export interface Ended { kind: string; pushed: number; blocked: number; exited: number; expected: number | null }
-/** A reason a search blocked, and how many attempts it blocked. Traces from before reasons were recorded count under "unrecorded". */
-export interface Reason { reason: string; count: number }
+export interface Totals { cost: number; generation: number; time_cost: number; pushed: number; not_pushed: number; in_flight: number; rate: number | null; per_verified_candidate: number | null; per_push: number | null; pushes: number; verified: number; candidates: number; attempts: Array<Attempts>; ended: Array<Ended>; reasons: Array<Reason>; exits: Array<Reason> }
+/** Attempts of one kind at one width, by how each ended; `attempts` is their sum. An attempt is a code or compaction search with the foil and counterexample searches on its selection. Landed: a counterexample's test landed on trunk and the bon process went on. Exited: its bon process stopped during it, with no transition. */
+export interface Attempts { kind: string; width: number; attempts: number; pushed: number; blocked: number; landed: number; exited: number; running: number }
+/** How the bon processes of one kind ended. Exited: stopped short of a final transition (killed, interrupted, an error), which is not a block. `expected` is the share of those that pushed or blocked (1-p)^k predicts would end blocked, p being this kind's measured push rate per attempt that ended and k the attempts each process made. */
+export interface Ended { kind: string; pushed: number; blocked: number; exited: number; running: number; expected: number | null }
+/** A reason attempts of one kind blocked, and how many. `inferred` of them have no word in their trace (from before reasons were words): the kernel derived the reason from the searches' words, or the trace's sentence names it. A block nothing names counts under "unrecorded". */
+export interface Reason { kind: string; reason: string; count: number; inferred: number }
 /** Where a goal came from: the goal, the commit and its subject. */
 export interface About { goal: string; from: string; subject: string }
 /** What a push cost, and the commit it pushed. Cost is generation plus time, each summed over every bon process run to reach the push. */
@@ -41,18 +41,20 @@ export interface Push { commit: string | null; cost: number | null; generation: 
 /** The bon processes of one goal: one row of the traces. */
 export interface GoalTrace { kind: string; title: string; about: About; outcome: string; sentence: string; cost: number; generation: number; time_cost: number; push: Push | null; time: number; running: boolean; processes: Array<BonProcess> }
 /** One run of a bon command, by its pid. */
-export interface BonProcess { pid: number; trace: string; running: boolean; kind: string; goal: string; title: string; about: About; outcome: string; sentence: string; cost: number; generation: number; time_cost: number; push: Push | null; limit: number | null; time: number; transitions: Array<string>; searches: Array<SearchTrace> }
+export interface BonProcess { pid: number; trace: string; running: boolean; kind: string; goal: string; title: string; about: About; outcome: string; sentence: string; cost: number; generation: number; time_cost: number; push: Push | null; limit: number | null; time: number; transitions: Array<string>; searches: Array<SearchTrace>; check_seconds: number | null }
 /** One search of a bon process, as its trace recorded it. */
-export interface SearchTrace { search: number; kind: string; goal: string; params: Params; width: number; started: number | null; returned: number; accepted: number; verified: number; selected: number | null; recorded_selected: number | null; kernel: string; blocked: string | null; generation: number | null; time_cost: number | null; cost: number | null; rate: number | null; seconds: number | null; time: number | null; running: boolean; background: boolean; candidates: Array<Facts> }
+export interface SearchTrace { search: number; kind: string; goal: string; params: Params; width: number; started: number | null; returned: number; accepted: number; verified: number; selected: number | null; recorded_selected: number | null; recorded_verified: number | null; kernel: string; blocked: string | null; generation: number | null; time_cost: number | null; cost: number | null; rate: number | null; seconds: number | null; time: number | null; running: boolean; background: boolean; candidates: Array<Facts>; end: string | null; reason: string | null; reason_from: string | null }
 /** What a search was granted with. */
 export interface Params { goal: GoalRef; base: string; n: number | null; limit: number | null; authority: string }
 /** A search's goal: a trunk commit, a selected candidate, or a transcript. */
 export interface GoalRef { trunk: string | null; candidate: string | null; transcript: string | null }
 /** One agent process, from its facts.json. */
-export interface Facts { index: number; harness: string | null; model: string | null; generation: number | null; commit: string | null; accepted: boolean; proved: boolean; verified: boolean; rank: number | null; diff: number | null; added: number | null; removed: number | null; flags: Array<string>; logs: Array<string>; changed: Array<string>; out: Array<number>; accepts: Array<[number, boolean]>; accepts_foils: Array<[number, boolean]> }
+export interface Facts { index: number; harness: string | null; model: string | null; generation: number | null; commit: string | null; accepted: boolean; proved: boolean; verified: boolean; rank: number | null; diff: number | null; added: number | null; removed: number | null; flags: Array<string>; logs: Array<string>; harness_seconds: number | null; check_seconds: number | null; changed: Array<string>; out: Array<number>; accepts: Array<[number, boolean]>; accepts_foils: Array<[number, boolean]> }
 /** A queue proposal: a patch adding intents, each with the cue it came from. */
 export interface Proposal { name: string; path: string; source: string; intents: Array<ProposedIntent>; contested: Array<string> }
 export interface ProposedIntent { id: number | null; intent: string; cue: string | null }
+/** An intent taken off the queue: by the commit on trunk's history whose diff removed its line, with that commit's subject and time. */
+export interface Retired { id: number; intent: string; commit: string; subject: string; time: number | null }
 /** One line of the queue. */
 export interface QueueLine { id: number; intent: string }
 /** The time range bon was asked for. */
