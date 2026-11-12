@@ -305,6 +305,13 @@ fn step_parts(g: &GoalTrace) -> Vec<(&'static str, String)> {
     }
     let mut out = Vec::new();
     let Some((m, after)) = last_attempt(last) else { return out };
+    // Which attempt these are, where the goal made more than one: its last, the
+    // last search but its foils and counterexamples of the process listed first.
+    let n: usize = g.processes.iter().map(|p| p.searches.iter().filter(|s| !clears(&s.kind)).count()).sum();
+    if n > 1 {
+        let at = if g.processes.len() > 1 { format!("process {}, search {}", last.pid, m.search) } else { format!("search {}", m.search) };
+        out.push(("Attempt", format!("{n} of {n} ({at})")));
+    }
     out.push(("Candidates", m.width.max(m.returned).to_string()));
     out.push(("Verified", m.verified.to_string()));
     if let Some(i) = m.selected { out.push(("Selected", format!("#{i}"))); }
@@ -748,6 +755,22 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
                     if !facts.is_empty() { t.extend(pairs(&pal, 2, &facts, wd)); }
                     if let Some(d) = disagreement(s) { t.extend(hanging(&d, 2, wd, pal.tone(Tone::Red))); }
                     if s.blocked.is_some() { for l in why_blocked_in(s, &app.p.protected) { t.extend(hanging(&l, 2, wd, pal.tone(Tone::Yellow))); } }
+                    // A reason the trace has no word for, on its attempt's code or compaction search:
+                    // where it was inferred from, under the line it was inferred from (or the last search of the attempt).
+                    let attempt = b.searches[..=k].iter().rposition(|x| !clears(&x.kind)).map(|i| &b.searches[i]);
+                    let closes = s.blocked.is_some() || b.searches.get(k + 1).is_none_or(|n| !clears(&n.kind));
+                    if let Some(a) = attempt.filter(|_| closes) {
+                        if let (Some(r), Some(from @ ("kernel" | "sentence"))) = (a.reason.as_deref(), a.reason_from.as_deref()) {
+                            let line = format!("Reason: {}, inferred from {}", r.replace('_', " "), if from == "kernel" { "the searches' words by the kernel" } else { "the trace's sentence" });
+                            t.extend(hanging(&line, 2, wd, pal.tone(Tone::Yellow)));
+                        }
+                    }
+                    // An attempt its bon process stopped in, with nothing recorded after: at its last search.
+                    let last_of_attempt = b.searches.get(k + 1).is_none_or(|n| !clears(&n.kind));
+                    if let Some(a) = attempt.filter(|a| last_of_attempt && a.end.as_deref() == Some("exited")) {
+                        let when = if a.reason.as_deref() == Some("after_its_searches") { "after its searches reported" } else { "during this search" };
+                        t.extend(hanging(&format!("Exited {when}: no transition and no error in the trace"), 2, wd, pal.tone(outcome_tone("exited"))));
+                    }
                     if s.candidates.is_empty() { continue; }
                     let mut cs: Vec<&Facts> = s.candidates.iter().collect();
                     cs.sort_by_key(|c| (!c.verified, -(c.rank.unwrap_or(0)), c.diff.unwrap_or(0)));
@@ -1740,7 +1763,8 @@ mod tests {
             "processes": [{ "pid": 1, "outcome": "pushed", "searches": [
                 { "search": 0, "kind": "code", "width": 8, "returned": 8, "verified": 8, "selected": 2 }, foil, ce(true),
                 { "search": 3, "kind": "code", "width": 12, "returned": 12, "verified": 12, "selected": 6 }, foil, ce(false)] }] })).unwrap();
-        assert_eq!(steps(&g, false), "Candidates 12 · Verified 12 · Selected #6 · Foils 2 · Counterexample None found");
+        // The detail's steps say which attempt they are; the list's are short.
+        assert_eq!(steps(&g, false), "Attempt 2 of 2 (search 3) · Candidates 12 · Verified 12 · Selected #6 · Foils 2 · Counterexample None found");
         assert_eq!(steps(&g, true), "12→12→#6 · 2 foils · None found · 0b1e1a5");
     }
 

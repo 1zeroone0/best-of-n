@@ -169,7 +169,7 @@ fn attempt_ends(searches: &[Value], lines: &[Vec<String>], running: bool,
                 Some(w) => (Some(w.to_string()), Some("recorded")),
                 None => match derived() {
                     Some(w) => (Some(w.to_string()), Some("kernel")),
-                    None => match by_sentence(rest, &searches[m]) { Some(w) => (Some(w.to_string()), Some("sentence")), None => (None, None) },
+                    None => match by_sentence(rest, &searches[m], of("counterexample").map(|i| &searches[i])) { Some(w) => (Some(w.to_string()), Some("sentence")), None => (None, None) },
                 },
             };
             End { end: "blocked", reason, from }
@@ -188,16 +188,23 @@ fn attempt_ends(searches: &[Value], lines: &[Vec<String>], running: bool,
     out
 }
 
-/// The reason a trace's sentence names, from before reasons were words: one
-/// of today's sentences, or the sentence that named two, told apart by the
-/// count of verified candidates the trace recorded.
-fn by_sentence(sentence: &str, tested: &Value) -> Option<&'static str> {
-    if let Some((w, _)) = REASONS.iter().find(|(_, s)| *s == sentence) { return Some(w); }
+/// The reason a trace's sentence names, from before reasons were words, told
+/// apart by the counts of verified candidates and tests the trace recorded
+/// where the sentence named more than one: "fewer than two verified candidates,
+/// or they disagree"; and "fewer than two verified tests, and none splits the
+/// candidates", which, with two verified tests, is none_splits (no test split
+/// the candidates by the rules of then; today's kernel would say rejects_every
+/// or undiscriminating, which only it can tell apart). Otherwise the word of
+/// today's sentence it is.
+fn by_sentence(sentence: &str, tested: &Value, counterexample: Option<&Value>) -> Option<&'static str> {
+    let verified = |s: &Value| s["recorded_verified"].as_u64().or(s["verified"].as_u64());
     if sentence == "fewer than two verified candidates, or they disagree" {
-        let v = tested["recorded_verified"].as_u64().or(tested["verified"].as_u64())?;
-        return Some(if v < 2 { "too_few_verified" } else { "disagree" });
+        return Some(if verified(tested)? < 2 { "too_few_verified" } else { "disagree" });
     }
-    None
+    if sentence == "fewer than two verified tests, and none splits the candidates" {
+        return Some(if verified(counterexample?)? < 2 { "too_few_tests" } else { "none_splits" });
+    }
+    REASONS.iter().find(|(_, s)| *s == sentence).map(|(w, _)| *w)
 }
 
 /// A unix time as its UTC date, YYYY-MM-DD.
@@ -1280,7 +1287,8 @@ mod tests {
     #[test]
     fn every_attempt_ends_one_way() {
         // A block in today's words, then a block in an old sentence, then a push.
-        let searches = [s("code", true), s("foil", true), s("counterexample", true), s("code", true), s("foil", true), s("counterexample", true), s("code", true), s("counterexample", true)];
+        let mut searches = [s("code", true), s("foil", true), s("counterexample", true), s("code", true), s("foil", true), s("counterexample", true), s("code", true), s("counterexample", true)];
+        searches[5]["recorded_verified"] = json!(1);
         let lines = ls(&[&["grant"], &["grant"], &["grant", "blocked: undiscriminating: fewer than two verified tests judge every candidate and reject a foil"],
             &["grant"], &["grant"], &["grant", "blocked: fewer than two verified tests, and none splits the candidates"], &["grant"], &["grant", "push 6 1 7"]]);
         let ends: Vec<End> = attempt_ends(&searches, &lines, false, &none).into_iter().map(|(_, e)| e).collect();
@@ -1305,9 +1313,14 @@ mod tests {
     #[test]
     fn an_old_sentence_that_named_two_reasons_is_told_apart_by_the_recorded_count() {
         let sentence = "fewer than two verified candidates, or they disagree";
-        assert_eq!(by_sentence(sentence, &json!({ "recorded_verified": 0, "verified": 8 })), Some("too_few_verified"));
-        assert_eq!(by_sentence(sentence, &json!({ "recorded_verified": 5 })), Some("disagree"));
-        assert_eq!(by_sentence("something else", &json!({})), None);
+        assert_eq!(by_sentence(sentence, &json!({ "recorded_verified": 0, "verified": 8 }), None), Some("too_few_verified"));
+        assert_eq!(by_sentence(sentence, &json!({ "recorded_verified": 5 }), None), Some("disagree"));
+        // Fewer than two verified tests is today's too_few_tests; two that split nothing, none_splits.
+        let tests = "fewer than two verified tests, and none splits the candidates";
+        assert_eq!(by_sentence(tests, &json!({}), Some(&json!({ "recorded_verified": 0 }))), Some("too_few_tests"));
+        assert_eq!(by_sentence(tests, &json!({}), Some(&json!({ "recorded_verified": 2 }))), Some("none_splits"));
+        assert_eq!(by_sentence("a verified test rejects every candidate", &json!({}), None), Some("rejects_every"));
+        assert_eq!(by_sentence("something else", &json!({}), None), None);
     }
 
     /// A bon process of `kind` that ended `outcome`, its attempts each ended as given.
