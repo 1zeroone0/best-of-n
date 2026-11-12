@@ -607,6 +607,22 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
                 out.push(line(label, v));
             }
 
+            // Where the wall time went: each search's split by its slowest agent process, summed,
+            // with the time cost each part carries. Trunk's checks before a search are charged nothing.
+            let (parts, trunk) = time_split(p);
+            let wall: f64 = parts.iter().map(|x| x.0).sum();
+            if wall > 0.0 {
+                out.push(blank());
+                out.push(Row::text(Line::from(vec![Span::styled(format!(" {}", fit("Where The Time Went", lw + 2)), pal.strong()),
+                    Span::styled(right("Wall", 9), pal.muted()), Span::styled(right("Time", TIME_W), pal.muted()), Span::styled(right("Share", 7), pal.muted())])));
+                for (label, (secs, dollars)) in ["Model session", "Checks", "Other"].into_iter().zip(parts) {
+                    out.push(line(label, vec![num(dur(secs)), Span::styled(right(&money(Some(dollars)), TIME_W), pal.ink()), Span::styled(right(&format!("{:.0}%", 100.0 * secs / wall), 7), pal.ink())]));
+                }
+                out.push(line("Searches", vec![num(dur(wall)), Span::styled(right(&money(Some(parts.iter().map(|x| x.1).sum())), TIME_W), pal.muted())]));
+                if trunk > 0.0 { out.push(line("Trunk checks", vec![num(dur(trunk)), Span::styled("   before each first search; no time charged", pal.muted())])); }
+                out.push(Row::text(Line::from(Span::styled(fit("   By each search's slowest agent process; other is waiting on a slot and setup (inferred)", w), pal.faint()))));
+            }
+
             out.push(blank());
             out.push(header("Results", None));
             let cands: Vec<&Facts> = p.processes.iter().flat_map(|b| &b.searches).flat_map(|s| &s.candidates).collect();
@@ -768,6 +784,12 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
                     if !clears(&s.kind) && s.verified > 0 { facts.push(("Outputs", groups(s).len().to_string())); }
                     if tw == 0 && !elapsed.is_empty() { facts.push(("Elapsed", elapsed.clone())); }
                     if !facts.is_empty() { t.extend(pairs(&pal, 2, &facts, wd)); }
+                    // Where its wall time went, by its slowest agent process; and summed over all of them.
+                    if let Some(x) = split(s).filter(|x| x.n > 0) {
+                        t.extend(pairs(&pal, 2, &[("Wall", dur(x.wall)), ("Model", dur(x.model)), ("Checks", dur(x.checks)), ("Other", dur(x.rest))], wd));
+                        t.extend(hanging(&format!("By its slowest agent process, #{}; other is waiting on a slot and setup (inferred). Summed over {}: model {} · checks {}",
+                            x.slowest.unwrap_or(0), plural(x.n, "agent process", "agent processes"), dur(x.model_all), dur(x.checks_all)), 2, wd, pal.faint()));
+                    }
                     if let Some(d) = disagreement(s) { t.extend(hanging(&d, 2, wd, pal.tone(Tone::Red))); }
                     if s.blocked.is_some() { for l in why_blocked_in(s, &app.p.protected) { t.extend(hanging(&l, 2, wd, pal.tone(Tone::Yellow))); } }
                     // A reason the trace has no word for, on its attempt's code or compaction search:
@@ -1032,6 +1054,50 @@ fn groups(s: &SearchTrace) -> Vec<Vec<&Facts>> {
         match out.iter_mut().find(|g| g[0].out == c.out) { Some(g) => g.push(c), None => out.push(vec![c]) }
     }
     out
+}
+
+/// Seconds as minutes and seconds, or hours and minutes: 48s, 7m48s, 31h05m.
+fn dur(s: f64) -> String {
+    let s = s.max(0.0).round() as u64;
+    if s < 60 { format!("{s}s") } else if s < 3600 { format!("{}m{:02}s", s / 60, s % 60) } else { format!("{}h{:02}m", s / 3600, (s % 3600) / 60) }
+}
+
+/// A reported search's wall time, split by its slowest agent process (the one
+/// whose model session and checks took longest, inferred to be the one the
+/// search waited on): that one's model session, its checks, and the rest
+/// (waiting on a slot, setup, the selection; inferred), the three summing to
+/// the wall time. Each from the logs' `seconds:` heads and the search's
+/// recorded seconds. Also each summed over every agent process.
+#[derive(Debug, PartialEq)]
+struct Split { wall: f64, model: f64, checks: f64, rest: f64, slowest: Option<u64>, model_all: f64, checks_all: f64, n: usize }
+
+fn split(s: &SearchTrace) -> Option<Split> {
+    if s.time.is_none() { return None; }
+    let wall = s.seconds?;
+    let timed: Vec<(&Facts, f64, f64)> = s.candidates.iter().filter(|c| c.harness_seconds.is_some() || c.check_seconds.is_some())
+        .map(|c| (c, c.harness_seconds.unwrap_or(0.0), c.check_seconds.unwrap_or(0.0))).collect();
+    let slowest = timed.iter().max_by(|a, b| (a.1 + a.2).total_cmp(&(b.1 + b.2)));
+    let (model, checks) = slowest.map_or((0.0, 0.0), |(_, h, c)| { let h = h.min(wall); (h, c.min(wall - h)) });
+    Some(Split { wall, model, checks, rest: wall - model - checks, slowest: slowest.map(|(c, _, _)| c.index),
+        model_all: timed.iter().map(|t| t.1).sum(), checks_all: timed.iter().map(|t| t.2).sum(), n: timed.len() })
+}
+
+/// The wall time of every reported search in range, split as `split` does,
+/// with the time cost each part carries (each search's time cost shared by
+/// its parts' seconds): [model, checks, rest] as (seconds, dollars); and the
+/// bon processes' checks of trunk before their first search, which no time is
+/// charged for.
+fn time_split(p: &Projection) -> ([(f64, f64); 3], f64) {
+    let mut out = [(0.0, 0.0); 3];
+    for s in p.processes.iter().flat_map(|b| &b.searches) {
+        let Some(x) = split(s) else { continue };
+        let cost = s.time_cost.unwrap_or(0.0);
+        for (k, part) in [x.model, x.checks, x.rest].into_iter().enumerate() {
+            out[k].0 += part;
+            if x.wall > 0.0 { out[k].1 += cost * part / x.wall; }
+        }
+    }
+    (out, p.processes.iter().filter_map(|b| b.check_seconds).sum())
 }
 
 /// How a search's ranks are shown: one value every candidate has (or none
@@ -1880,6 +1946,29 @@ mod tests {
         assert_eq!(rank_note(&s, &rank_shown(&s)).unwrap(), "Rank is −lines, shown against the base's 11376 (#0★ raw −11357); selected #0 by fewest lines: −19 against #1's −4");
         // Ranks that are not −lines of one base stay as recorded.
         assert_eq!(rank_shown(&ranked("compaction", 0, &[(-5, 1, 1, 0), (-100, 1, 1, 0)])), RankShown::Raw);
+    }
+
+    #[test]
+    fn a_searchs_wall_time_splits_by_its_slowest_agent_process() {
+        let s: SearchTrace = serde_json::from_value(serde_json::json!({ "kind": "code", "time": 1, "seconds": 600.0, "time_cost": 20.0, "candidates": [
+            { "index": 0, "harness_seconds": 300.0, "check_seconds": 100.0 }, { "index": 1, "harness_seconds": 420.0, "check_seconds": 120.0 }, { "index": 2 }] })).unwrap();
+        let x = split(&s).unwrap();
+        assert_eq!((x.model, x.checks, x.rest, x.slowest, x.model_all, x.checks_all, x.n), (420.0, 120.0, 60.0, Some(1), 720.0, 220.0, 2));
+        // The parts sum to the wall time, never past it; a search that has not reported has none.
+        let mut long = s.clone(); long.seconds = Some(500.0);
+        let y = split(&long).unwrap();
+        assert_eq!(y.model + y.checks + y.rest, 500.0);
+        assert!(y.rest >= 0.0);
+        let mut running = s.clone(); running.time = None;
+        assert!(split(&running).is_none());
+        // Summed over a projection, each part carries its share of the time cost.
+        let mut p = Projection::default();
+        p.processes = vec![serde_json::from_value(serde_json::json!({ "pid": 1, "check_seconds": 30.0 })).unwrap()];
+        p.processes[0].searches = vec![s];
+        let (parts, trunk) = time_split(&p);
+        assert_eq!((parts[0], parts[1], parts[2], trunk), ((420.0, 14.0), (120.0, 4.0), (60.0, 2.0), 30.0));
+        assert_eq!(dur(468.0), "7m48s");
+        assert_eq!(dur(31.0 * 3600.0 + 300.0), "31h05m");
     }
 
     #[test]
