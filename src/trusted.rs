@@ -213,6 +213,38 @@ pub struct Price {
     pub cache_write: f64,
     /// Input written to the prompt cache, longer TTL (Claude 1 hour, OpenAI 12 hours).
     pub cache_write_long: f64,
+    /// The provider's higher rate for a large request, if it has one. None: one rate.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<Tier>,
+}
+
+/// A large request's prices: a request whose prompt (input, cache reads and
+/// cache writes together) is more than `above` tokens is billed `multiplier`
+/// times every input-side price and `output_multiplier` (default 1) times the
+/// output price. Both from the provider's price list, never guessed.
+#[derive(Deserialize, serde::Serialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Tier {
+    pub above: u64,
+    pub multiplier: f64,
+    #[serde(default = "one")]
+    pub output_multiplier: f64,
+}
+
+fn one() -> f64 { 1.0 }
+
+impl Price {
+    /// The prices one request of `prompt` tokens is billed at.
+    fn at(&self, prompt: f64) -> Price {
+        match &self.tier {
+            Some(t) if prompt > t.above as f64 => Price {
+                input: self.input * t.multiplier, cached_input: self.cached_input * t.multiplier,
+                cache_write: self.cache_write * t.multiplier, cache_write_long: self.cache_write_long * t.multiplier,
+                output: self.output * t.output_multiplier, tier: None,
+            },
+            _ => self.clone(),
+        }
+    }
 }
 
 /// Dollars to microdollars, the unit of every cost and limit.
@@ -1059,19 +1091,28 @@ fn harness_argv(h: &Harness, config: &Config, dir: &std::path::Path, writable: &
 }
 
 /// API-equivalent cost in microdollars, from the harness's token counts and the
-/// manifest's price table: (bon's figure, the harness's own figure if it reports one).
-/// Claude: the final `result` event's `modelUsage`, per model, with 5-minute and
-/// 1-hour cache writes apart. Codex: the last `turn.completed`, whose usage is a
-/// running total; cached and cache-write tokens are part of `input_tokens`.
+/// manifest's price table: (bon's figure, the harness's own figure if it reports
+/// one: a figure of 0, or none, is not reported). Claude: the final `result`
+/// event's `modelUsage`, per model, with 5-minute and 1-hour cache writes apart.
+/// Codex: the last `turn.completed`, whose usage is a running total; cached and
+/// cache-write tokens are part of `input_tokens`.
+///
+/// A price's tier is per request, so it applies where the output says what each
+/// request's prompt was: a `result` with `"requests": 1` (bon-sample's) is one
+/// request per model; otherwise each of Claude's `assistant` events carries its
+/// request's usage, and a request over the threshold is charged the difference.
+/// Codex's running total says nothing per request: no tier.
 fn generation(h: &Harness, config: &Config, stdout: &str) -> Result<(u64, Option<u64>, HashMap<String, Price>), String> {
     let price = |model: &str| config.prices.get(model).ok_or(format!("no price for model {model}"));
     let rate = |p: &Price, input: f64, cached: f64, output: f64, write: f64, write_long: f64| {
         (input * p.input + cached * p.cached_input + output * p.output + write * p.cache_write + write_long * p.cache_write_long) / 1_000_000.0
     };
     if is_stub(h) { return Ok((0, Some(0), HashMap::new())); }
+    let reported = |theirs: f64| Some(micro(theirs)).filter(|c| *c > 0);
     let mut events = stdout.lines().rev().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok());
     if h.name == "claude" {
         let Some(r) = events.find(|v| v["type"] == "result") else { return Err("no result event".into()) };
+        let one_request = r["requests"].as_u64() == Some(1);
         let mut ours = 0.0;
         let mut theirs = 0.0;
         let mut used = HashMap::new();
@@ -1080,10 +1121,29 @@ fn generation(h: &Harness, config: &Config, stdout: &str) -> Result<(u64, Option
             let n = |k: &str| u[k].as_f64().unwrap_or(0.0);
             let (w5, w1) = (n("cacheCreationEphemeral5mInputTokens"), n("cacheCreationEphemeral1hInputTokens"));
             let w5 = if w5 + w1 == 0.0 { n("cacheCreationInputTokens") } else { w5 };
-            ours += rate(price(model)?, n("inputTokens"), n("cacheReadInputTokens"), n("outputTokens"), w5, w1);
+            let (input, cached) = (n("inputTokens"), n("cacheReadInputTokens"));
+            let p = if one_request { price(model)?.at(input + cached + w5 + w1) } else { price(model)?.clone() };
+            ours += rate(&p, input, cached, n("outputTokens"), w5, w1);
             theirs += n("costUSD");
         }
-        Ok((micro(ours), Some(micro(theirs)), used))
+        if !one_request {
+            // Each request once, by message id: a message's blocks repeat its usage.
+            let mut requests: HashMap<String, (String, serde_json::Value)> = HashMap::new();
+            for v in stdout.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(|v| v["type"] == "assistant") {
+                let m = &v["message"];
+                if let (Some(id), Some(model)) = (m["id"].as_str(), m["model"].as_str()) { requests.insert(id.into(), (model.into(), m["usage"].clone())); }
+            }
+            for (model, u) in requests.values() {
+                let Some(p) = config.prices.get(model).filter(|p| p.tier.is_some()) else { continue };
+                let n = |k: &str| u[k].as_f64().unwrap_or(0.0);
+                let c = &u["cache_creation"];
+                let (w5, w1) = (c["ephemeral_5m_input_tokens"].as_f64().unwrap_or(0.0), c["ephemeral_1h_input_tokens"].as_f64().unwrap_or(0.0));
+                let w5 = if w5 + w1 == 0.0 { n("cache_creation_input_tokens") } else { w5 };
+                let (input, cached, output) = (n("input_tokens"), n("cache_read_input_tokens"), n("output_tokens"));
+                ours += rate(&p.at(input + cached + w5 + w1), input, cached, output, w5, w1) - rate(p, input, cached, output, w5, w1);
+            }
+        }
+        Ok((micro(ours), reported(theirs), used))
     } else {
         let Some(t) = events.find(|v| v["type"] == "turn.completed") else { return Err("no turn.completed event".into()) };
         let n = |k: &str| t["usage"][k].as_f64().unwrap_or(0.0);
@@ -2522,6 +2582,38 @@ mod tests {
         let (ours, theirs, prices) = generation(&c.harness[0], &c, out).unwrap();
         assert_eq!((ours, theirs), (2452, Some(2452)));
         assert_eq!(prices["claude-haiku-5-5"], c.prices["claude-haiku-5-5"]);
+    }
+
+    #[test]
+    fn a_harness_cost_of_zero_or_none_is_not_reported() {
+        // bon-sample's usage line for the api and codex transports, which know no price.
+        let c = config();
+        for usage in [r#""costUSD":0.0"#, r#""costUSD":0"#, r#""x":0"#] {
+            let out = format!(r#"{{"type":"result","requests":1,"modelUsage":{{"claude-haiku-5-5":{{"inputTokens":10,"outputTokens":1000,"cacheReadInputTokens":0,{usage}}}}}}}"#);
+            assert_eq!(generation(&c.harness[0], &c, &out).unwrap(), (501, None, HashMap::from([("claude-haiku-5-5".into(), c.prices["claude-haiku-5-5"].clone())])));
+        }
+    }
+
+    #[test]
+    fn a_large_request_is_billed_at_its_tier_where_the_output_says_each_request() {
+        let mut c = config();
+        // A host file without a tier still parses (config's has none); this one has one.
+        let tiered: Price = toml::from_str("input = 0.10\ncached_input = 0.01\noutput = 0.50\ncache_write = 0.125\ncache_write_long = 0.20\ntier = { above = 100000, multiplier = 5 }").unwrap();
+        assert_eq!(tiered.tier, Some(Tier { above: 100_000, multiplier: 5.0, output_multiplier: 1.0 }));
+        c.prices.insert("claude-haiku-5-5".into(), tiered);
+        let h = &c.harness[0];
+        // One request (bon-sample's), 150k-token prompt: input side 5x, output 1x.
+        let one = r#"{"type":"result","requests":1,"modelUsage":{"claude-haiku-5-5":{"inputTokens":10,"cacheReadInputTokens":150000,"outputTokens":1000}}}"#;
+        assert_eq!(generation(h, &c, one).unwrap().0, 5 * (1 + 1500) + 500);
+        // The same total over requests unknown: no tier can be told apart.
+        assert_eq!(generation(h, &c, &one.replace(r#""requests":1,"#, "")).unwrap().0, 1 + 1500 + 500);
+        // A session: each assistant message is one request (a repeated id once); only the large one is tiered.
+        let session = r#"{"type":"assistant","message":{"id":"a","model":"claude-haiku-5-5","usage":{"input_tokens":10,"cache_read_input_tokens":150000,"output_tokens":1000}}}
+{"type":"assistant","message":{"id":"a","model":"claude-haiku-5-5","usage":{"input_tokens":10,"cache_read_input_tokens":150000,"output_tokens":1000}}}
+{"type":"assistant","message":{"id":"b","model":"claude-haiku-5-5","usage":{"input_tokens":6,"cache_read_input_tokens":1000,"output_tokens":100}}}
+{"type":"result","modelUsage":{"claude-haiku-5-5":{"inputTokens":16,"cacheReadInputTokens":151000,"outputTokens":1100,"costUSD":0.008}}}"#;
+        // Base 1.6 + 1510 + 550, and request a's input side again four times over.
+        assert_eq!(generation(h, &c, session).unwrap(), (8066, Some(8000), HashMap::from([("claude-haiku-5-5".into(), c.prices["claude-haiku-5-5"].clone())])));
     }
 
     #[test]

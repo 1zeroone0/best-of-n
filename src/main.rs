@@ -725,6 +725,15 @@ cargo_home = "/opt/bon/cargo-home"
 # Dollars per million tokens, API list prices, by canonical model id. Keep only
 # the models in use. cache_write is the shorter TTL (Claude 5m, OpenAI 30m),
 # cache_write_long the longer (Claude 1h, OpenAI 12h). As of 2026-11-03.
+#
+# A model whose provider bills a large request at a higher rate takes a tier:
+#   tier = { above = <prompt tokens>, multiplier = <x>, output_multiplier = <x> }
+# A request whose prompt (input, cache reads and cache writes together) is over
+# `above` tokens is billed `multiplier` times every input-side price and
+# `output_multiplier` (default 1) times output. Copy both from the provider's
+# price list; without a tier, every request is billed at the one rate. bon
+# applies it per request where the harness says what each request was (Claude's
+# events, bon-sample); codex's running total cannot say, so it never applies there.
 [prices]
 "claude-haiku-5-5" = { input = 0.10, cached_input = 0.01, output = 0.50, cache_write = 0.125, cache_write_long = 0.20 }
 "gpt-6.1-sol" = { input = 2.00, cached_input = 0.10, output = 10.00, cache_write = 2.50, cache_write_long = 5.00 }

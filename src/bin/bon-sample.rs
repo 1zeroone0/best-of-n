@@ -310,13 +310,14 @@ impl From<String> for Failure { fn from(why: String) -> Self { Failure { why, sp
 
 type Env<'a> = &'a dyn Fn(&str) -> Option<String>;
 
-/// The usage line, shaped like the Claude CLI's final `result` event.
+/// The usage line, shaped like the Claude CLI's final `result` event. No
+/// `costUSD`: this transport knows no price, and bon prices the tokens itself.
+/// `requests`: one, so bon can apply a price's tier for a large prompt.
 fn usage_line(model: &str, input: u64, cache_read: u64, cache_write_5m: u64, cache_write_1h: u64, output: u64) -> serde_json::Value {
-    serde_json::json!({ "type": "result", "modelUsage": { model: {
+    serde_json::json!({ "type": "result", "requests": 1, "modelUsage": { model: {
         "inputTokens": input, "cacheReadInputTokens": cache_read, "outputTokens": output,
         "cacheCreationInputTokens": cache_write_5m + cache_write_1h,
         "cacheCreationEphemeral5mInputTokens": cache_write_5m, "cacheCreationEphemeral1hInputTokens": cache_write_1h,
-        "costUSD": 0.0,
     } } })
 }
 
@@ -400,7 +401,8 @@ fn via_claude(a: &Args, ctx: &Context, prompt: &str, env: Env) -> Result<Reply, 
     let (ok, out, err) = run_with_stdin(c, &format!("{}\n{prompt}", ctx.repository))?;
     let v = out.lines().rev().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).find(|v| v["type"] == "result")
         .ok_or(format!("claude printed no result{}: {}", if ok { "" } else { " and failed" }, err.trim()))?;
-    let usage = serde_json::json!({ "type": "result", "modelUsage": v["modelUsage"], "total_cost_usd": v["total_cost_usd"] });
+    // One prompt, no tools: one request (bon applies a price's tier per request).
+    let usage = serde_json::json!({ "type": "result", "requests": 1, "modelUsage": v["modelUsage"], "total_cost_usd": v["total_cost_usd"] });
     let text = v["result"].as_str().unwrap_or("").to_string();
     if v["is_error"] == true || !ok {
         return Err(Failure { why: format!("claude: {}", v["subtype"].as_str().unwrap_or("error")), spent: Some(Reply { text, usage }) });
@@ -657,6 +659,9 @@ mod tests {
         assert_eq!(last["type"], "result");
         let u = &last["modelUsage"]["claude-haiku-5-5"];
         assert_eq!((u["inputTokens"].as_u64(), u["cacheCreationInputTokens"].as_u64(), u["outputTokens"].as_u64()), (Some(12), Some(700), Some(40)));
+        // No price here: no cost figure, so bon's own stands alone; one request.
+        assert!(u.get("costUSD").is_none());
+        assert_eq!(last["requests"], 1);
         assert!(o.stdout.starts_with("@@@ FILE src/lib.rs"));
     }
 
