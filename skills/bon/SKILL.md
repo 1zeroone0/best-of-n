@@ -217,8 +217,10 @@ Read the trace and bring the finding:
 
 - **Fewer than two verified:** the spec change is too big, or a check is
   wrong. Propose where to split it, or name the check.
-- **Verified candidates disagree, or a counterexample splits them:** the spec
-  allows two behaviors. Propose the spec or test that decides.
+- **Disagree:** verified candidates showed more than one behavior and no
+  blind test split them: the spec allows each. Propose the spec or test that
+  decides. (A test that did split them already landed, and the next attempt
+  ran from it.)
 - **Every accepted, proved candidate changed a protected file:** search found
   the change but may not make it. `bon` prints the diff; review it, apply it,
   `bon check`, run again. Bring engineer only what you cannot resolve.

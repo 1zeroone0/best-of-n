@@ -258,7 +258,7 @@ pub struct Params {
     pub authority: String,
 }
 
-/// A search's goal: a trunk commit, a selected candidate, or a transcript.
+/// A search's goal: a trunk commit, a candidate of a search, or a transcript.
 #[derive(Deserialize, Default, Clone)]
 #[serde(default)]
 pub struct GoalRef {

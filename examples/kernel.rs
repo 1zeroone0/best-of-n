@@ -1,6 +1,7 @@
-//! An agree check: the kernel's encoding and emission of fixed searches. The
-//! contracts in gates.rs fix both exactly, so every verified candidate prints
-//! the same; a candidate that differs is wrong.
+//! An agree check: the kernel's encoding and emission of fixed searches, and
+//! its decisions on a search that diverges. The contracts in gates.rs fix them
+//! exactly, so every verified candidate prints the same; a candidate that
+//! differs is wrong.
 
 use best_of_n::exec::Kernel;
 use best_of_n::gates::{AgentProcess, Candidate, Encoding, Gates, Hash, Kind, Search};
@@ -14,6 +15,23 @@ fn candidate(commit: &str, out: u64, rank: i64) -> Candidate {
         changed: vec![t("src/a.rs"), t("src/\"quoted\"\\path.rs")],
         out: vec![Hash(out), Hash(u64::MAX)], intents: vec![(1200, t("an intent\twith a tab"))],
         accepts: vec![(-1, true), (0, false)], accepts_foils: vec![(0, false), (1, true)], rejects_counterexamples: true, measured: true, added: vec![t("tests/c_1.rs")], rank, diff: 3,
+    }
+}
+
+/// A counterexample's test: one new file, with its verdict on each member.
+fn test(commit: &str, accepts: Vec<(i64, bool)>) -> Candidate {
+    Candidate {
+        commit: t(commit), base: t("b0"), accepted: true, proved: false, changed: vec![t("tests/c_1.rs")], out: vec![], intents: vec![],
+        accepts, accepts_foils: vec![], rejects_counterexamples: false, measured: false, added: vec![t("tests/c_1.rs")], rank: 0, diff: 1,
+    }
+}
+
+/// A reason's word, as trusted code records it.
+fn word(reason: Option<best_of_n::spec::Blocked>) -> &'static str {
+    use best_of_n::spec::Blocked::*;
+    match reason {
+        None => "none", Some(TooFewVerified) => "too_few_verified", Some(TooFewTests) => "too_few_tests", Some(RejectsEvery) => "rejects_every",
+        Some(Disagree) => "disagree", Some(Undiscriminating) => "undiscriminating", Some(TrunkMoved) => "trunk_moved", Some(Refused) => "refused",
     }
 }
 
@@ -38,5 +56,23 @@ fn main() {
         println!("round trip: {}", back.as_ref().map_or(false, |b| Kernel::encode(b) == words));
         println!("selected: {:?}", back.as_ref().map(|b| Kernel::selected(b)));
         println!("found on trunk: {:?}", back.as_ref().map(|b| Kernel::found_on_trunk(b)));
+    }
+    // A code search whose two verified candidates show two behaviors (out 7 and 8):
+    // nothing is selected and nothing blocks yet; a counterexample search on it decides.
+    let search = |kind: Kind, results: Vec<Option<Candidate>>| Search {
+        kind, base: t("b0"), n: results.len(), checks: vec![t("src/spec.rs")], tests: vec![t("tests/")], trusted: vec![t("src/trusted.rs")], limit: 9, results,
+    };
+    let tested = search(Kind::Code { goal: t("c0ffee") }, vec![Some(candidate("x1", 7, 1)), None, Some(candidate("y2", 8, -2))]);
+    println!("diverges: selected {:?}, blocked {}", Kernel::selected(&tested), word(Kernel::blocked(&tested, None, None)));
+    let on = || Kind::Counterexample { goal: Some(AgentProcess { search: 0, index: 0 }) };
+    let cases = [
+        ("a test splits them", vec![Some(test("s1", vec![(0, true), (2, false)])), Some(test("s2", vec![(0, true), (2, true)]))]),
+        ("no test splits them", vec![Some(test("s1", vec![(0, true), (2, true)])), Some(test("s2", vec![(0, true)]))]),
+        ("one verified test", vec![Some(test("s1", vec![(0, true), (2, true)])), None]),
+        ("a test rejects both", vec![Some(test("s1", vec![(0, false), (2, false)])), Some(test("s2", vec![(0, true), (2, true)]))]),
+    ];
+    for (name, tests) in cases {
+        let x = search(on(), tests);
+        println!("{name}: lands {:?}, blocked {}", Kernel::lands_on(&x, &tested), word(Kernel::blocked(&tested, Some(&x), None)));
     }
 }
