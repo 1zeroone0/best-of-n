@@ -108,7 +108,9 @@ The repository holds the words; this skill does not repeat them.
 - `.bon/bon.toml`, the manifest: checks (`paths`, `test`, `verify`, `agree`,
   `rank`), harnesses and width lists `n`, limits, `rate`, `[counterexample]`
   (`path`, `build`, `run`, `tests`, `visible`), trunk.
-- `/etc/bon/host.toml`, the host file: agent's `path`, model `prices`, `jobs`.
+- `/etc/bon/host.toml`, the host file: agent's `path`, model `prices`, and
+  the pools: `generation` (model sessions at once), `checks` (checks at once,
+  the judge's and agents' own cargo), `check_threads`.
 
 ## Two levels
 
@@ -134,8 +136,8 @@ is never pushed. Compaction keeps the suite small: it may remove or merge
 those tests as long as the suite still rejects every counterexample. A
 repository that needs end to end gets deterministic simulation under one seed.
 
-**Widths.** Searches are Monte Carlo: go wide; the host's `jobs` caps how
-many run at once. Report the spread, not just the winner. Size a run to its
+**Widths.** Searches are Monte Carlo: go wide; the host's pools cap how
+many model sessions and how many checks run at once. Report the spread, not just the winner. Size a run to its
 change: a mechanical one (a rename, a doc) runs narrow, `n = [3, 6]`, by a
 commit to `bon.toml`; batch spec changes into one search; a spec change that
 the existing code still satisfies needs no search, and `bon check` shows it.

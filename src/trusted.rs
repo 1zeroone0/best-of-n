@@ -1,7 +1,7 @@
 //! Trusted code. Every function the verified code calls from here is
 //! `#[verifier::external_body]`: Verus does not check it. The TCB is this file,
-//! the entry points (main.rs, view.rs), plus what they run: git, sudo, tar, chmod, the harnesses (`claude`, `codex`)
-//! and the checks the manifest declares.
+//! the entry points (main.rs, view.rs), plus what they run: git, sudo, tar, chmod, the harnesses (`claude`, `codex`),
+//! perl (bon's cargo, `CARGO`) and the checks the manifest declares.
 //!
 //! It observes and reports facts; it decides nothing. Every decision is a gate.
 //!
@@ -70,9 +70,10 @@ pub struct Config {
     /// Prices by canonical model, from the host file.
     #[serde(skip)]
     pub prices: HashMap<String, Price>,
-    /// How many agent processes run at once, from the host file.
+    /// How many model sessions and how many checks run at once, from the host
+    /// file and bon's environment.
     #[serde(skip)]
-    pub jobs: usize,
+    pub pools: Pools,
     /// RUSTUP_HOME and CARGO_HOME for agent processes and checks, from the host file.
     #[serde(skip)]
     pub toolchain: Vec<(String, String)>,
@@ -102,10 +103,23 @@ pub const HOST: &str = "/etc/bon/host.toml";
 struct Host {
     path: Vec<String>,
     prices: HashMap<String, Price>,
-    /// How many agent processes run at once; width stays what bon.toml says.
-    /// Default: half the cores.
+    /// How many model sessions run at once, host-wide; width stays what
+    /// bon.toml says. Default 64 (a session waits on the model); BON_GENERATION
+    /// overrides it.
+    #[serde(default)]
+    generation: Option<usize>,
+    /// The generation pool's earlier name, read when `generation` is absent.
     #[serde(default)]
     jobs: Option<usize>,
+    /// How many checks run at once, host-wide: the judge's and every cargo an
+    /// agent process runs. Default: cores / check_threads, never more than
+    /// free memory / 1.5 GB. BON_CHECKS overrides it.
+    #[serde(default)]
+    checks: Option<usize>,
+    /// Threads one check may use (CARGO_BUILD_JOBS, Verus --num-threads).
+    /// Default 2; BON_CHECK_THREADS overrides it.
+    #[serde(default)]
+    check_threads: Option<usize>,
     /// The toolchain checks judge with, where no agent process can write it
     /// (/opt/bon, root's all the way up): rustup's home, and a cargo home whose
     /// root is root's, only its caches agent's. Required.
@@ -235,7 +249,8 @@ fn as_agent(config: &Config, dir: &std::path::Path, env: &[(&str, String)], argv
 
 /// Whether this process already runs as agent.
 fn is_agent() -> bool {
-    Command::new("id").arg("-un").output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "agent")
+    static AGENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *AGENT.get_or_init(|| Command::new("id").arg("-un").output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "agent"))
 }
 
 /// as_agent, with PATH path.
@@ -257,13 +272,28 @@ fn as_agent_on(config: &Config, path: &[String], dir: &std::path::Path, env: &[(
 
 /// Run to completion or kill at `time`, with all it started. Returns (exit 0,
 /// stdout, killed).
-fn supervise(mut c: Command, stdin: Option<String>, time: Duration, log: &std::path::Path) -> (bool, String, bool) {
+fn supervise(c: Command, stdin: Option<String>, time: Duration, log: &std::path::Path) -> (bool, String, bool) {
+    let r = supervised(c, stdin, time, log);
+    (r.ok, r.stdout, r.killed)
+}
+
+/// What a supervised command did: exit 0, its stdout, whether its time limit
+/// stopped it, whether it exited with a code of its own (not killed, not a
+/// signal, not a spawn that failed: only such a result may be cached), and its
+/// log as written.
+struct Run { ok: bool, stdout: String, killed: bool, exited: bool, log: String }
+
+fn supervised(mut c: Command, stdin: Option<String>, time: Duration, log: &std::path::Path) -> Run {
     std::os::unix::process::CommandExt::process_group(&mut c, 0);
     c.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
     let start = Instant::now();
     let mut child = match c.spawn() {
         Ok(ch) => ch,
-        Err(e) => { write_trace(log, format!("spawn: {e}")); return (false, String::new(), false); }
+        Err(e) => {
+            let text = format!("spawn: {e}");
+            write_trace(log, &text);
+            return Run { ok: false, stdout: String::new(), killed: false, exited: false, log: text };
+        }
     };
     if let Some(text) = stdin {
         let mut pipe = child.stdin.take().unwrap();
@@ -298,8 +328,9 @@ fn supervise(mut c: Command, stdin: Option<String>, time: Duration, log: &std::p
     let stdout = o.join().unwrap_or_default();
     let stderr = e.join().unwrap_or_default();
     let exit = if killed { "killed".to_string() } else { status.and_then(|s| s.code()).map_or("signal".into(), |c| c.to_string()) };
-    write_trace(log, format!("exit: {exit}\nseconds: {:.1}\n--- stdout\n{stdout}\n--- stderr\n{stderr}", start.elapsed().as_secs_f64()));
-    (status.map_or(false, |s| s.success()) && !killed, stdout, killed)
+    let text = format!("exit: {exit}\nseconds: {:.1}\n--- stdout\n{stdout}\n--- stderr\n{stderr}", start.elapsed().as_secs_f64());
+    write_trace(log, &text);
+    Run { ok: status.is_some_and(|s| s.success()) && !killed, stdout, killed, exited: !killed && status.and_then(|s| s.code()).is_some(), log: text }
 }
 
 // ── working directories ─────────────────────────────────
@@ -574,8 +605,10 @@ fn append_line(file: &std::path::Path, line: &str) {
 /// index in the kernel (from 0 at initialize) plus it names its trace directory.
 static FIRST_RUN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Run trunk's checks once, as agent, building trunk in the process: (every
-/// test accepts trunk, Verus verifies it). Each candidate's build starts from it.
+/// Run trunk's checks, as agent, building trunk in the process: (every test
+/// accepts trunk, Verus verifies it). Each candidate's build starts from it, so
+/// the first run in a bon process runs; a later one (the next attempt) may be
+/// answered by the verdict cache. It runs alone, so it takes every core.
 fn warm(m: &Manifest, head: &str) -> (bool, bool) {
     WARMING.store(true, std::sync::atomic::Ordering::SeqCst);
     let (config, root) = (&m.config, &m.root);
@@ -587,8 +620,10 @@ fn warm(m: &Manifest, head: &str) -> (bool, bool) {
         writable_dir(&build).ok()?;
         let log = trace_dir(root);
         traced(&log, std::fs::create_dir_all(&log));
-        let tests = config.checks.test.iter().enumerate().all(|(k, v)| run_check(config, &dir, &build, v, &log.join(format!("trunk-test-{k}"))).0);
-        let proved = config.checks.verify.iter().enumerate().all(|(k, v)| run_check(config, &dir, &build, v, &log.join(format!("trunk-verify-{k}"))).0);
+        let on = On { tree: tree_of(root, head), test: None, read: WARM.get().is_some() };
+        let run = |v: &String, name: String| run_check_with(config, &on, cores(), &dir, &build, v, &log.join(name)).0;
+        let tests = config.checks.test.iter().enumerate().all(|(k, v)| run(v, format!("trunk-test-{k}")));
+        let proved = config.checks.verify.iter().enumerate().all(|(k, v)| run(v, format!("trunk-verify-{k}")));
         result = (tests, proved);
         let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
         let _ = std::fs::remove_dir_all(&dir);
@@ -599,8 +634,9 @@ fn warm(m: &Manifest, head: &str) -> (bool, bool) {
     result
 }
 
+/// A build directory that starts as a copy-on-write clone of trunk's build:
+/// an agent process's, which its judge then reuses.
 fn build_directory(config: &Config, name: &str) -> Result<PathBuf, String> {
-    let d = scratch(name);
     // Once trunk's build is under way, wait for it and start from a clone of it.
     let warm = if WARMING.load(std::sync::atomic::Ordering::SeqCst) {
         let start = Instant::now();
@@ -609,14 +645,26 @@ fn build_directory(config: &Config, name: &str) -> Result<PathBuf, String> {
         }
         WARM.get().cloned().flatten()
     } else { None };
-    // engineer makes the directory; agent fills it with a clone of trunk's build.
+    clone_build(config, warm.as_deref(), name)
+}
+
+/// A build directory named `name`: empty, or a copy-on-write clone of `from`.
+fn clone_build(config: &Config, from: Option<&std::path::Path>, name: &str) -> Result<PathBuf, String> {
+    let d = scratch(name);
+    // engineer makes the directory; agent fills it with a clone.
     writable_dir(&d)?;
-    if let Some(w) = &warm {
+    if let Some(w) = from {
         let argv: Vec<String> = vec!["cp".into(), "-cR".into(), format!("{}/", w.display()), d.to_string_lossy().into()];
         let ok = as_agent(config, std::path::Path::new("/tmp"), &[], &argv).status().map_err(|e| e.to_string())?.success();
         if !ok { return Err(format!("{} as agent", argv.join(" "))); }
     }
     Ok(d)
+}
+
+/// agent empties a build directory; engineer removes the directory itself at cleanup.
+fn remove_build(config: &Config, d: &std::path::Path) {
+    let _ = as_agent(config, std::path::Path::new("/tmp"), &[], &["rm".into(), "-rf".into(), d.to_string_lossy().into()])
+        .stderr(Stdio::null()).status();
 }
 
 /// Remove this bon process's directories under /tmp/bon, and any left by a bon
@@ -652,14 +700,323 @@ fn hash(s: &str) -> u64 {
     u64::from_be_bytes([d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7]])
 }
 
-/// Run a command as agent in a read-only checkout. (exit 0, stdout)
-/// A check's exit (0 or not), its output, and whether its time limit stopped it.
-fn run_check(config: &Config, dir: &std::path::Path, target: &std::path::Path, command: &str, log: &std::path::Path) -> (bool, String, bool) {
-    let argv = vec!["/bin/sh".to_string(), "-c".to_string(), command.to_string()];
-    let c = as_agent_on(config, &checks_path(config), dir, &[("BON_BUILD", target.to_string_lossy().into()), ("CARGO_TARGET_DIR", target.to_string_lossy().into())], &argv);
-    let (ok, out, killed) = supervise(c, None, Duration::from_secs(config.agent_process.time), log);
-    (ok && !killed, out, killed)
+// ── pools ───────────────────────────────────────────────
+
+/// Memory one check may need: bon's own cold `cargo verus verify` peaks near
+/// 2.3 GB, a warm one near 0.7 GB.
+const CHECK_GB: f64 = 1.5;
+
+/// The host's two pools, each shared by every bon process on the host.
+/// Generation: model sessions at once; a session waits on the model, so it is
+/// wide. Checks: CPU-heavy commands at once, the judge's checks and every cargo
+/// an agent process runs alike, each given `threads` threads.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pools { pub generation: usize, pub checks: usize, pub threads: usize }
+
+impl Default for Pools { fn default() -> Self { Pools { generation: 1, checks: 1, threads: 1 } } }
+
+impl Pools {
+    /// From bon's environment, then the host file, then this machine: BON_GENERATION
+    /// (default 64, or the host's older `jobs`), BON_CHECK_THREADS (default 2),
+    /// BON_CHECKS (default `check_pool`). BON_CORES and BON_MEMORY_GB stand in
+    /// for this machine's cores and free memory, to size the pools as another
+    /// machine would.
+    fn of(host: &Host, env: &dyn Fn(&str) -> Option<String>) -> Pools {
+        let n = |k: &str| env(k).and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| *v >= 1.0);
+        let cores = n("BON_CORES").map_or_else(|| std::thread::available_parallelism().map_or(1, |c| c.get()), |c| c as usize);
+        let threads = n("BON_CHECK_THREADS").map(|t| t as usize).or(host.check_threads).unwrap_or(2).max(1);
+        let memory = || env("BON_MEMORY_GB").and_then(|v| v.trim().parse().ok()).unwrap_or_else(free_memory_gb);
+        let checks = n("BON_CHECKS").map(|c| c as usize).or(host.checks).unwrap_or_else(|| check_pool(cores, memory(), threads)).max(1);
+        let generation = n("BON_GENERATION").map(|g| g as usize).or(host.generation).or(host.jobs).unwrap_or(64).max(1);
+        Pools { generation, checks, threads }
+    }
 }
+
+/// The default check pool: one check per `threads` cores, never more than free
+/// memory holds at CHECK_GB each, at least one.
+fn check_pool(cores: usize, memory_gb: f64, threads: usize) -> usize {
+    (cores / threads.max(1)).min((memory_gb / CHECK_GB) as usize).max(1)
+}
+
+/// Memory free for checks now, in GB: vm_stat's free, inactive, speculative and
+/// purgeable pages; half of physical memory if vm_stat cannot say.
+fn free_memory_gb() -> f64 {
+    let out = Command::new("vm_stat").output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+    let page = out.lines().next().and_then(|l| l.split("page size of ").nth(1))
+        .and_then(|r| r.split_whitespace().next()).and_then(|v| v.parse::<f64>().ok());
+    let pages: f64 = out.lines().filter(|l| ["Pages free", "Pages inactive", "Pages speculative", "Pages purgeable"].iter().any(|k| l.starts_with(k)))
+        .filter_map(|l| l.rsplit(':').next()?.trim().trim_end_matches('.').parse::<f64>().ok()).sum();
+    match page {
+        Some(p) if pages > 0.0 => pages * p / 1e9,
+        _ => Command::new("sysctl").args(["-n", "hw.memsize"]).output().ok()
+            .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<f64>().ok()).unwrap_or(8e9) / 2e9,
+    }
+}
+
+/// Where slots, bon's cargo and the verdict cache live: the working
+/// directories, or agent's own when bon runs as agent (a candidate's tests).
+fn base() -> PathBuf {
+    if is_agent() { std::env::temp_dir().join("bon-agent") } else { PathBuf::from(WORKING_DIRECTORIES) }
+}
+
+/// The check pool's slot files: engineer's directory, which agent (through
+/// group bon) may write, since bon's cargo takes slots as agent.
+fn slots_dir() -> PathBuf {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        let d = base().join("checks");
+        if let Err(e) = writable_dir(&d) { eprintln!("bon: {}: {e}", d.display()); }
+        // Made here, so agent opens them read-only (a sandboxed harness may not create files).
+        for k in 0..256 {
+            let p = d.join(format!("check.{k}"));
+            if !p.exists() && std::fs::write(&p, "").is_ok() {
+                let _ = std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o644));
+            }
+        }
+        d
+    }).clone()
+}
+
+/// One slot of a host-wide pool: an flock on the file `<name>.<k>` under a
+/// directory, k below the pool's size. The kernel frees a lock when its
+/// holder's last descriptor closes, so a slot a dead process held is free at
+/// once. bon's cargo takes check slots the same way, as agent.
+struct Slot(#[allow(dead_code)] std::fs::File);
+
+/// A pool's slot as this process holds it: first a place among the process's
+/// own waiters (at most the pool's size of them look for a host-wide slot, so
+/// a wide search does not poll the slot files from every thread), then the slot.
+struct Held { _slot: Slot, _gate: Ticket }
+
+/// In-process admission to a pool: how many of this process's threads hold or
+/// seek one of its slots.
+struct Gate { taken: std::sync::Mutex<usize>, freed: std::sync::Condvar }
+static GENERATION_GATE: Gate = Gate { taken: std::sync::Mutex::new(0), freed: std::sync::Condvar::new() };
+static CHECK_GATE: Gate = Gate { taken: std::sync::Mutex::new(0), freed: std::sync::Condvar::new() };
+
+struct Ticket(&'static Gate);
+
+impl Gate {
+    fn enter(&'static self, n: usize) -> Ticket {
+        let mut taken = self.taken.lock().unwrap_or_else(|e| e.into_inner());
+        while *taken >= n.max(1) { taken = self.freed.wait(taken).unwrap_or_else(|e| e.into_inner()); }
+        *taken += 1;
+        Ticket(self)
+    }
+}
+
+impl Drop for Ticket {
+    fn drop(&mut self) {
+        *self.0.taken.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+        self.0.freed.notify_one();
+    }
+}
+
+impl Slot {
+    /// A model session's slot: generation.<k> in the working directories.
+    fn generation(config: &Config) -> Held {
+        let gate = GENERATION_GATE.enter(config.pools.generation);
+        Held { _slot: Slot::take_in(&base(), "generation", config.pools.generation), _gate: gate }
+    }
+
+    /// A check's slot: check.<k> in the slots directory.
+    fn check(config: &Config) -> Held {
+        let gate = CHECK_GATE.enter(config.pools.checks);
+        Held { _slot: Slot::take_in(&slots_dir(), "check", config.pools.checks), _gate: gate }
+    }
+
+    fn take_in(dir: &std::path::Path, name: &str, n: usize) -> Slot {
+        loop {
+            for k in 0..n.max(1) {
+                let p = dir.join(format!("{name}.{k}"));
+                // Read-only: a slot file agent made is locked the same way.
+                let f = std::fs::File::open(&p).or_else(|_| {
+                    let f = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(&p);
+                    let _ = std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o644));
+                    f
+                });
+                if let Ok(f) = f { if f.try_lock().is_ok() { return Slot(f); } }
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+    }
+}
+
+/// bon's cargo: first on the PATH of agent processes and of checks. It runs the
+/// toolchain's cargo (the next on PATH) holding a check slot for as long as that
+/// cargo and all it starts run, unless its caller holds one (BON_CHECK_SLOT, as
+/// the judge does); and it caps the threads: CARGO_BUILD_JOBS, and Verus's
+/// --num-threads for `cargo verus`. Cooperative: an agent process may call the
+/// toolchain's cargo by its path, or set BON_CHECK_SLOT, and go unpooled.
+const CARGO: &str = r#"#!/usr/bin/perl
+# bon's cargo: the toolchain's, holding one of the host's check slots, threads capped.
+use strict; use warnings; use Fcntl qw(:flock O_RDONLY O_CREAT);
+my ($slots, $n, $threads, $self) = ('@SLOTS@', @N@, @THREADS@, '@SELF@');
+$ENV{PATH} = join ':', grep { $_ ne $self } split /:/, ($ENV{PATH} // '');
+$ENV{CARGO_BUILD_JOBS} //= $threads;
+my @args = @ARGV;
+if (@args >= 2 && $args[0] eq 'verus' && $args[1] =~ /^(verify|focus|build|check)$/ && !grep { /^--num-threads/ } @args) {
+    my ($sep) = grep { $args[$_] eq '--' } 0 .. $#args;
+    if (defined $sep) { splice @args, $sep + 1, 0, '--num-threads', $threads } else { push @args, '--', '--num-threads', $threads }
+}
+my $held;  # open until exec, and after it: cargo, and all it starts, hold the slot
+unless ($ENV{BON_CHECK_SLOT}) {
+    $^F = 1023;  # the slot's descriptor survives exec
+    until ($held) {
+        for my $k (0 .. $n - 1) {
+            my $f;
+            sysopen($f, "$slots/check.$k", O_RDONLY) or sysopen($f, "$slots/check.$k", O_RDONLY | O_CREAT, 0644) or next;
+            if (flock($f, LOCK_EX | LOCK_NB)) { $held = $f; last }
+            close $f;
+        }
+        select(undef, undef, undef, 0.25) unless $held;
+    }
+    $ENV{BON_CHECK_SLOT} = 'held';
+}
+exec { 'cargo' } 'cargo', @args or die "bon's cargo: no cargo on PATH: $!\n";
+"#;
+
+/// The directory holding bon's cargo for this bon process, engineer's: agent
+/// may read and run it, never write it. None if it could not be written; then
+/// nothing is pooled or capped beyond what bon sets itself.
+fn wrapper(config: &Config) -> Option<PathBuf> {
+    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        if is_agent() { return None; }
+        let d = scratch("bin");
+        let text = CARGO.replace("@SLOTS@", &slots_dir().to_string_lossy()).replace("@N@", &config.pools.checks.to_string())
+            .replace("@THREADS@", &config.pools.threads.to_string()).replace("@SELF@", &d.to_string_lossy());
+        let p = d.join("cargo");
+        let r = std::fs::write(&p, text).and_then(|_| std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)));
+        match r { Ok(()) => Some(d), Err(e) => { eprintln!("bon: bon's cargo not written: {}: {e}", p.display()); None } }
+    }).clone()
+}
+
+/// PATH with bon's cargo first.
+fn with_wrapper(config: &Config, path: Vec<String>) -> Vec<String> {
+    wrapper(config).map(|d| d.to_string_lossy().to_string()).into_iter().chain(path).collect()
+}
+
+// ── the verdict cache ───────────────────────────────────
+
+/// What a check's result is a function of besides its command and the
+/// toolchain: the tree it runs on and the test written into it (path, bytes).
+/// `read`: whether a cached result may answer; trunk's first run in a bon
+/// process always runs, since candidates' builds start from the build it leaves.
+struct On<'a> { tree: String, test: Option<(&'a str, &'a [u8])>, read: bool }
+
+impl On<'_> {
+    /// A commit's tree, nothing written into it.
+    fn commit(root: &std::path::Path, commit: &str) -> On<'static> { On { tree: tree_of(root, commit), test: None, read: true } }
+}
+
+/// A commit's tree id; empty (never cached) if git cannot say.
+fn tree_of(root: &std::path::Path, commit: &str) -> String {
+    git(root, &["rev-parse", &format!("{commit}^{{tree}}")]).unwrap_or_default()
+}
+
+/// The cache of check results: engineer's alone (0700), never agent's.
+/// BON_VERDICTS names another (a benchmark's own, so runs do not share).
+/// None, so nothing is cached, if it cannot be made so, or another can write it.
+fn cache_dir() -> Option<PathBuf> {
+    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let d = std::env::var("BON_VERDICTS").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(WORKING_DIRECTORIES).join("verdicts"));
+        std::fs::create_dir_all(&d).ok()?;
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).ok()?;
+        // Owned by whoever owns the working directories (engineer), and by no group or other.
+        let (it, base) = (std::fs::metadata(&d).ok()?, std::fs::metadata(WORKING_DIRECTORIES).ok()?);
+        (it.uid() == base.uid() && it.mode() & 0o077 == 0).then_some(d)
+    }).clone()
+}
+
+/// The toolchain as the checks see it: the host file, their PATH and homes, the
+/// versions of rustc, cargo and Verus, and bon's cargo. Computed once per PATH.
+fn identity(config: &Config) -> String {
+    static MEMO: std::sync::Mutex<Option<HashMap<String, String>>> = std::sync::Mutex::new(None);
+    let path = checks_path(config).join(":");
+    let id = format!("{path}\0{:?}", config.toolchain);
+    let mut memo = MEMO.lock().unwrap_or_else(|e| e.into_inner());
+    memo.get_or_insert_with(HashMap::new).entry(id.clone()).or_insert_with(|| {
+        let version = |tool: &str| Command::new(tool).arg("--version").env_clear().env("PATH", &path)
+            .envs(config.toolchain.iter().map(|(k, v)| (k.as_str(), v.as_str()))).stdin(Stdio::null()).output()
+            .map_or_else(|e| e.to_string(), |o| String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr));
+        let host = std::fs::read(HOST).unwrap_or_default();
+        format!("{id}\0{}\0{}\0{}\0{}\0{}", String::from_utf8_lossy(&host), version("rustc"), version("cargo"), version("verus"), CARGO)
+    }).clone()
+}
+
+/// The cache key of a command on `on`, or None when it may not be cached: no
+/// tree, or bon running as agent (which may not keep engineer's cache).
+fn verdict_key(config: &Config, on: &On, command: &str) -> Option<String> {
+    if on.tree.is_empty() || is_agent() { return None; }
+    let mut h = Sha256::new();
+    for part in [identity(config).as_bytes(), on.tree.as_bytes(), command.as_bytes()] { h.update(part); h.update([0u8]); }
+    if let Some((path, bytes)) = on.test { h.update(path.as_bytes()); h.update([0u8]); h.update(bytes); }
+    Some(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// A cached result: (exit 0, stdout, the log it wrote when it ran).
+fn cached(key: &str) -> Option<(bool, String, String)> {
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(cache_dir()?.join(key)).ok()?).ok()?;
+    Some((v["ok"].as_bool()?, v["stdout"].as_str()?.to_string(), v["log"].as_str().unwrap_or_default().to_string()))
+}
+
+/// Keep a result: written whole, then renamed into place.
+fn store(key: &str, ok: bool, stdout: &str, log: &str) {
+    let Some(d) = cache_dir() else { return };
+    let tmp = d.join(format!(".{key}.{}", std::process::id()));
+    let text = serde_json::json!({ "ok": ok, "stdout": stdout, "log": log }).to_string();
+    if std::fs::write(&tmp, text).is_ok() { let _ = std::fs::rename(&tmp, d.join(key)); }
+}
+
+/// Answer from the cache, writing the trace's log as `cached: <key>` and the
+/// log the run wrote. (exit 0, stdout)
+fn answer(config: &Config, on: &On, command: &str, log: &std::path::Path) -> Option<(bool, String)> {
+    if !on.read { return None; }
+    let key = verdict_key(config, on, command)?;
+    let (ok, stdout, text) = cached(&key)?;
+    write_trace(log, format!("cached: {key}\n{text}"));
+    Some((ok, stdout))
+}
+
+/// One lock per key: of identical checks running at once in this bon process,
+/// one runs and the rest wait for its result.
+fn flight(key: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
+    type Flights = HashMap<String, std::sync::Arc<std::sync::Mutex<()>>>;
+    static FLIGHTS: std::sync::Mutex<Option<Flights>> = std::sync::Mutex::new(None);
+    FLIGHTS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).entry(key.to_string()).or_default().clone()
+}
+
+/// Run a check as agent in a read-only checkout, holding a check slot, with the
+/// pool's threads; or answer it from the cache. A check's exit (0 or not), its
+/// output, and whether its time limit stopped it. Only a run that exited with
+/// a code of its own is cached: never one killed, signalled or not started.
+fn run_check(config: &Config, on: &On, dir: &std::path::Path, target: &std::path::Path, command: &str, log: &std::path::Path) -> (bool, String, bool) {
+    run_check_with(config, on, config.pools.threads, dir, target, command, log)
+}
+
+/// run_check with `threads` threads: trunk's build, which every candidate
+/// waits on, and `bon check`, which engineer waits on, take the machine.
+fn run_check_with(config: &Config, on: &On, threads: usize, dir: &std::path::Path, target: &std::path::Path, command: &str,
+                  log: &std::path::Path) -> (bool, String, bool) {
+    let key = verdict_key(config, on, command);
+    let one = key.as_deref().map(flight);
+    let _one = one.as_ref().map(|f| f.lock().unwrap_or_else(|e| e.into_inner()));
+    if let Some((ok, out)) = answer(config, on, command, log) { return (ok, out, false); }
+    let argv = vec!["/bin/sh".to_string(), "-c".to_string(), command.to_string()];
+    let t = target.to_string_lossy().to_string();
+    let env = [("BON_BUILD", t.clone()), ("CARGO_TARGET_DIR", t), ("CARGO_BUILD_JOBS", threads.to_string()), ("BON_CHECK_SLOT", "held".to_string())];
+    let c = as_agent_on(config, &with_wrapper(config, checks_path(config)), dir, &env, &argv);
+    let _slot = Slot::check(config);
+    let r = supervised(c, None, Duration::from_secs(config.agent_process.time), log);
+    if let (Some(k), true) = (&key, r.exited) { store(k, r.ok, &r.stdout, &r.log); }
+    (r.ok && !r.killed, r.stdout, r.killed)
+}
+
+/// Every core: for the checks something waits on alone.
+fn cores() -> usize { std::thread::available_parallelism().map_or(1, |c| c.get()) }
 
 // ── harnesses ───────────────────────────────────────────
 
@@ -667,7 +1024,10 @@ fn run_check(config: &Config, dir: &std::path::Path, target: &std::path::Path, c
 fn is_stub(h: &Harness) -> bool { h.name == STUB }
 const STUB: &str = "stub";
 
-fn harness_argv(h: &Harness, config: &Config, dir: &std::path::Path) -> Vec<String> {
+/// The harness's argv. `writable`: directories besides the working directory
+/// the session writes (its build, the check slots), for a harness that
+/// sandboxes its commands to the working directory (codex).
+fn harness_argv(h: &Harness, config: &Config, dir: &std::path::Path, writable: &[PathBuf]) -> Vec<String> {
     if let Some(c) = &h.command { return c.clone(); }
     match h.name.as_str() {
         "claude" => vec![
@@ -676,11 +1036,16 @@ fn harness_argv(h: &Harness, config: &Config, dir: &std::path::Path) -> Vec<Stri
             "--permission-mode", "bypassPermissions", "--model", &h.model,
             "--max-budget-usd", &format!("{}", config.agent_process.limit),
         ].into_iter().map(String::from).collect(),
-        _ => vec![
-            "codex", "exec", "--json", "--ephemeral", "--ignore-rules", "--skip-git-repo-check",
-            "--sandbox", "workspace-write", "--color", "never", "-m", &h.model,
-            "-C", &dir.to_string_lossy(), "-",
-        ].into_iter().map(String::from).collect(),
+        _ => {
+            let mut argv: Vec<String> = vec![
+                "codex", "exec", "--json", "--ephemeral", "--ignore-rules", "--skip-git-repo-check",
+                "--sandbox", "workspace-write", "--color", "never", "-m", &h.model,
+                "-C", &dir.to_string_lossy(),
+            ].into_iter().map(String::from).collect();
+            for w in writable { argv.push("--add-dir".into()); argv.push(w.to_string_lossy().into()); }
+            argv.push("-".into());
+            argv
+        }
     }
 }
 
@@ -801,11 +1166,11 @@ pub fn manifest(root: &str, commit: &Commit) -> (r: Result<Manifest, String>) {
     let mut config: Config = toml::from_str(&text).map_err(|e| format!("{MANIFEST}: {e}"))?;
     let host: Host = toml::from_str(&std::fs::read_to_string(HOST).map_err(|_| format!("no {HOST}; run bon setup"))?)
         .map_err(|e| format!("{HOST}: {e}; run bon setup"))?;
+    config.pools = Pools::of(&host, &|k| std::env::var(k).ok());
     config.path = host.path;
     config.prices = host.prices;
     config.toolchain = vec![("RUSTUP_HOME".to_string(), host.rustup_home), ("CARGO_HOME".to_string(), host.cargo_home)];
     cargo_config_guard(&root)?;
-    config.jobs = host.jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1)));
     for h in config.harness.iter().chain(config.counterexample.harness.iter()) {
         if !is_stub(h) && !config.prices.contains_key(&h.model) {
             return Err(format!("{HOST}: no price for {}; bon.toml must name canonical model ids", h.model));
@@ -851,50 +1216,6 @@ fn harnesses(config: &Config, kind: &Kind) -> Vec<Harness> {
 /// How many agent processes one harness runs on attempt `a`.
 #[verifier::external]
 fn at(h: &Harness, a: usize) -> usize { h.n.get(a).or(h.n.last()).copied().unwrap_or(0) }
-
-/// How many agent processes run at once: the host's `jobs`, at least one, never
-/// more than the search has. Width stays what bon.toml says. (queue 26)
-#[verifier::external]
-fn workers(jobs: usize, width: usize) -> usize { jobs.max(1).min(width) }
-
-/// One of the host's `jobs`, held while an agent process runs, shared by every
-/// bon process on the host: a file per slot under the working directories,
-/// naming the pid that holds it. A slot whose pid is gone is free.
-#[verifier::external]
-struct Slot(PathBuf);
-
-#[verifier::external]
-impl Slot {
-    fn take(jobs: usize) -> Slot { Slot::take_in(&PathBuf::from(WORKING_DIRECTORIES), jobs) }
-
-    fn take_in(base: &std::path::Path, jobs: usize) -> Slot {
-        let pid = std::process::id().to_string();
-        loop {
-            for k in 0..jobs.max(1) {
-                let p = base.join(format!("job.{k}"));
-                // Twice: a slot freed from a holder that is gone is taken at once.
-                for _ in 0..2 {
-                    if let Ok(mut f) = std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
-                        use std::io::Write;
-                        let _ = write!(f, "{pid}");
-                        return Slot(p);
-                    }
-                    let holder = std::fs::read_to_string(&p).unwrap_or_default();
-                    // This process's own slot is held, whatever ps can see from where it runs.
-                    let alive = holder.trim() == pid || Command::new("ps").args(["-p", holder.trim()]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success());
-                    if alive || holder.trim().is_empty() { break; }
-                    let _ = std::fs::remove_file(&p);
-                }
-            }
-            std::thread::sleep(Duration::from_secs(1));
-        }
-    }
-}
-
-#[verifier::external]
-impl Drop for Slot {
-    fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); }
-}
 
 /// Whether a harness's own status command says it is logged in, from its exit and output.
 #[verifier::external]
@@ -1034,10 +1355,12 @@ pub fn check(m: &Manifest, commit: &Commit) -> Result<Vec<(String, bool, PathBuf
     let log = trace_dir(root);
     traced(&log, std::fs::create_dir_all(&log));
     let mut out = Vec::new();
+    let on = On::commit(root, &c);
     for (kind, list) in [("test", &config.checks.test), ("verify", &config.checks.verify)] {
         for (k, v) in list.iter().enumerate() {
             let path = log.join(format!("check-{kind}-{k}"));
-            let ok = run_check(config, &dir, &build, v, &path).0;
+            // engineer waits on it alone: every core.
+            let ok = run_check_with(config, &on, cores(), &dir, &build, v, &path).0;
             out.push((v.clone(), ok, path));
         }
     }
@@ -1112,8 +1435,7 @@ fn observe_in(m: &Manifest, probe: &std::path::Path) -> Result<Observed, String>
             eprintln!("bon: missing: {object} {}", path.display());
             return Ok(None);
         }
-        let p = Permission { read: ask(path, "-r")?, write: ask(path, "-w")?, execute: ask(path, "-x")? };
-        Ok(Some(if path.is_dir() { p } else { Permission { execute: p.read, ..p } }))
+        let p = Permission { read: ask(path, "-r")?, write: ask(path, "-w")?, execute: ask(path, "-x")? };        Ok(Some(if path.is_dir() { p } else { Permission { execute: p.read, ..p } }))
     };
     let mut checks = Vec::new();
     for p in &m.config.checks.paths { checks.push(perm("check", &probe.join(p.trim_end_matches('/')))?); }
@@ -1147,16 +1469,14 @@ pub fn run(m: &Manifest, kind: &Kind, a: usize, start: &Commit, target: Option<&
     let slots: Vec<Harness> = hs.iter().flat_map(|h| std::iter::repeat(h.clone()).take(at(h, a))).collect();
     let traces = trace_dir(&m.root).join(search.to_string());
     traced(&traces, std::fs::create_dir_all(&traces));
-    // At most `jobs` agent processes at once; each worker takes the next index.
-    let next = std::sync::atomic::AtomicUsize::new(0);
+    // Every agent process at once: the generation pool bounds the model
+    // sessions, the check pool their checks and the judge's.
     let out: Vec<std::sync::Mutex<(Option<Candidate>, u64)>> = slots.iter().map(|_| std::sync::Mutex::new((None, 0))).collect();
     std::thread::scope(|scope| {
-        for _ in 0..workers(m.config.jobs, slots.len()) {
-            scope.spawn(|| loop {
-                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                let Some(h) = slots.get(i) else { break };
-                let _slot = Slot::take(m.config.jobs);
-                *out[i].lock().unwrap() = agent_process(m, kind, search, i, h, &start, target, foils, &traces.join(i.to_string()));
+        for (i, h) in slots.iter().enumerate() {
+            let (out, start, traces) = (&out, &start, &traces);
+            scope.spawn(move || {
+                *out[i].lock().unwrap() = agent_process(m, kind, search, i, h, start, target, foils, &traces.join(i.to_string()));
             });
         }
     });
@@ -1375,8 +1695,9 @@ pub fn agree_outputs(m: &Manifest, commit: &Commit) -> (r: Result<Vec<Hash>, Str
     let log = trace_dir(&m.root);
     traced(&log, std::fs::create_dir_all(&log));
     let mut out = Vec::new();
+    let on = On::commit(&m.root, &c);
     for (k, a) in m.config.checks.agree.iter().enumerate() {
-        out.push(Hash(hash(&run_check(&m.config, &dir, &build, a, &log.join(format!("goal-agree-{k}"))).1)));
+        out.push(Hash(hash(&run_check(&m.config, &on, &dir, &build, a, &log.join(format!("goal-agree-{k}"))).1)));
     }
     let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
     let _ = std::fs::remove_dir_all(&dir);
@@ -1400,6 +1721,9 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
                  target: Option<&Search>, foils: Option<&Search>, trace: &std::path::Path) -> (Option<Candidate>, u64) {
     traced(trace, std::fs::create_dir_all(trace));
     let config = &m.config;
+    // A generation slot for the session and its setup alone: never held while
+    // its candidate is judged.
+    let session = Slot::generation(config);
     let dir = scratch(&format!("{search}.{index}/{}", repository_name(&m.root)));
     // What each kind may not write, made structural: code, the counterexamples' tests.
     let (writable, more) = match kind {
@@ -1419,24 +1743,30 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
             prune(&dir, &keep);
         }
     }
-    let argv = harness_argv(h, config, &dir);
+    // Its own build, a clone of trunk's, which its judge reuses: its first cargo
+    // is warm, and the judge builds only what changed since its last.
+    let build = match build_directory(config, &format!("{search}.{index}.build/build")) {
+        Ok(b) => b,
+        Err(e) => { write_trace(&trace.join("error"), e); return (None, 0); }
+    };
+    let argv = harness_argv(h, config, &dir, &[build.clone(), slots_dir()]);
     write_trace(&trace.join("argv"), argv.join(" "));
     let text = prompt(kind, config, &aim(m, kind, target, start));
     write_trace(&trace.join("prompt"), &text);
-    let c = as_agent(config, &dir, &[], &argv);
+    let b = build.to_string_lossy().to_string();
+    let env = [("CARGO_TARGET_DIR", b.clone()), ("BON_BUILD", b), ("CARGO_BUILD_JOBS", config.pools.threads.to_string())];
+    let c = as_agent_on(config, &with_wrapper(config, config.path.clone()), &dir, &env, &argv);
     let (_, stdout, killed) = supervise(c, Some(text), Duration::from_secs(config.agent_process.time), &trace.join("harness"));
+    drop(session);
     // Without token counts there is no measured cost: charge the whole limit.
     let (spent, harness_cost, prices) = generation(h, config, &stdout).unwrap_or((micro(config.agent_process.limit), None, HashMap::new()));
     if killed { write_trace(&trace.join("killed"), "time limit"); }
-    let candidate = capture(m, kind, search, index, start, &dir, target, foils, trace).map_err(|e| {
+    let candidate = capture(m, kind, search, index, start, &dir, &build, target, foils, trace).map_err(|e| {
         write_trace(&trace.join("error"), &e);
     }).ok();
     let _ = Command::new("chmod").args(["-R", "-N"]).arg(&dir).stderr(Stdio::null()).status();
     let _ = std::fs::remove_dir_all(&dir);
-    let build = scratch(&format!("{search}.{index}.build/build"));
-    // agent empties its build directory; engineer removes the directory itself at cleanup.
-    let _ = as_agent(config, std::path::Path::new("/tmp"), &[], &["rm".into(), "-rf".into(), build.to_string_lossy().into()])
-        .stderr(Stdio::null()).status();
+    remove_build(config, &build);
     let text = |v: &[char]| v.iter().collect::<String>();
     // Lines added and removed, apart: the kernel's diff is their sum.
     let (added, removed) = candidate.as_ref().map_or((0, 0), |c| added_removed(&m.root, &text(&c.base), &text(&c.commit)));
@@ -1464,7 +1794,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
 /// observe it: changed paths, diff, tests, Verus, agree outputs, rank, and what
 /// its test accepts.
 #[allow(clippy::too_many_arguments)]
-fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, dir: &std::path::Path,
+fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, dir: &std::path::Path, build: &std::path::Path,
            target: Option<&Search>, foils: Option<&Search>, trace: &std::path::Path) -> Result<Candidate, String> {
     let root = &m.root;
     let config = &m.config;
@@ -1511,7 +1841,8 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
     // Checks run in a read-only checkout, as agent.
     let cdir = scratch(&format!("{search}.{index}.check/{}", repository_name(root)));
     check_directory(root, &commit, &cdir)?;
-    let build = build_directory(config, &format!("{search}.{index}.build/build"))?;
+    // Keyed by the candidate's tree: a byte-identical sibling's checks run once.
+    let on = On { tree: tree.clone(), test: None, read: true };
     let trunk_proved = TRUNK_PROVED.load(std::sync::atomic::Ordering::SeqCst);
     let mut accepted = true;
     let mut proved = true;
@@ -1524,28 +1855,28 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
     match kind {
         Kind::Code { .. } | Kind::Compaction { .. } | Kind::Foil { .. } => {
             for (k, v) in config.checks.test.iter().enumerate() {
-                if !run_check(config, &cdir, &build, v, &trace.join(format!("test-{k}"))).0 { accepted = false; break; }
+                if !run_check(config, &on, &cdir, build, v, &trace.join(format!("test-{k}"))).0 { accepted = false; break; }
             }
             for (k, v) in config.checks.verify.iter().enumerate() {
                 if !accepted { proved = false; break; }
-                if !run_check(config, &cdir, &build, v, &trace.join(format!("verify-{k}"))).0 { proved = false; break; }
+                if !run_check(config, &on, &cdir, build, v, &trace.join(format!("verify-{k}"))).0 { proved = false; break; }
             }
             if accepted && proved && !matches!(kind, Kind::Foil { .. }) {
                 // Measured only when every agree check and the rank check exited 0, and
                 // the rank parsed: a failure's output is no measurement.
                 measured = true;
                 for (k, a) in config.checks.agree.iter().enumerate() {
-                    let (ok, text, _) = run_check(config, &cdir, &build, a, &trace.join(format!("agree-{k}")));
+                    let (ok, text, _) = run_check(config, &on, &cdir, build, a, &trace.join(format!("agree-{k}")));
                     measured &= ok;
                     out.push(Hash(hash(&text)));
                 }
                 let which = if matches!(kind, Kind::Compaction { .. }) { "compaction" } else { "code" };
                 if let Some(r) = config.checks.rank.get(which) {
-                    let (ok, text, _) = run_check(config, &cdir, &build, r, &trace.join("rank"));
+                    let (ok, text, _) = run_check(config, &on, &cdir, build, r, &trace.join("rank"));
                     match text.trim().parse() { Ok(v) if ok => rank = v, _ => measured = false }
                 }
                 if matches!(kind, Kind::Compaction { .. }) {
-                    rejects_counterexamples = rejects_every_counterexample(m, &commit, start, &build, trace);
+                    rejects_counterexamples = rejects_every_counterexample(m, &commit, start, build, trace);
                 }
             }
         }
@@ -1555,7 +1886,7 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
             let test = std::fs::read(dir.join(&config.counterexample.path)).ok();
             written = test.clone();
             accepted = match &test {
-                Some(bytes) => test_on(m, &tested_tree(kind, target, start), bytes, &build, &config.counterexample.build, &trace.join("build")),
+                Some(bytes) => test_on(m, &tested_tree(kind, target, start), bytes, build, &config.counterexample.build, &trace.join("build")),
                 None => false,
             };
             proved = trunk_proved;
@@ -1573,17 +1904,22 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
             // build there, or whose run times out or cannot be set up, has no result,
             // which the spec reads as saying nothing (never a split, never a rejection).
             if let (true, Some(bytes)) = (accepted, &test) {
-                for (j, mc) in members {
-                    if let Some(a) = verdict(m, &mc, bytes, &build, &trace.join(format!("accepts-{j}"))) { accepts.push((j, a)); }
-                }
+                // (member or foil, its index, its commit, its log)
+                let mut tasks: Vec<(bool, i64, String, PathBuf)> = members.into_iter()
+                    .map(|(j, mc)| (false, j, mc, trace.join(format!("accepts-{j}")))).collect();
                 // Each foil: a program trunk's tests accept and Verus rejects. The
                 // spec decides which results are foils; every result is run.
                 if let Some(f) = foils {
                     for (j, r) in f.results.iter().enumerate() {
                         let Some(c) = r else { continue };
-                        let fc: String = c.commit.iter().collect();
-                        if let Some(a) = verdict(m, &fc, bytes, &build, &trace.join(format!("accepts-foil-{j}"))) { accepts_foils.push((j as i64, a)); }
+                        tasks.push((true, j as i64, c.commit.iter().collect(), trace.join(format!("accepts-foil-{j}"))));
                     }
+                }
+                let on: Vec<(String, PathBuf)> = tasks.iter().map(|(_, _, c, l)| (c.clone(), l.clone())).collect();
+                let results = verdicts(m, &on, bytes, build, &format!("{search}.{index}"));
+                for ((foil, j, _, _), r) in tasks.into_iter().zip(results) {
+                    let Some(a) = r else { continue };
+                    if foil { accepts_foils.push((j, a)); } else { accepts.push((j, a)); }
                 }
             }
         }
@@ -1715,7 +2051,20 @@ fn added(root: &std::path::Path, base: &str, commit: &str) -> Result<Vec<Path>, 
 /// verdict: the checkout or the test could not be set up, the test does not
 /// build there, or its run hit the time limit.
 fn verdict(m: &Manifest, commit: &str, test: &[u8], build: &std::path::Path, log: &std::path::Path) -> Option<bool> {
+    verdict_in(m, commit, test, &|| Some(build.to_path_buf()), log)
+}
+
+/// verdict, with its build directory made only when a check must run: the
+/// cache answers the rest without a checkout or a build.
+fn verdict_in(m: &Manifest, commit: &str, test: &[u8], build: &dyn Fn() -> Option<PathBuf>, log: &std::path::Path) -> Option<bool> {
     let config = &m.config;
+    let (make, run) = (&config.counterexample.build, &config.counterexample.run);
+    let on = On { tree: tree_of(&m.root, commit), test: Some((config.counterexample.path.as_str(), test)), read: true };
+    match answer(config, &on, make, &log.with_extension("build")) {
+        Some((false, _)) => return None,
+        Some((true, _)) => if let Some((ok, _)) = answer(config, &on, run, log) { return Some(ok) },
+        None => {}
+    }
     let dir = scratch(&format!("test.{}/{}", hash(&format!("{commit}{log:?}")), repository_name(&m.root)));
     let result = (|| {
         materialize(&m.root, commit, &dir).ok()?;
@@ -1723,14 +2072,54 @@ fn verdict(m: &Manifest, commit: &str, test: &[u8], build: &std::path::Path, log
         std::fs::create_dir_all(p.parent().unwrap_or(&dir)).ok()?;
         std::fs::write(&p, test).ok()?;
         let _ = Command::new("chmod").args(["-R", "a-w,g+rX"]).arg(&dir).status();
-        let (built, _, _) = run_check(config, &dir, build, &config.counterexample.build, &log.with_extension("build"));
+        let build = build()?;
+        let (built, _, _) = run_check(config, &on, &dir, &build, make, &log.with_extension("build"));
         if !built { return None; }
-        let (ok, _, killed) = run_check(config, &dir, build, &config.counterexample.run, log);
+        let (ok, _, killed) = run_check(config, &on, &dir, &build, run, log);
         (!killed).then_some(ok)
     })();
     let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
     let _ = std::fs::remove_dir_all(&dir);
     result
+}
+
+/// A test's verdict on each of `tasks` (a commit, its log), at once through the
+/// check pool. Tasks on one tree run one after another, so the first's result
+/// answers the rest from the cache; a verdict that must run builds in its own
+/// copy-on-write clone of `build` (cargo locks a build directory: one build at
+/// a time), removed after. `name` names those clones.
+fn verdicts(m: &Manifest, tasks: &[(String, PathBuf)], test: &[u8], build: &std::path::Path, name: &str) -> Vec<Option<bool>> {
+    let config = &m.config;
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    for (i, (commit, _)) in tasks.iter().enumerate() {
+        let tree = tree_of(&m.root, commit);
+        match groups.iter_mut().find(|(t, _)| !t.is_empty() && *t == tree) {
+            Some((_, g)) => g.push(i),
+            None => groups.push((tree, vec![i])),
+        }
+    }
+    let out: Vec<std::sync::Mutex<Option<bool>>> = tasks.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..config.pools.checks.max(1).min(groups.len()) {
+            scope.spawn(|| loop {
+                let g = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some((_, group)) = groups.get(g) else { break };
+                for &i in group {
+                    let (commit, log) = &tasks[i];
+                    let made: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+                    let make = || {
+                        let d = clone_build(config, Some(build), &format!("{name}.verdict.{i}/build")).ok()?;
+                        *made.lock().unwrap() = Some(d.clone());
+                        Some(d)
+                    };
+                    *out[i].lock().unwrap() = verdict_in(m, commit, test, &make, log);
+                    if let Some(d) = made.into_inner().unwrap() { remove_build(config, &d); }
+                }
+            });
+        }
+    });
+    out.into_iter().map(|r| r.into_inner().unwrap_or(None)).collect()
 }
 
 /// Whether a test accepts `commit`: a read-only checkout of it with the test at
@@ -1752,13 +2141,15 @@ fn test_on(m: &Manifest, commit: &str, test: &[u8], build: &std::path::Path, com
     let config = &m.config;
     let (path, run) = (&config.counterexample.path, command);
     let dir = scratch(&format!("test.{}/{}", hash(&format!("{commit}{log:?}")), repository_name(&m.root)));
+    let on = On { tree: tree_of(&m.root, commit), test: Some((path.as_str(), test)), read: true };
+    if let Some((ok, _)) = answer(config, &on, run, log) { return ok; }
     let accepts = match materialize(&m.root, commit, &dir) {
         Ok(()) => {
             let p = dir.join(path);
             let _ = std::fs::create_dir_all(p.parent().unwrap_or(&dir));
             let _ = std::fs::write(&p, test);
             let _ = Command::new("chmod").args(["-R", "a-w,g+rX"]).arg(&dir).status();
-            run_check(config, &dir, build, run, log).0
+            run_check(config, &on, &dir, build, run, log).0
         }
         Err(_) => false,
     };
@@ -1821,27 +2212,111 @@ pub fn parse_cue(t: &str) -> Option<u64> {
 mod tests {
 
     #[test]
-    fn the_hosts_jobs_are_shared_slots_and_a_dead_holders_slot_is_free() {
+    fn slots_are_shared_and_a_dead_holders_slot_is_free() {
         let d = std::env::temp_dir().join(format!("bon-slots-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        // A slot held by a pid that is gone is taken over.
-        std::fs::write(d.join("job.0"), "999999").unwrap();
-        let a = Slot::take_in(&d, 2);
-        assert_eq!(std::fs::read_to_string(d.join("job.0")).unwrap(), std::process::id().to_string());
-        // The next takes the other slot; a third waits until one is dropped.
-        let b = Slot::take_in(&d, 2);
-        assert!(d.join("job.1").exists());
-        let waiter = { let d = d.clone(); std::thread::spawn(move || { let _c = Slot::take_in(&d, 2); }) };
-        std::thread::sleep(Duration::from_millis(1500));
+        // Another process holds slot 0, then dies without letting go: its slot is free.
+        std::fs::write(d.join("check.0"), "").unwrap();
+        let mut holder = Command::new("/usr/bin/perl").args(["-e", "open(F, '<', $ARGV[0]) or die; flock(F, 2) or die; sleep 60"]).arg(d.join("check.0")).spawn().unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        let a = Slot::take_in(&d, "check", 2);
+        assert!(std::fs::File::open(d.join("check.1")).unwrap().try_lock().is_err(), "slot 1 is taken while 0 is held");
+        let _ = holder.kill();
+        let _ = holder.wait();
+        let b = Slot::take_in(&d, "check", 2);
+        // A third waits until one is dropped.
+        let waiter = { let d = d.clone(); std::thread::spawn(move || { let _c = Slot::take_in(&d, "check", 2); }) };
+        std::thread::sleep(Duration::from_millis(1000));
         assert!(!waiter.is_finished());
         drop(a);
         waiter.join().unwrap();
         drop(b);
-        assert!(!d.join("job.0").exists() && !d.join("job.1").exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    #[test]
+    fn the_pools_are_sized_from_the_host_and_overridden_by_the_environment() {
+        let host: Host = toml::from_str("path = []\nrustup_home = \"\"\ncargo_home = \"\"\n[prices]\n").unwrap();
+        let env = |pairs: &'static [(&'static str, &'static str)]| move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string());
+        // queue 26: width stays what bon.toml says; the pools bound what runs at once.
+        // A 24 GB, 12-core laptop with 16 GB free: 6 checks of 2 threads; 64 sessions.
+        assert_eq!(Pools::of(&host, &env(&[("BON_CORES", "12"), ("BON_MEMORY_GB", "16")])), Pools { generation: 64, checks: 6, threads: 2 });
+        // Memory binds before cores: 7 GB free holds 4 checks.
+        assert_eq!(Pools::of(&host, &env(&[("BON_CORES", "14"), ("BON_MEMORY_GB", "7")])).checks, 4);
+        // Every knob by the environment; at least one of each.
+        assert_eq!(Pools::of(&host, &env(&[("BON_GENERATION", "500"), ("BON_CHECKS", "3"), ("BON_CHECK_THREADS", "4")])), Pools { generation: 500, checks: 3, threads: 4 });
+        assert_eq!(Pools::of(&host, &env(&[("BON_CORES", "1"), ("BON_MEMORY_GB", "0.5"), ("BON_CHECK_THREADS", "0")])).checks, 1);
+        // The host file's, where the environment says nothing; its older `jobs` is the generation pool.
+        let older: Host = toml::from_str("jobs = 7\nchecks = 5\ncheck_threads = 3\npath = []\nrustup_home = \"\"\ncargo_home = \"\"\n[prices]\n").unwrap();
+        assert_eq!(Pools::of(&older, &env(&[])), Pools { generation: 7, checks: 5, threads: 3 });
+        assert_eq!(check_pool(14, 40.0, 2), 7);
+    }
+
+    #[test]
+    fn bons_cargo_caps_threads_and_holds_a_check_slot_while_it_runs() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("bon-cargo-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (bin, toolchain, slots) = (d.join("bin"), d.join("toolchain"), d.join("slots"));
+        for x in [&bin, &toolchain, &slots] { std::fs::create_dir_all(x).unwrap(); }
+        let text = CARGO.replace("@SLOTS@", &slots.to_string_lossy()).replace("@N@", "1").replace("@THREADS@", "3").replace("@SELF@", &bin.to_string_lossy());
+        std::fs::write(bin.join("cargo"), text).unwrap();
+        // The toolchain's cargo, here: it says what it was given and whether slot 0 is held.
+        std::fs::write(toolchain.join("cargo"), format!("#!/bin/sh\necho \"$CARGO_BUILD_JOBS $BON_CHECK_SLOT $*\"\n/usr/bin/lockf -k -t 0 {} /usr/bin/true && echo free || echo held\n", slots.join("check.0").display())).unwrap();
+        for f in [bin.join("cargo"), toolchain.join("cargo")] { std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o755)).unwrap(); }
+        let path = format!("{}:{}:/usr/bin:/bin", bin.display(), toolchain.display());
+        let run = |args: &[&str], env: &[(&str, &str)]| {
+            let o = Command::new(bin.join("cargo")).args(args).env_clear().env("PATH", &path).envs(env.iter().copied()).output().unwrap();
+            String::from_utf8_lossy(&o.stdout).to_string()
+        };
+        assert_eq!(run(&["verus", "verify"], &[]), "3 held verus verify -- --num-threads 3\nheld\n");
+        assert_eq!(run(&["verus", "verify", "--", "--rlimit", "9"], &[]), "3 held verus verify -- --num-threads 3 --rlimit 9\nheld\n");
+        assert_eq!(run(&["verus", "verify", "--", "--num-threads", "8"], &[]), "3 held verus verify -- --num-threads 8\nheld\n");
+        // Its caller holds a slot (the judge): none taken; the threads still capped.
+        assert_eq!(run(&["test", "-q"], &[("BON_CHECK_SLOT", "held"), ("CARGO_BUILD_JOBS", "2")]), "2 held test -q\nfree\n");
+        // Done: the slot is free again.
+        assert!(std::fs::File::open(slots.join("check.0")).unwrap().try_lock().is_ok());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_check_is_cached_by_tree_command_and_test_and_never_when_killed() {
+        let mut c = config();
+        c.agent_process.time = 2;
+        let tree = format!("test-tree-{}-{:?}", std::process::id(), Instant::now());
+        let on = On { tree: tree.clone(), test: None, read: true };
+        let key = verdict_key(&c, &on, "echo hi").unwrap();
+        // Each part of the key changes it; no tree, no key.
+        assert_ne!(Some(key.clone()), verdict_key(&c, &on, "echo ho"));
+        assert_ne!(Some(key.clone()), verdict_key(&c, &On { tree: tree.clone() + "x", test: None, read: true }, "echo hi"));
+        assert_ne!(Some(key.clone()), verdict_key(&c, &On { tree: tree.clone(), test: Some(("t.rs", b"a")), read: true }, "echo hi"));
+        assert_ne!(verdict_key(&c, &On { tree: tree.clone(), test: Some(("t.rs", b"a")), read: true }, "echo hi"),
+                   verdict_key(&c, &On { tree: tree.clone(), test: Some(("t.rs", b"b")), read: true }, "echo hi"));
+        assert_eq!(verdict_key(&c, &On { tree: String::new(), test: None, read: true }, "echo hi"), None);
+        let d = std::env::temp_dir().join(format!("bon-cache-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let here = std::path::Path::new("/tmp");
+        // Runs once; the second is answered, its log saying so.
+        assert_eq!(run_check(&c, &on, here, here, "echo hi", &d.join("first")), (true, "hi\n".to_string(), false));
+        assert_eq!(run_check(&c, &on, here, here, "echo hi", &d.join("second")), (true, "hi\n".to_string(), false));
+        assert!(std::fs::read_to_string(d.join("first")).unwrap().starts_with("exit: 0"));
+        assert!(std::fs::read_to_string(d.join("second")).unwrap().starts_with(&format!("cached: {key}\nexit: 0")));
+        // A failure is a result; a run its time limit stopped is not.
+        assert!(!run_check(&c, &on, here, here, "exit 3", &d.join("failed")).0);
+        assert!(cached(&verdict_key(&c, &on, "exit 3").unwrap()).is_some_and(|(ok, _, _)| !ok));
+        let (ok, _, killed) = run_check(&c, &on, here, here, "/bin/sleep 30", &d.join("killed"));
+        assert!(!ok && killed);
+        assert!(cached(&verdict_key(&c, &on, "/bin/sleep 30").unwrap()).is_none());
+        // Not read where reading is off: it runs again.
+        let off = On { tree: tree.clone(), test: None, read: false };
+        let _ = run_check(&c, &off, here, here, "echo hi", &d.join("third"));
+        assert!(std::fs::read_to_string(d.join("third")).unwrap().starts_with("exit: 0"));
+        for k in ["echo hi", "exit 3"] { let _ = std::fs::remove_file(cache_dir().unwrap().join(verdict_key(&c, &on, k).unwrap())); }
+        let _ = std::fs::remove_dir_all(&d);
+        let _ = std::fs::remove_dir_all(PathBuf::from(WORKING_DIRECTORIES).join(format!("{}.bin", std::process::id())));
+    }
 
     #[test]
     fn a_materialized_commit_is_newer_than_any_build_before_it() {
@@ -2300,12 +2775,6 @@ mod tests {
     }
 
     #[test]
-    fn the_host_s_jobs_caps_how_many_run_at_once() {
-        // queue 26: never more than jobs at once, at least one, and width is unchanged.
-        assert_eq!((workers(4, 12), workers(16, 12), workers(0, 8), workers(3, 0)), (4, 12, 1, 0));
-    }
-
-    #[test]
     fn a_counterexample_writer_sees_the_spec_and_the_checks_never_the_code() {
         // queue 24: prune keeps only what is named; everything else is gone.
         let d = std::env::temp_dir().join(format!("bon-prune-{}", std::process::id()));
@@ -2336,7 +2805,10 @@ mod tests {
             command = ["/bin/sh", ".bon/stub.sh"]
             n = [3]"#).unwrap();
         let h = c.harness[0].clone();
-        assert_eq!(harness_argv(&h, &c, std::path::Path::new("/tmp")), ["/bin/sh", ".bon/stub.sh"]);
+        assert_eq!(harness_argv(&h, &c, std::path::Path::new("/tmp"), &[]), ["/bin/sh", ".bon/stub.sh"]);
+        // codex sandboxes to its working directory: the build and the slots are added.
+        let codex = harness_argv(&c.counterexample.harness[0], &c, std::path::Path::new("/w"), &[PathBuf::from("/b")]);
+        assert_eq!(codex[codex.len() - 3..], ["--add-dir", "/b", "-"]);
         assert_eq!(generation(&h, &c, "anything at all").unwrap(), (0, Some(0), HashMap::new()));
         // A built-in harness still needs its token counts.
         assert!(generation(&c.counterexample.harness[0], &c, "anything at all").is_err());

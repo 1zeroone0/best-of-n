@@ -92,15 +92,20 @@ OUT=$BENCH/results-$TAG
 mkdir -p "$OUT"
 run() {
   name=$1; shift
-  (cd "$WORK" && BON_CLEANUP=own python3 -I "$REPO/bench/measure.py" "$OUT/$name.json" -- "$BON" "$@" > "$OUT/$name.out" 2> "$OUT/$name.err") || true
-  # Check runs the judge executed, and those its verdict cache answered.
-  executed=$(grep -rl '^exit: ' "$WORK/.bon/traces" 2>/dev/null | grep -v '/harness$' | wc -l | tr -d ' ')
-  cached=$(grep -rl '^cached: ' "$WORK/.bon/traces" 2>/dev/null | wc -l | tr -d ' ')
-  python3 -I - "$OUT/$name.json" "$executed" "$cached" "$TAG" "$WIDTH" <<'PY'
+  # The isolation gate has failed here for reasons outside bon (another
+  # session on the host); it fails before anything runs, so try again.
+  for try in 1 2 3; do
+    (cd "$WORK" && BON_CLEANUP=own BON_VERDICTS="$SANDBOX/verdicts" python3 -I "$REPO/bench/measure.py" "$OUT/$name.json" -- "$BON" "$@" > "$OUT/$name.out" 2> "$OUT/$name.err") || true
+    grep -q 'agent is not isolated' "$OUT/$name.err" || break
+    echo "isolation gate failed; again in 30s" >&2; sleep 30
+  done
+  # Check runs the judge executed (a log that starts "exit:"), and those its
+  # verdict cache answered ("cached:"); agent processes' own runs are not counted.
+  python3 -I - "$OUT/$name.json" "$(python3 -I "$REPO/bench/count.py" "$WORK/.bon/traces")" "$TAG" "$WIDTH" <<'PY'
 import json, sys
-p, executed, cached, tag, width = sys.argv[1:6]
+p, counts, tag, width = sys.argv[1:5]
 r = json.load(open(p))
-r.update(tag=tag, width=int(width), checks_executed=int(executed), checks_cached=int(cached))
+r.update(json.loads(counts), tag=tag, width=int(width))
 json.dump(r, open(p, "w"))
 print(json.dumps(r))
 PY
@@ -108,7 +113,7 @@ PY
 }
 # Each command's traces are moved aside after it, so each counts its own.
 run code code
-mv "$WORK/.bon/traces" "$OUT/traces-code"
+mv "$WORK/.bon/traces" "$OUT/traces-code" 2>/dev/null || true
 run counterexample counterexample
-mv "$WORK/.bon/traces" "$OUT/traces-counterexample"
+mv "$WORK/.bon/traces" "$OUT/traces-counterexample" 2>/dev/null || true
 echo "results: $OUT"
