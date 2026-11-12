@@ -681,6 +681,11 @@ fn judges(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
     true
 }
 
+/// Counterexample: verified test m of x judges every member of t and rejects a foil of f.
+spec fn looked(x: spec::Search, t: spec::Search, f: spec::Search, m: int) -> bool {
+    spec::verified_at(x, m) && spec::judges(spec::at(x, m), t) && spec::discriminates(spec::at(x, m), f)
+}
+
 #[verifier::rlimit(100)]
 pub fn not_found(x: &Search, t: &Search, f: &Search) -> (r: bool)
     requires x.results.len() == x.n, t.results.len() == t.n, f.results.len() == f.n,
@@ -693,41 +698,60 @@ pub fn not_found(x: &Search, t: &Search, f: &Search) -> (r: bool)
     hide(spec::judges);
     hide(spec::discriminates);
     let ghost xv = x@;
+    let ghost tv = t@;
+    let ghost fv = f@;
     assert(spec::complete(xv)) by {
         assert forall|i: int| 0 <= i < x.n implies xv.results.contains_key(i) by {}
     }
-    assert(spec::complete(f@)) by { assert forall|j: int| 0 <= j < f.n implies f@.results.contains_key(j) by {} }
+    assert(spec::complete(fv)) by { assert forall|j: int| 0 <= j < f.n implies fv.results.contains_key(j) by {} }
     let vx = verified_each(x);
     let vt = verified_each(t);
+    // The first two verified tests that judge every member and reject a foil.
     let mut count: usize = 0;
+    let ghost mut a: int = -1;
+    let ghost mut b: int = -1;
     let mut i = 0;
     while i < vx.len()
         invariant
-            xv == x@, vx.len() == x.n, x.results.len() == x.n, 0 <= i <= vx.len(),
-            t.results.len() == t.n, vt.len() == t.n,
+            xv == x@, tv == t@, fv == f@, vx.len() == x.n, x.results.len() == x.n, 0 <= i <= vx.len(),
+            t.results.len() == t.n, vt.len() == t.n, f.results.len() == f.n,
             forall|m: int| 0 <= m < x.n ==> vx[m] == spec::verified_at(xv, m),
-            forall|m: int| 0 <= m < t.n ==> vt[m] == spec::verified_at(t@, m),
-            spec::complete(xv), spec::complete(f@), f.results.len() == f.n, count <= 2,
-            count == 0 ==> forall|m: int| 0 <= m < i ==> !(vx[m] && spec::judges(spec::at(xv, m), t@) && spec::discriminates(spec::at(xv, m), f@)),
-            count == 1 ==> exists|a: int| 0 <= a < i && vx[a] && spec::judges(spec::at(xv, a), t@) && spec::discriminates(spec::at(xv, a), f@)
-                && forall|b: int| 0 <= b < i && vx[b] && spec::judges(spec::at(xv, b), t@) && spec::discriminates(spec::at(xv, b), f@) ==> a == b,
-            count == 2 ==> exists|a: int, b: int| 0 <= a < i && 0 <= b < i && a != b && vx[a] && spec::judges(spec::at(xv, a), t@) && spec::discriminates(spec::at(xv, a), f@) && vx[b] && spec::judges(spec::at(xv, b), t@) && spec::discriminates(spec::at(xv, b), f@),
-            forall|m: int| 0 <= m < i && spec::verified_at(xv, m) ==> !spec::splits(spec::at(xv, m), t@) && !spec::rejects_every(spec::at(xv, m), t@),
+            forall|m: int| 0 <= m < t.n ==> vt[m] == spec::verified_at(tv, m),
+            count <= 2,
+            count >= 1 ==> 0 <= a < i && looked(xv, tv, fv, a),
+            count == 2 ==> 0 <= b < i && a != b && looked(xv, tv, fv, b),
+            count == 0 ==> forall|m: int| 0 <= m < i ==> !#[trigger] looked(xv, tv, fv, m),
+            count == 1 ==> forall|m: int| 0 <= m < i && #[trigger] looked(xv, tv, fv, m) ==> m == a,
+            forall|m: int| 0 <= m < i && spec::verified_at(xv, m) ==> !spec::splits(spec::at(xv, m), tv) && !spec::rejects_every(spec::at(xv, m), tv),
         decreases vx.len() - i,
     {
         if vx[i] {
             let c = candidate(x, i);
-            if judges(t, &vt, c) && discriminates(c, f) && count < 2 { count += 1; }
+            if judges(t, &vt, c) && discriminates(c, f) && count < 2 {
+                proof { if count == 0 { a = i as int; } else { b = i as int; } }
+                count += 1;
+            }
             if splits(t, &vt, c) || rejects_every(t, &vt, c) {
                 assert(spec::verified_at(xv, i as int));
                 return false;
             }
         }
+        assert(!vx[i as int] ==> !looked(xv, tv, fv, i as int));
         i += 1;
     }
     proof {
-        assert forall|m: int| spec::verified_at(xv, m) implies !spec::splits(spec::at(xv, m), t@) && !spec::rejects_every(spec::at(xv, m), t@) by {
+        assert forall|m: int| spec::verified_at(xv, m) implies !spec::splits(spec::at(xv, m), tv) && !spec::rejects_every(spec::at(xv, m), tv) by {
             assert(0 <= m < x.n);
+        }
+        if count == 2 {
+            assert(looked(xv, tv, fv, a) && looked(xv, tv, fv, b));
+            assert(spec::not_found(xv, tv, fv));
+        } else if spec::not_found(xv, tv, fv) {
+            let (p, q) = choose|p: int, q: int| p != q
+                && spec::verified_at(xv, p) && spec::judges(spec::at(xv, p), tv) && spec::discriminates(spec::at(xv, p), fv)
+                && spec::verified_at(xv, q) && spec::judges(spec::at(xv, q), tv) && spec::discriminates(spec::at(xv, q), fv);
+            assert(looked(xv, tv, fv, p) && 0 <= p < x.n);
+            assert(looked(xv, tv, fv, q) && 0 <= q < x.n);
         }
     }
     count == 2
