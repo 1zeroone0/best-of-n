@@ -494,8 +494,9 @@ fn check_directory(root: &std::path::Path, commit: &str, dir: &std::path::Path) 
     Ok(())
 }
 
-/// Trunk's build, made once per bon process as agent. Every candidate's build
-/// directory starts as a copy-on-write clone of it, so cargo rebuilds only what
+/// Trunk's build, made once per bon process as agent, then copied to one of
+/// engineer's that no agent process can write. Every build directory (an agent
+/// process's own, and its judge's) starts as a copy-on-write clone of that copy, so cargo rebuilds only what
 /// the candidate changed; cargo's own change detection (TCB) keeps it correct.
 static WARM: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 /// Whether Verus verified trunk's head: a counterexample or queue candidate
@@ -627,7 +628,15 @@ fn warm(m: &Manifest, head: &str) -> (bool, bool) {
         result = (tests, proved);
         let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
         let _ = std::fs::remove_dir_all(&dir);
-        Some(build)
+        // agent wrote that build, and every agent process runs as agent: what
+        // every build clones is engineer's copy of it, which none can change.
+        // Made once: a later run (the next attempt) leaves the first copy alone.
+        let snapshot = scratch("trunk.snapshot/build");
+        if WARM.get().is_some() || snapshot.exists() { remove_build(config, &build); return None; }
+        let copied = Command::new("cp").arg("-cR").arg(format!("{}/", build.display())).arg(&snapshot)
+            .stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+        remove_build(config, &build);
+        copied.then_some(snapshot)
     })();
     TRUNK_PROVED.store(result.1, std::sync::atomic::Ordering::SeqCst);
     let _ = WARM.set(built);
@@ -635,7 +644,7 @@ fn warm(m: &Manifest, head: &str) -> (bool, bool) {
 }
 
 /// A build directory that starts as a copy-on-write clone of trunk's build:
-/// an agent process's, which its judge then reuses.
+/// an agent process's own, or a fresh one for its judge.
 fn build_directory(config: &Config, name: &str) -> Result<PathBuf, String> {
     // Once trunk's build is under way, wait for it and start from a clone of it.
     let warm = if WARMING.load(std::sync::atomic::Ordering::SeqCst) {
@@ -1743,8 +1752,9 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
             prune(&dir, &keep);
         }
     }
-    // Its own build, a clone of trunk's, which its judge reuses: its first cargo
-    // is warm, and the judge builds only what changed since its last.
+    // Its own build, a clone of trunk's, for the session alone: its first cargo
+    // is warm. The judge never reuses it (an agent process could forge cargo's
+    // fingerprints there and have a planted artifact judged, and cached).
     let build = match build_directory(config, &format!("{search}.{index}.build/build")) {
         Ok(b) => b,
         Err(e) => { write_trace(&trace.join("error"), e); return (None, 0); }
@@ -1758,15 +1768,20 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
     let c = as_agent_on(config, &with_wrapper(config, config.path.clone()), &dir, &env, &argv);
     let (_, stdout, killed) = supervise(c, Some(text), Duration::from_secs(config.agent_process.time), &trace.join("harness"));
     drop(session);
+    remove_build(config, &build);
     // Without token counts there is no measured cost: charge the whole limit.
     let (spent, harness_cost, prices) = generation(h, config, &stdout).unwrap_or((micro(config.agent_process.limit), None, HashMap::new()));
     if killed { write_trace(&trace.join("killed"), "time limit"); }
-    let candidate = capture(m, kind, search, index, start, &dir, &build, target, foils, trace).map_err(|e| {
-        write_trace(&trace.join("error"), &e);
-    }).ok();
+    // The judge's build: a fresh clone of trunk's, which no agent process wrote.
+    let candidate = build_directory(config, &format!("{search}.{index}.judge/build"))
+        .and_then(|judge| {
+            let c = capture(m, kind, search, index, start, &dir, &judge, target, foils, trace);
+            remove_build(config, &judge);
+            c
+        })
+        .map_err(|e| { write_trace(&trace.join("error"), &e); }).ok();
     let _ = Command::new("chmod").args(["-R", "-N"]).arg(&dir).stderr(Stdio::null()).status();
     let _ = std::fs::remove_dir_all(&dir);
-    remove_build(config, &build);
     let text = |v: &[char]| v.iter().collect::<String>();
     // Lines added and removed, apart: the kernel's diff is their sum.
     let (added, removed) = candidate.as_ref().map_or((0, 0), |c| added_removed(&m.root, &text(&c.base), &text(&c.commit)));
