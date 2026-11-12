@@ -6,6 +6,7 @@ license = "Apache-2.0"
 description = "best-of-N: you write what the software must do; verified agent search writes the code"
 repository = "https://github.com/1zeroone0/best-of-n"
 readme = "README.md"
+default-run = "bon"
 keywords = ["agents", "verification", "verus", "search", "build"]
 categories = ["development-tools"]
 exclude = ["/.bon/", "/assets/", "/examples/python/.venv/"]
@@ -13,6 +14,11 @@ exclude = ["/.bon/", "/assets/", "/examples/python/.venv/"]
 [[bin]]
 name = "bon"
 path = "src/main.rs"
+
+# One sample: context in, edits out; a harness `command` for wide searches.
+[[bin]]
+name = "bon-sample"
+path = "src/bin/bon-sample.rs"
 
 [dependencies]
 vstd = "=0.0.0-2026-10-18-0147"
