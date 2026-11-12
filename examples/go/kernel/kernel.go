@@ -166,41 +166,57 @@ type Totals struct {
 	Pushes               uint64   `json:"pushes"`
 	Verified             uint64   `json:"verified"`
 	Candidates           uint64   `json:"candidates"`
-	// Attempts by kind and width, and how many of them pushed.
+	// Attempts by kind and width, by how each ended.
 	Attempts []Attempts `json:"attempts"`
 	// How bon processes ended, by kind.
 	Ended []Ended `json:"ended"`
-	// How many attempts each reason blocked, by its word in the trace.
+	// How many attempts of each kind each reason blocked.
 	Reasons []Reason `json:"reasons"`
+	// How many attempts of each kind exited, by when: during_a_search, or
+	// after_its_searches (reported, before a transition). The trace holds
+	// no error for either.
+	Exits []Reason `json:"exits"`
 }
 
-// Attempts of one kind at one width: how many ran to an end, and how many
-// of those pushed. An attempt is a code or compaction search with the
-// counterexample (and foil) search on its selection.
+// Attempts of one kind at one width, by how each ended; `attempts` is their
+// sum. An attempt is a code or compaction search with the foil and
+// counterexample searches on its selection. Landed: a counterexample's test
+// landed on trunk and the bon process went on. Exited: its bon process
+// stopped during it, with no transition.
 type Attempts struct {
 	Kind     string `json:"kind"`
 	Width    uint64 `json:"width"`
 	Attempts uint64 `json:"attempts"`
 	Pushed   uint64 `json:"pushed"`
+	Blocked  uint64 `json:"blocked"`
+	Landed   uint64 `json:"landed"`
+	Exited   uint64 `json:"exited"`
+	Running  uint64 `json:"running"`
 }
 
 // How the bon processes of one kind ended. Exited: stopped short of a final
 // transition (killed, interrupted, an error), which is not a block. `expected`
-// is the share (1-p)^k predicts would end blocked, p being this kind's
-// measured success per attempt and k the attempts each process made.
+// is the share of those that pushed or blocked (1-p)^k predicts would end
+// blocked, p being this kind's measured push rate per attempt that ended and
+// k the attempts each process made.
 type Ended struct {
 	Kind     string   `json:"kind"`
 	Pushed   uint64   `json:"pushed"`
 	Blocked  uint64   `json:"blocked"`
 	Exited   uint64   `json:"exited"`
+	Running  uint64   `json:"running"`
 	Expected *float64 `json:"expected"`
 }
 
-// A reason a search blocked, and how many attempts it blocked. Traces from
-// before reasons were recorded count under "unrecorded".
+// A reason attempts of one kind blocked, and how many. `inferred` of them
+// have no word in their trace (from before reasons were words): the kernel
+// derived the reason from the searches' words, or the trace's sentence names
+// it. A block nothing names counts under "unrecorded".
 type Reason struct {
-	Reason string `json:"reason"`
-	Count  uint64 `json:"count"`
+	Kind     string `json:"kind"`
+	Reason   string `json:"reason"`
+	Count    uint64 `json:"count"`
+	Inferred uint64 `json:"inferred"`
 }
 
 // Where a goal came from: the goal, the commit and its subject.
@@ -261,6 +277,8 @@ type BonProcess struct {
 	// Each line of its transitions file.
 	Transitions []string      `json:"transitions"`
 	Searches    []SearchTrace `json:"searches"`
+	// Seconds its checks of trunk took before its first search, from their logs.
+	CheckSeconds *float64 `json:"check_seconds"`
 }
 
 // One search of a bon process, as its trace recorded it.
@@ -276,6 +294,8 @@ type SearchTrace struct {
 	Verified         uint64  `json:"verified"`
 	Selected         *uint64 `json:"selected"`
 	RecordedSelected *uint64 `json:"recorded_selected"`
+	// How many verified candidates the trace's summary recorded.
+	RecordedVerified *uint64 `json:"recorded_verified"`
 	// derived (the kernel read its words), unreadable, or none.
 	Kernel     string   `json:"kernel"`
 	Blocked    *string  `json:"blocked"`
@@ -288,6 +308,14 @@ type SearchTrace struct {
 	Running    bool     `json:"running"`
 	Background bool     `json:"background"`
 	Candidates []Facts  `json:"candidates"`
+	// A code or compaction search: how its attempt ended (pushed, blocked,
+	// landed, exited, running).
+	End *string `json:"end"`
+	// A blocked attempt's reason, by its word; none where nothing names it.
+	Reason *string `json:"reason"`
+	// Where the reason came from: recorded (the trace's word), kernel (derived
+	// from the searches' words) or sentence (the trace's sentence).
+	ReasonFrom *string `json:"reason_from"`
 }
 
 // What a search was granted with.
@@ -322,9 +350,13 @@ type Facts struct {
 	Added    *uint64 `json:"added"`
 	Removed  *uint64 `json:"removed"`
 	// killed, over limit, price mismatch.
-	Flags   []string `json:"flags"`
-	Logs    []string `json:"logs"`
-	Changed []string `json:"changed"`
+	Flags []string `json:"flags"`
+	Logs  []string `json:"logs"`
+	// Seconds of its model session, from its harness log.
+	HarnessSeconds *float64 `json:"harness_seconds"`
+	// Seconds of its checks, summed from their logs.
+	CheckSeconds *float64 `json:"check_seconds"`
+	Changed      []string `json:"changed"`
 	// A hash of each agree check's output: candidates with the same agree.
 	Out []uint64 `json:"out"`
 	// A test's verdict on each member it ran on, by index; trunk's head (or a

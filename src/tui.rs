@@ -357,34 +357,39 @@ fn cost_heads(pal: &Palette) -> Vec<Span<'static>> {
     vec![Span::styled(right("Gen", GEN_W), pal.muted()), Span::styled(right("Time", TIME_W), pal.muted())]
 }
 
-/// The outcomes table, at the head of Traces: columns that do not fit drop from the right.
+/// The outcome tables, at the head of Traces: attempts, each kind's reasons
+/// (which sum to its Blocked), then bon processes. Both tables share their
+/// columns' widths; columns that do not fit drop from the right.
 fn outcome_rows(pal: &Palette, t: &projection::Totals, w: usize) -> Vec<Row> {
-    let rows = view::outcome_table(t);
-    if rows.is_empty() { return Vec::new(); }
-    let head = view::OUTCOME_COLUMNS;
-    let cw: Vec<usize> = (0..7).map(|i| rows.iter().map(|r| r[i].chars().count()).chain([head[i].chars().count()]).max().unwrap_or(0)).collect();
-    let mut n = 7;
-    while n > 2 && 1 + cw[0] + (1..n).map(|i| cw[i] + 1).sum::<usize>() > w { n -= 1; }
-    let line = |cells: &[String], first: Style, rest: Style| {
-        let mut v = vec![Span::styled(format!(" {}", fit(&cells[0], cw[0])), first)];
-        for i in 1..n { v.push(Span::styled(format!(" {}", right(&cells[i], cw[i])), rest)); }
-        Row::text(Line::from(v))
+    let (attempts, processes) = (view::attempt_table(t), view::process_table(t));
+    if attempts.is_empty() && processes.is_empty() { return Vec::new(); }
+    // The first column as wide in both tables; the rest each as its own.
+    let w0 = attempts.iter().chain(&processes).map(|r| r[0].chars().count()).max().unwrap_or(0);
+    let table = |rows: &[Vec<String>], out: &mut Vec<Row>| {
+        let cw: Vec<usize> = (0..rows.first().map_or(0, |r| r.len())).map(|i| if i == 0 { w0 } else { rows.iter().map(|r| r[i].chars().count()).max().unwrap_or(0) }).collect();
+        let mut n = cw.len();
+        while n > 2 && 1 + cw[0] + (1..n).map(|i| cw[i] + 2).sum::<usize>() > w { n -= 1; }
+        for (k, r) in rows.iter().enumerate() {
+            let (first, rest) = if k == 0 { (pal.strong(), pal.muted()) } else if r[0].starts_with(' ') { (pal.muted(), pal.ink()) } else { (pal.ink(), pal.ink()) };
+            let mut v = vec![Span::styled(format!(" {}", fit(&r[0], cw[0])), first)];
+            for i in 1..n { v.push(Span::styled(format!("  {}", right(&r[i], cw[i])), rest)); }
+            out.push(Row::text(Line::from(v)));
+        }
     };
-    let mut out = vec![line(&head.map(String::from), pal.strong(), pal.muted())];
-    for r in &rows { out.push(line(r, if r[0].starts_with(' ') { pal.muted() } else { pal.ink() }, pal.ink())); }
-    if !t.reasons.is_empty() {
-        // Attempts each reason blocked, by the reason in words, wrapped under itself.
-        let label = "Attempts blocked by";
-        let items: Vec<String> = t.reasons.iter().map(view::reason_count).collect();
+    let mut out = Vec::new();
+    table(&attempts, &mut out);
+    // Each kind's blocked attempts by reason, wrapped under itself.
+    for (label, items) in view::reason_rows(t) {
         let mut lw = label.chars().count() + 2;
         if items.join(" · ").chars().count() > w.saturating_sub(1 + lw) {
             out.push(Row::text(Line::from(Span::styled(format!(" {label}"), pal.muted()))));
             lw = 2;
         }
         for (k, l) in wrap_items(&items, " · ", w.saturating_sub(1 + lw)).into_iter().enumerate() {
-            out.push(Row::text(Line::from(vec![Span::styled(format!(" {}", fit(if k == 0 && lw > 2 { label } else { "" }, lw)), pal.muted()), Span::styled(l, pal.ink())])));
+            out.push(Row::text(Line::from(vec![Span::styled(format!(" {}", fit(if k == 0 && lw > 2 { &label } else { "" }, lw)), pal.muted()), Span::styled(l, pal.ink())])));
         }
     }
+    if !processes.is_empty() { out.push(Row::text(Line::default())); table(&processes, &mut out); }
     out
 }
 
@@ -1048,10 +1053,12 @@ fn hanging(text: &str, indent: usize, width: usize, style: Style) -> Vec<Line<'s
 
 /// The key reference `?` opens: every key, by where it applies, in the
 /// key bar's words.
-const KEYS: [(&str, &[(&str, &str)]); 2] = [
+const KEYS: [(&str, &[(&str, &str)]); 3] = [
     ("Everywhere", &[("↑ ↓   j k", "Move"), ("g  G", "First, last"), ("⇥  ⇧⇥  1–4", "Tab"), ("⏎", "Open"), ("esc", "Close"),
         ("⇧↑ ⇧↓  PgUp PgDn", "Scroll"), ("/", "Find"), ("r", "Range"), ("t", "Light or dark"), ("?", "Keys"), ("q", "Quit")]),
     ("Traces", &[("l", "Logs"), ("d", "Compare")]),
+    // Not keys: what the words of the outcome tables at the head of Traces mean.
+    ("Outcomes", &view::OUTCOME_NOTES),
 ];
 
 /// A key bar: each key in ink, what it does muted. Where it does not fit,
@@ -1281,7 +1288,7 @@ fn draw(f: &mut Frame, app: &mut App) {
     if app.keys {
         let kw = 20;
         let n: usize = KEYS.iter().map(|(_, ks)| ks.len() + 2).sum::<usize>() + 1;
-        let w = 46.min(area.width); let h = (n as u16 + 2).min(area.height);
+        let w = 72.min(area.width); let h = (n as u16 + 2).min(area.height);
         let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
         f.render_widget(ratatui::widgets::Clear, r);
         let mut all = vec![];
@@ -1748,7 +1755,8 @@ mod tests {
 
     #[test]
     fn reasons_are_words_with_their_counts() {
-        assert_eq!(view::reason_count(&projection::Reason { reason: "too_few_verified".into(), count: 1 }), "Too few verified (1)");
+        assert_eq!(view::reason_count(&projection::Reason { reason: "too_few_verified".into(), count: 1, ..Default::default() }), "Too few verified (1)");
+        assert_eq!(view::reason_count(&projection::Reason { reason: "too_few_tests".into(), count: 5, inferred: 5, ..Default::default() }), "Too few tests (5, 5 inferred)");
     }
 
     #[test]

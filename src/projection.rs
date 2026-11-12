@@ -77,17 +77,23 @@ pub struct Totals {
     pub pushes: u64,
     pub verified: u64,
     pub candidates: u64,
-    /// Attempts by kind and width, and how many of them pushed.
+    /// Attempts by kind and width, by how each ended.
     pub attempts: Vec<Attempts>,
     /// How bon processes ended, by kind.
     pub ended: Vec<Ended>,
-    /// How many attempts each reason blocked, by its word in the trace.
+    /// How many attempts of each kind each reason blocked.
     pub reasons: Vec<Reason>,
+    /// How many attempts of each kind exited, by when: during_a_search, or
+    /// after_its_searches (reported, before a transition). The trace holds
+    /// no error for either.
+    pub exits: Vec<Reason>,
 }
 
-/// Attempts of one kind at one width: how many ran to an end, and how many
-/// of those pushed. An attempt is a code or compaction search with the
-/// counterexample (and foil) search on its selection.
+/// Attempts of one kind at one width, by how each ended; `attempts` is their
+/// sum. An attempt is a code or compaction search with the foil and
+/// counterexample searches on its selection. Landed: a counterexample's test
+/// landed on trunk and the bon process went on. Exited: its bon process
+/// stopped during it, with no transition.
 #[derive(Deserialize, Default, Clone)]
 #[serde(default)]
 pub struct Attempts {
@@ -95,12 +101,17 @@ pub struct Attempts {
     pub width: u64,
     pub attempts: u64,
     pub pushed: u64,
+    pub blocked: u64,
+    pub landed: u64,
+    pub exited: u64,
+    pub running: u64,
 }
 
 /// How the bon processes of one kind ended. Exited: stopped short of a final
 /// transition (killed, interrupted, an error), which is not a block. `expected`
-/// is the share (1-p)^k predicts would end blocked, p being this kind's
-/// measured success per attempt and k the attempts each process made.
+/// is the share of those that pushed or blocked (1-p)^k predicts would end
+/// blocked, p being this kind's measured push rate per attempt that ended and
+/// k the attempts each process made.
 #[derive(Deserialize, Default, Clone)]
 #[serde(default)]
 pub struct Ended {
@@ -108,16 +119,21 @@ pub struct Ended {
     pub pushed: u64,
     pub blocked: u64,
     pub exited: u64,
+    pub running: u64,
     pub expected: Option<f64>,
 }
 
-/// A reason a search blocked, and how many attempts it blocked. Traces from
-/// before reasons were recorded count under "unrecorded".
+/// A reason attempts of one kind blocked, and how many. `inferred` of them
+/// have no word in their trace (from before reasons were words): the kernel
+/// derived the reason from the searches' words, or the trace's sentence names
+/// it. A block nothing names counts under "unrecorded".
 #[derive(Deserialize, Default, Clone)]
 #[serde(default)]
 pub struct Reason {
+    pub kind: String,
     pub reason: String,
     pub count: u64,
+    pub inferred: u64,
 }
 
 /// Where a goal came from: the goal, the commit and its subject.
@@ -186,6 +202,8 @@ pub struct BonProcess {
     /// Each line of its transitions file.
     pub transitions: Vec<String>,
     pub searches: Vec<SearchTrace>,
+    /// Seconds its checks of trunk took before its first search, from their logs.
+    pub check_seconds: Option<f64>,
 }
 
 /// One search of a bon process, as its trace recorded it.
@@ -203,6 +221,8 @@ pub struct SearchTrace {
     pub verified: u64,
     pub selected: Option<u64>,
     pub recorded_selected: Option<u64>,
+    /// How many verified candidates the trace's summary recorded.
+    pub recorded_verified: Option<u64>,
     /// derived (the kernel read its words), unreadable, or none.
     pub kernel: String,
     pub blocked: Option<String>,
@@ -215,6 +235,14 @@ pub struct SearchTrace {
     pub running: bool,
     pub background: bool,
     pub candidates: Vec<Facts>,
+    /// A code or compaction search: how its attempt ended (pushed, blocked,
+    /// landed, exited, running).
+    pub end: Option<String>,
+    /// A blocked attempt's reason, by its word; none where nothing names it.
+    pub reason: Option<String>,
+    /// Where the reason came from: recorded (the trace's word), kernel (derived
+    /// from the searches' words) or sentence (the trace's sentence).
+    pub reason_from: Option<String>,
 }
 
 /// What a search was granted with.
@@ -257,6 +285,10 @@ pub struct Facts {
     /// killed, over limit, price mismatch.
     pub flags: Vec<String>,
     pub logs: Vec<String>,
+    /// Seconds of its model session, from its harness log.
+    pub harness_seconds: Option<f64>,
+    /// Seconds of its checks, summed from their logs.
+    pub check_seconds: Option<f64>,
     pub changed: Vec<String>,
     /// A hash of each agree check's output: candidates with the same agree.
     pub out: Vec<u64>,
