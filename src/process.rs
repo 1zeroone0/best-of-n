@@ -425,7 +425,7 @@ fn on_selection(
         assert(t.searches.value()[index as int + 1] == sf@);
         assert(t.searches.value()[index as int + 2] == s1@);
     }
-    conclude(m, root, head, s0, &sf, &s1, i, index, Ghost(*spent), Ghost(paths(checks@)), Ghost(paths(tests@)), Ghost(paths(trusted@)), limit,
+    conclude(m, root, head, s0, &sf, &s1, i, index, Ghost(*spent), Ghost(paths(checks@)), Ghost(paths(tests@)), Ghost(paths(trusted@)), Ghost(limit),
              Ghost(observed), Tracked(t))
 }
 
@@ -435,7 +435,7 @@ fn on_selection(
 fn conclude(
     m: &trusted::Manifest, root: &str, head: &mut Commit, s0: &Search, sf: &Search, s1: &Search, i: usize, index: usize,
     Ghost(spent): Ghost<u64>, Ghost(checks): Ghost<Set<spec::Path>>, Ghost(tests): Ghost<Set<spec::Path>>, Ghost(trusted): Ghost<Set<spec::Path>>,
-    limit: u64, Ghost(observed): Ghost<Map<Object, Seq<Option<Permission>>>>, Tracked(t): Tracked<&mut Tokens>,
+    Ghost(limit): Ghost<u64>, Ghost(observed): Ghost<Map<Object, Seq<Option<Permission>>>>, Tracked(t): Tracked<&mut Tokens>,
 ) -> (r: Result<Option<usize>, String>)
     requires
         index <= usize::MAX - 3,
