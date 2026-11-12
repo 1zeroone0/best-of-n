@@ -524,7 +524,6 @@ fn accepts_in(pairs: &Vec<(i64, bool)>, j: Option<usize>) -> (r: Option<bool>)
 }
 
 /// The test rejects at least one accepted, unproved program within authority.
-#[verifier::rlimit(100)]
 fn discriminates(c: &Candidate, f: &Search) -> (r: bool)
     requires f.results.len() == f.n,
     ensures r == spec::discriminates(c@, f@),
@@ -554,7 +553,6 @@ fn discriminates(c: &Candidate, f: &Search) -> (r: bool)
 }
 
 /// c's test splits t's members.
-#[verifier::rlimit(100)]
 fn splits(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
     requires t.results.len() == t.n, vt.len() == t.n,
         forall|j: int| 0 <= j < t.n ==> vt[j] == spec::verified_at(t@, j),
@@ -616,7 +614,6 @@ fn splits(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
 }
 
 /// c's test rejects every member of t.
-#[verifier::rlimit(100)]
 fn rejects_every(t: &Search, vt: &Vec<bool>, c: &Candidate) -> (r: bool)
     requires t.results.len() == t.n, vt.len() == t.n,
         forall|j: int| 0 <= j < t.n ==> vt[j] == spec::verified_at(t@, j),
@@ -686,7 +683,6 @@ spec fn looked(x: spec::Search, t: spec::Search, f: spec::Search, m: int) -> boo
     spec::verified_at(x, m) && spec::judges(spec::at(x, m), t) && spec::discriminates(spec::at(x, m), f)
 }
 
-#[verifier::rlimit(100)]
 pub fn not_found(x: &Search, t: &Search, f: &Search) -> (r: bool)
     requires x.results.len() == x.n, t.results.len() == t.n, f.results.len() == f.n,
     ensures r == spec::not_found(x@, t@, f@),
@@ -787,7 +783,6 @@ fn two_verified(s: &Search) -> (r: bool)
 }
 
 /// The kernel's reason for a completed block.
-#[verifier::rlimit(100)]
 pub fn blocked(t: &Search, counterexample: Option<&Search>, f: Option<&Search>) -> (r: Option<spec::Blocked>)
     requires t.results.len() == t.n,
         counterexample matches Some(c) ==> c.results.len() == c.n,
@@ -851,7 +846,6 @@ pub fn blocked(t: &Search, counterexample: Option<&Search>, f: Option<&Search>) 
 
 // ── landing ─────────────────────────────────────────────
 
-#[verifier::rlimit(400)]
 pub fn landing(x: &Search, t: &Search) -> (r: Option<usize>)
     requires x.results.len() == x.n, t.results.len() == t.n,
     ensures
@@ -939,7 +933,6 @@ fn rejects_trunk(x: &Search, vx: &Vec<bool>, i: usize) -> (r: bool)
     match accepts_on(c, None) { Some(b) => !b, None => false }
 }
 
-#[verifier::rlimit(400)]
 pub fn found_on_trunk(x: &Search) -> (r: Option<usize>)
     requires x.results.len() == x.n,
     ensures
@@ -1053,7 +1046,6 @@ spec fn shortest(s: spec::Search, q: nat, i: int, j: int) -> bool {
 }
 
 /// Who cites q: the first two citing indices, and the one with the shortest intent.
-#[verifier::rlimit(100)]
 fn cites(s: &Search, v: &Vec<bool>, q: Cue) -> (r: (Option<usize>, Option<usize>, usize))
     requires s.results.len() == s.n, v.len() == s.n,
         forall|j: int| 0 <= j < s.n ==> v[j] == spec::verified_at(s@, j),
@@ -1215,7 +1207,6 @@ proof fn complete(s: &Search)
     assert forall|i: int| 0 <= i < s.n implies s@.results.contains_key(i) by {}
 }
 
-#[verifier::rlimit(100)]
 pub fn proposed(s: &Search) -> (r: Vec<(Cue, Intent)>)
     requires s.results.len() == s.n,
     ensures
@@ -1285,7 +1276,6 @@ pub fn proposed(s: &Search) -> (r: Vec<(Cue, Intent)>)
     r
 }
 
-#[verifier::rlimit(100)]
 pub fn contested(s: &Search) -> (r: Vec<Cue>)
     requires s.results.len() == s.n,
     ensures

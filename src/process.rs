@@ -66,7 +66,6 @@ fn clone_paths(paths: &Vec<Path>) -> (r: Vec<Path>)
 
 /// One search: grant a capability per agent process, run them, and wait on
 /// each, consuming its capability.
-#[verifier::rlimit(400)]
 #[verifier::spinoff_prover]
 // index is read only by the contract, which cargo erases.
 #[allow(unused_variables)]
@@ -291,7 +290,6 @@ pub open spec fn between(t: Tokens, observed: Map<Object, Seq<Option<Permission>
 /// selected candidate is pushed once one clears. When a test splits the
 /// candidates, the best such test lands on trunk, and the next attempt runs
 /// wider from that head, until the attempts run out.
-#[verifier::rlimit(100)]
 pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
     hide(spec::isolated);
     let mut head = trusted::head(root)?;
@@ -336,7 +334,6 @@ pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
 /// One attempt of to_push: a search from trunk's head and, if it selects, the
 /// searches on its selection. Ok(None) once the selection is pushed;
 /// Ok(Some(next)) to go on, next being the number of searches so far.
-#[verifier::rlimit(100)]
 fn attempt(
     m: &trusted::Manifest, root: &str, compaction: bool, head: &mut Commit, a: usize, index: usize,
     checks: &Vec<Path>, tests: &Vec<Path>, trusted: &Vec<Path>, l: u64, limit: u64, spent: &mut u64,
@@ -387,7 +384,6 @@ fn attempt(
 /// The rest of an attempt whose search s0, at index, selected i: a foil
 /// search and a counterexample search on the selection, then a push or a
 /// landing.
-#[verifier::rlimit(100)]
 fn on_selection(
     m: &trusted::Manifest, root: &str, head: &mut Commit, s0: &Search, i: usize, a: usize, index: usize,
     checks: &Vec<Path>, tests: &Vec<Path>, trusted: &Vec<Path>, l: u64, limit: u64, spent: &mut u64,
@@ -436,7 +432,6 @@ fn on_selection(
 /// The end of an attempt: tested search s0, at index, selected i, and the
 /// foil search sf and counterexample search s1 on it ran. i is pushed if no
 /// counterexample was found; the best test that splits s0 lands if one does.
-#[verifier::rlimit(100)]
 fn conclude(
     m: &trusted::Manifest, root: &str, head: &mut Commit, s0: &Search, sf: &Search, s1: &Search, i: usize, index: usize,
     Ghost(spent): Ghost<u64>, Ghost(checks): Ghost<Set<spec::Path>>, Ghost(tests): Ghost<Set<spec::Path>>, Ghost(trusted): Ghost<Set<spec::Path>>,
@@ -516,7 +511,6 @@ fn conclude(
 /// tests reject trunk, the best lands on trunk, whose checks then reject it
 /// (Ok(true)); otherwise Ok(false), and nothing lands: a test that accepts
 /// trunk shows nothing.
-#[verifier::rlimit(100)]
 pub fn counterexample(root: &str) -> (r: Result<bool, String>) {
     let head = trusted::head(root)?;
     let m = trusted::manifest(root, &head)?;

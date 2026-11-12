@@ -454,7 +454,6 @@ impl Wire for Candidate {
         }
         r
     }
-    #[verifier::rlimit(300)]
     fn read(w: &Vec<u64>) -> (r: Option<(Self, Vec<u64>)>) { match CandidateWire::read(w) { Some(((((commit, (base, accepted)), ((proved, changed), (out, intents))), ((accepts, (accepts_foils, rejects_counterexamples)), ((measured, added), (rank, diff)))), tail)) => Some((Self { commit, base, accepted, proved, changed, out, intents, accepts, accepts_foils, rejects_counterexamples, measured, added, rank, diff }, tail)), None => None } }
 }
 
@@ -640,7 +639,6 @@ proof fn kind_model(a: Kind, b: Kind)
         _ => {},
     }
 }
-#[verifier::rlimit(150)]
 proof fn candidate_model(a: Candidate, b: Candidate)
     requires a.model() == b.model(), ensures a@ == b@,
 {
@@ -662,7 +660,6 @@ proof fn candidate_model(a: Candidate, b: Candidate)
         assert forall|i: int| 0 <= i < a.intents.len() implies (a.intents@[i].0 as nat, a.intents@[i].1@) == (b.intents@[i].0 as nat, b.intents@[i].1@) by { assert(a.intents.model()[i] == a.intents@[i].model()); assert(b.intents.model()[i] == b.intents@[i].model()); text_model(a.intents@[i].1.0); text_model(b.intents@[i].1.0); }
     }
 }
-#[verifier::rlimit(150)]
 proof fn search_model(a: Search, b: Search)
     requires a.model() == b.model(), ensures a@ == b@,
 {
