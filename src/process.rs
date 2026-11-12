@@ -96,7 +96,7 @@ fn search(
         kind@ matches spec::Kind::Counterexample { goal: Some(p) } ==>
             0 <= p.search < old(t).searches.value().len()
             && (spec::selected(old(t).searches.value()[p.search], p.index)
-                || (spec::diverges(old(t).searches.value()[p.search]) && spec::verified_at(old(t).searches.value()[p.search], p.index)))
+                || (spec::disagree(old(t).searches.value()[p.search]) && spec::verified_at(old(t).searches.value()[p.search], p.index)))
             && old(t).searches.value()[p.search].base == old(t).trunk.value().last(),
         kind@ matches spec::Kind::Foil { goal: p, changed } ==>
             0 <= p.search < old(t).searches.value().len()
@@ -288,8 +288,8 @@ pub open spec fn between(t: Tokens, observed: Map<Object, Seq<Option<Permission>
 
 /// bon code (compaction false) or bon compaction (true). Each attempt is a
 /// search and, if it selects, a counterexample search on the selection; the
-/// selected candidate is pushed once one clears. If it diverges instead, a
-/// counterexample search decides between its behaviors. When a test splits the
+/// selected candidate is pushed once one clears. If its verified candidates
+/// disagree instead, a counterexample search decides between their behaviors. When a test splits the
 /// candidates, the best such test lands on trunk, and the next attempt runs
 /// wider from that head, until the attempts run out.
 pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
@@ -334,7 +334,8 @@ pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
 }
 
 /// One attempt of to_push: a search from trunk's head and, if it selects, the
-/// searches on its selection; if it diverges, the counterexample search on it.
+/// searches on its selection; if its verified candidates disagree, the
+/// counterexample search on it.
 /// Ok(None) once the selection is pushed; Ok(Some(next)) to go on, next being
 /// the number of searches so far.
 fn attempt(
@@ -376,14 +377,13 @@ fn attempt(
                 trusted::record_blocked(m, reason, Ghost(s0@), Ghost(s0@), Ghost(s0@), Ghost(head@));
                 return Ok(Some(index + 1));
             }
-            // Two verified and no selection: they show more than one behavior.
+            // Two verified and no selection: they disagree.
             proof {
                 reveal(spec::reason);
                 reveal(spec::complete);
-                spec::diverges_unless_agree(s0@);
             }
             match first_verified(&s0) {
-                Some(f) => on_divergence(m, head, &s0, f, a, index, checks, tests, trusted, l, limit, spent, Ghost(observed), Tracked(t)),
+                Some(f) => on_disagreement(m, head, &s0, f, a, index, checks, tests, trusted, l, limit, spent, Ghost(observed), Tracked(t)),
                 None => vstd::pervasive::unreached(),
             }
         }
@@ -415,10 +415,10 @@ fn first_verified(s: &Search) -> (r: Option<usize>)
     None
 }
 
-/// The rest of an attempt whose search s0, at index, diverges: a
+/// The rest of an attempt whose search s0, at index, disagrees: a
 /// counterexample search on it, its tests built on s0's verified candidate f,
 /// then a landing, or a block. Nothing of s0 is pushed.
-fn on_divergence(
+fn on_disagreement(
     m: &trusted::Manifest, head: &mut Commit, s0: &Search, f: usize, a: usize, index: usize,
     checks: &Vec<Path>, tests: &Vec<Path>, trusted: &Vec<Path>, l: u64, limit: u64, spent: &mut u64,
     Ghost(observed): Ghost<Map<Object, Seq<Option<Permission>>>>, Tracked(t): Tracked<&mut Tokens>,
@@ -429,7 +429,7 @@ fn on_divergence(
         old(t).searches.value()[index as int] == s0@,
         s0.results.len() == s0.n,
         s0@.base == old(head)@,
-        spec::diverges(s0@),
+        spec::disagree(s0@),
         spec::verified_at(s0@, f as int),
     ensures
         r matches Ok(Some(next)) ==> next <= index + 3
@@ -441,10 +441,10 @@ fn on_divergence(
     hide(spec::reason);
     hide(spec::blocked);
     hide(spec::complete);
-    hide(spec::diverges);
+    hide(spec::disagree);
     hide(spec::splits);
     hide(spec::beats);
-    trusted::record_diverged(m, f);
+    trusted::record_disagreed(m, f);
     let ghost before = t.searches.value();
     let s1 = search(m, index + 1, a, Kind::Counterexample { goal: Some(AgentProcess { search: index, index: f }) },
                     Commit(head.0.clone()), checks, tests, trusted, l, limit, spent, Some(s0), None,

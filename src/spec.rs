@@ -78,8 +78,9 @@ pub enum Kind {
     /// Candidates write a test from the spec, never from code, looking for a
     /// behavior the spec forbids. The goal is a candidate of a code or
     /// compaction search, whose tree the test builds on: the selected one,
-    /// whose push it clears or blocks; or, when that search diverges, a
-    /// verified one, and the test decides between its behaviors. When None,
+    /// whose push it clears or blocks; or, when that search's verified
+    /// candidates disagree, a verified one, and the test decides between their
+    /// behaviors. When None,
     /// the goal is trunk's head. A test that shows the behavior lands on trunk
     /// (`land`).
     Counterexample { goal: Option<AgentProcess> },
@@ -291,11 +292,9 @@ pub open spec fn behaviors(search: Search) -> ISet<Seq<nat>> {
         || (search.kind is Compaction && search.kind->Compaction_out == out))
 }
 
-/// Code or compaction: at least two candidates are verified and search shows
-/// more than one behavior, so its checks do not yet decide between them.
-pub open spec fn diverges(search: Search) -> bool {
-    complete(search) && (search.kind is Code || search.kind is Compaction) && two_verified(search)
-    && exists|out: Seq<nat>, other: Seq<nat>| out != other && behaviors(search).contains(out) && behaviors(search).contains(other)
+/// Code or compaction: at least two candidates are verified and they do not agree.
+pub open spec fn disagree(search: Search) -> bool {
+    complete(search) && (search.kind is Code || search.kind is Compaction) && two_verified(search) && !agree(search)
 }
 
 /// Candidate i of the tested search may be pushed: a counterexample search on
@@ -438,13 +437,15 @@ pub open spec fn lands(searches: Seq<Search>, counterexample_index: int, i: int)
 pub enum Blocked {
     /// Fewer than two candidates are verified.
     TooFewVerified,
-    /// The counterexample search verified fewer than two tests, and none split
-    /// the candidates.
+    /// The counterexample search verified fewer than two tests, or, on
+    /// candidates that disagree, fewer than two that judge every candidate; and
+    /// none split the candidates.
     TooFewTests,
     /// Otherwise: a verified test rejects every candidate it tested.
     RejectsEvery,
-    /// Otherwise, on a search that diverges: no verified test splits its
-    /// candidates, so the spec does not decide between their behaviors.
+    /// Otherwise, on candidates that disagree: at least two verified tests
+    /// judge every candidate and none splits them, so the spec does not decide
+    /// between their behaviors.
     Disagree,
     /// Otherwise, on a selection: fewer than two verified tests judge every
     /// candidate and reject a foil.
@@ -462,6 +463,13 @@ pub open spec fn two_verified(search: Search) -> bool {
     exists|i: int, j: int| i != j && verified_at(search, i) && verified_at(search, j)
 }
 
+/// At least two verified tests of counterexample judge every member of tested.
+pub open spec fn two_judge(counterexample: Search, tested: Search) -> bool {
+    exists|i: int, j: int| i != j
+        && verified_at(counterexample, i) && judges(at(counterexample, i), tested)
+        && verified_at(counterexample, j) && judges(at(counterexample, j), tested)
+}
+
 /// The gates allowed tested's selected candidate i to be pushed: counterexample
 /// and foils are the searches on it, and no counterexample was found.
 pub open spec fn allowed(tested: Search, i: int, counterexample: Search, foils: Search) -> bool {
@@ -473,14 +481,15 @@ pub open spec fn allowed(tested: Search, i: int, counterexample: Search, foils: 
 /// trusted code observed it. Only the git reasons depend on remote.
 pub open spec fn blocked(reason: Blocked, tested: Search, counterexample: Search, foils: Search, remote: Commit) -> bool {
     let checked = complete(counterexample) && !found(counterexample, tested);
+    let enough = two_verified(counterexample) && (disagree(tested) ==> two_judge(counterexample, tested));
     match reason {
         Blocked::TooFewVerified => complete(tested) && !two_verified(tested),
-        Blocked::TooFewTests => checked && !two_verified(counterexample),
-        Blocked::RejectsEvery => checked && two_verified(counterexample)
+        Blocked::TooFewTests => checked && !enough,
+        Blocked::RejectsEvery => checked && enough
             && exists|i: int| verified_at(counterexample, i) && rejects_every(at(counterexample, i), tested),
-        Blocked::Disagree => checked && diverges(tested) && two_verified(counterexample)
+        Blocked::Disagree => checked && disagree(tested) && enough
             && (forall|i: int| verified_at(counterexample, i) ==> !rejects_every(at(counterexample, i), tested)),
-        Blocked::Undiscriminating => checked && complete(foils) && two_verified(counterexample)
+        Blocked::Undiscriminating => checked && complete(foils) && enough
             && (forall|i: int| verified_at(counterexample, i) ==> !rejects_every(at(counterexample, i), tested))
             && !not_found(counterexample, tested, foils),
         Blocked::TrunkMoved => ((exists|i: int| allowed(tested, i, counterexample, foils))
@@ -495,8 +504,8 @@ pub open spec fn blocked(reason: Blocked, tested: Search, counterexample: Search
 /// Why the attempt on tested blocked, decided by the kernel: on tested alone
 /// (no counterexample search yet), or on the counterexample search on it and,
 /// on a selection, the foil search. None where it did not block, or has not
-/// finished: with two verified candidates, tested either selects or diverges,
-/// and a counterexample search follows. The two git reasons, trunk moved and
+/// finished: with two verified candidates, tested either selects or its
+/// verified candidates disagree, and a counterexample search follows. The two git reasons, trunk moved and
 /// refused, are decided from the remote's head, not by this.
 pub open spec fn reason(tested: Search, counterexample: Option<Search>, foils: Option<Search>) -> Option<Blocked> {
     match counterexample {
@@ -506,12 +515,12 @@ pub open spec fn reason(tested: Search, counterexample: Option<Search>, foils: O
             else { None },
         Some(counterexample) =>
             if !(complete(counterexample) && !found(counterexample, tested)) { None }
-            else if !two_verified(counterexample) { Some(Blocked::TooFewTests) }
+            else if !two_verified(counterexample) || (disagree(tested) && !two_judge(counterexample, tested)) { Some(Blocked::TooFewTests) }
             else if exists|i: int| verified_at(counterexample, i) && rejects_every(at(counterexample, i), tested) { Some(Blocked::RejectsEvery) }
             else {
                 match foils {
                     Some(foils) => if complete(foils) && !not_found(counterexample, tested, foils) { Some(Blocked::Undiscriminating) } else { None },
-                    None => if diverges(tested) { Some(Blocked::Disagree) } else { None },
+                    None => if disagree(tested) { Some(Blocked::Disagree) } else { None },
                 }
             },
     }
@@ -540,12 +549,12 @@ pub proof fn blocked_has_one_reason(counterexample: Search, tested: Search, foil
 {
 }
 
-/// A counterexample search on a search that diverges that found no split
+/// A counterexample search on candidates that disagree that found no split
 /// blocked for exactly one of too few tests, rejects every and disagree,
 /// whatever the foil search and the remote's head.
-pub proof fn diverged_has_one_reason(counterexample: Search, tested: Search, foils: Search, remote: Commit)
+pub proof fn disagreement_has_one_reason(counterexample: Search, tested: Search, foils: Search, remote: Commit)
     requires
-        complete(counterexample), diverges(tested), !found(counterexample, tested),
+        complete(counterexample), disagree(tested), !found(counterexample, tested),
     ensures
         blocked(Blocked::TooFewTests, tested, counterexample, foils, remote)
         || blocked(Blocked::RejectsEvery, tested, counterexample, foils, remote)
@@ -556,16 +565,17 @@ pub proof fn diverged_has_one_reason(counterexample: Search, tested: Search, foi
 {
 }
 
-/// A complete code or compaction search with at least two verified candidates
-/// diverges exactly when it does not agree: it selects, or it diverges.
-pub proof fn diverges_unless_agree(search: Search)
+/// A complete code or compaction search's verified candidates disagree
+/// exactly when at least two are verified and they show more than one behavior.
+pub proof fn disagree_is_two_behaviors(search: Search)
     requires
-        complete(search), search.kind is Code || search.kind is Compaction, two_verified(search),
+        complete(search), search.kind is Code || search.kind is Compaction,
     ensures
-        diverges(search) == !agree(search),
+        disagree(search) == (two_verified(search)
+            && exists|out: Seq<nat>, other: Seq<nat>| out != other && behaviors(search).contains(out) && behaviors(search).contains(other)),
 {
-    if agree(search) {
-        if diverges(search) {
+    if two_verified(search) && agree(search) {
+        if exists|out: Seq<nat>, other: Seq<nat>| out != other && behaviors(search).contains(out) && behaviors(search).contains(other) {
             let (out, other) = choose|out: Seq<nat>, other: Seq<nat>| out != other
                 && behaviors(search).contains(out) && behaviors(search).contains(other);
             // Every behavior is the one every verified candidate prints.
@@ -581,7 +591,7 @@ pub proof fn diverges_unless_agree(search: Search)
             assert(out == printed);
             assert(other == printed);
         }
-    } else {
+    } else if two_verified(search) {
         match search.kind {
             Kind::Code { .. } => {
                 let (i, j) = choose|i: int, j: int| verified_at(search, i) && verified_at(search, j) && at(search, i).out != at(search, j).out;
@@ -719,7 +729,7 @@ tokenized_state_machine!{ bon {
     /// and verify check accepted it. Code is granted on a trunk they reject;
     /// compaction and a counterexample on trunk, on one they accept. A
     /// counterexample on a candidate is granted on a selected one, or on a
-    /// verified one of a search that diverges.
+    /// verified one of a search whose verified candidates disagree.
     transition!{ grant(kind: Kind, n: nat, agent_process_limit: nat, observed: Map<Object, Seq<Option<Permission>>>, checks_accept: bool) {
         require isolated(observed);
         require forall|search_index: int| 0 <= search_index < pre.searches.len() ==> complete(#[trigger] pre.searches[search_index]);
@@ -731,7 +741,7 @@ tokenized_state_machine!{ bon {
         require kind matches Kind::Counterexample { goal: Some(agent_process) } ==>
             0 <= agent_process.search < pre.searches.len()
             && (selected(pre.searches[agent_process.search], agent_process.index)
-                || (diverges(pre.searches[agent_process.search]) && verified_at(pre.searches[agent_process.search], agent_process.index)))
+                || (disagree(pre.searches[agent_process.search]) && verified_at(pre.searches[agent_process.search], agent_process.index)))
             && pre.searches[agent_process.search].base == pre.trunk.last();
         require kind matches Kind::Foil { goal: agent_process, changed } ==>
             0 <= agent_process.search < pre.searches.len()

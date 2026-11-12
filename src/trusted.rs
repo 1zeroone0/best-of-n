@@ -1573,12 +1573,12 @@ pub fn record_selected(m: &Manifest, i: usize) {
     record(m, &format!("selected {search} {i}"));
 }
 
-/// Record that the latest search diverges: a counterexample search on it
-/// follows, its tests built on its verified candidate i.
+/// Record that the latest search's verified candidates disagree: a
+/// counterexample search on it follows, its tests built on its verified candidate i.
 #[verifier::external_body]
-pub fn record_diverged(m: &Manifest, i: usize) {
+pub fn record_disagreed(m: &Manifest, i: usize) {
     let search = RUNS.load(std::sync::atomic::Ordering::SeqCst).saturating_sub(1);
-    record(m, &format!("diverged {search} {i}"));
+    record(m, &format!("disagreed {search} {i}"));
 }
 
 // ── the trace: each transition under its spec name, with its arguments ──
@@ -1667,8 +1667,8 @@ pub fn record_blocked(m: &Manifest, reason: spec::Blocked, Ghost(tested): Ghost<
 {
     let (word, sentence) = match reason {
         spec::Blocked::TooFewVerified => ("too_few_verified", "fewer than two verified candidates"),
-        spec::Blocked::Disagree => ("disagree", "the verified candidates show more than one behavior, and no test splits them: the spec does not decide between them"),
-        spec::Blocked::TooFewTests => ("too_few_tests", "fewer than two verified tests, and none splits the candidates"),
+        spec::Blocked::Disagree => ("disagree", "the verified candidates disagree, two tests judged every one, and none splits them: the spec does not decide between them"),
+        spec::Blocked::TooFewTests => ("too_few_tests", "fewer than two verified tests, or on candidates that disagree fewer than two that judge every one, and none splits the candidates"),
         spec::Blocked::RejectsEvery => ("rejects_every", "a verified test rejects every candidate"),
         spec::Blocked::Undiscriminating => ("undiscriminating", "fewer than two verified tests judge every candidate and reject a foil"),
         spec::Blocked::TrunkMoved => ("trunk_moved", "trunk moved during the search; run it again"),
@@ -2775,7 +2775,7 @@ mod tests {
     }
 
     #[test]
-    fn a_test_on_a_search_that_diverges_is_told_they_behave_differently() {
+    fn a_test_on_candidates_that_disagree_is_told_they_behave_differently() {
         fn text<T: FromIterator<char>>(s: &str) -> T { s.chars().collect() }
         let candidate = |commit: &str, out: u64| Candidate {
             commit: text(commit), base: text("head"), accepted: true, proved: true, changed: vec![], out: vec![Hash(out)],
