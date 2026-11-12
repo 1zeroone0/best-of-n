@@ -506,21 +506,26 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
             };
             let mut decided: Vec<usize> = of("predicate").into_iter().filter(|i| layers(&spec.items[*i].name).is_some()).collect();
             decided.sort_by_key(|i| spec.items[*i].name.clone());
+            // A layer absent for every predicate is said once, under the legend, not as a column of —.
             // Columns drop from the right where they do not fit: Program, then Target.
             let heads = ["Gate", "Implementation", "Target", "Program"];
             let cws = [6usize, 16, 8, 10];
-            let mut ncols = 4;
-            while ncols > 2 && w < nw + 3 + cws[..ncols].iter().sum::<usize>() { ncols -= 1; }
+            let present: Vec<usize> = (0..4).filter(|&k| decided.iter().any(|i| layers(&spec.items[*i].name).is_some_and(|l| l[k].is_some()))).collect();
+            let absent: Vec<&str> = (0..4).filter(|k| !present.contains(k)).map(|k| heads[k]).collect();
+            let mut ncols = present.len();
+            while ncols > 2 && w < nw + 3 + present[..ncols].iter().map(|&k| cws[k]).sum::<usize>() { ncols -= 1; }
+            let cols = &present[..ncols];
             if !decided.is_empty() {
                 out.push(blank());
                 let mut h = vec![Span::styled(format!(" {}", fit("Spec → Code", nw + 2)), pal.strong())];
-                for (l, cw) in heads.iter().zip(cws).take(ncols) { h.push(Span::styled(fit(l, cw), pal.muted())); }
+                for &k in cols { h.push(Span::styled(fit(heads[k], cws[k]), pal.muted())); }
                 out.push(Row::text(Line::from(h)));
                 out.push(Row::text(Line::from(vec![Span::raw(format!("   {}", " ".repeat(nw))), Span::styled("✓ ", pal.ink()), Span::styled("Present   ", pal.muted()), Span::styled("— ", pal.faint()), Span::styled("Absent", pal.muted())])));
+                if !absent.is_empty() { out.push(Row::text(Line::from(vec![Span::raw(format!("   {}", " ".repeat(nw))), Span::styled(fit(&format!("{}: absent for every one", absent.join(", ")), room), pal.muted())]))); }
             }
             for i in &decided {
                 let ls = layers(&spec.items[*i].name).unwrap();
-                let row = ls.iter().zip(cws).take(ncols).map(|(c, cw)| match c { Some(x) => Span::styled(fit(x, cw), pal.ink()), None => Span::styled(fit("—", cw), pal.faint()) }).collect();
+                let row = cols.iter().map(|&k| match &ls[k] { Some(x) => Span::styled(fit(x, cws[k]), pal.ink()), None => Span::styled(fit("—", cws[k]), pal.faint()) }).collect();
                 out.push(item(*i, row));
             }
             let rest: Vec<usize> = of("predicate").into_iter().filter(|i| !decided.contains(i)).collect();
@@ -617,7 +622,17 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
             let measured: Vec<usize> = p.processes.iter().flat_map(|b| &b.searches).filter(|s| !clears(&s.kind) && s.verified >= 2).map(|s| groups(s).len()).collect();
             if !measured.is_empty() {
                 let pinned = measured.iter().filter(|n| **n == 1).count();
-                out.push(line("One output", vec![num(pinned.to_string()), Span::styled(format!("   of {} searches", measured.len()), pal.muted())]));
+                // Every search one output: agree has never told verified candidates apart.
+                let always = if pinned == measured.len() { " · every one: agree split none" } else { "" };
+                out.push(line("One output", vec![num(pinned.to_string()), Span::styled(format!("   of {} searches{always}", measured.len()), pal.muted())]));
+            }
+            // A kind's rank every candidate in range shares: it selects nothing.
+            for kind in ["code", "compaction"] {
+                let ranks: Vec<Option<i64>> = p.processes.iter().flat_map(|b| &b.searches).filter(|s| s.kind == kind).flat_map(|s| &s.candidates).map(|c| c.rank).collect();
+                if ranks.len() > 1 && ranks.windows(2).all(|w| w[0] == w[1]) {
+                    out.push(line(&format!("{} rank", cap(kind)), vec![num(ranks[0].map_or("—".to_string(), |r| r.to_string())),
+                        Span::styled(format!("   for all {} candidates: the smallest diff, then the earliest, selects", ranks.len()), pal.muted())]));
+                }
             }
 
             out.push(blank());
@@ -806,8 +821,18 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
                         continue;
                     }
                     let foil = s.kind == "foil";
+                    // A rank every candidate shares selects nothing: said once, its column left out.
+                    // Compaction's rank is −lines: shown against the base.
+                    let shown = rank_shown(s);
+                    if let Some(n) = rank_note(s, &shown) { t.extend(hanging(&n, 2, wd, pal.muted())); }
+                    let rank_cell = |c: &Facts| match shown {
+                        RankShown::Constant(_) => String::new(),
+                        RankShown::Lines { base } => c.rank.map_or("—".into(), |r| signed(-r - base)),
+                        RankShown::Raw => c.rank.map_or("—".into(), |r| r.to_string()),
+                    };
+                    let rw = if matches!(shown, RankShown::Constant(_)) { 0 } else { s.candidates.iter().map(|c| rank_cell(c).chars().count()).max().unwrap_or(0).max(4) + 2 };
                     marks.push((t.len(), Mark::Header));
-                    t.push(Line::from(Span::styled(format!("  {}{}{}{}{}{}", fit("#", 4), fit("Commit", 9), fit(if foil { "Foil?" } else { "Verified" }, 11), right("Rank", 4), right("Lines", 11), right("Gen", 8)), pal.muted())));
+                    t.push(Line::from(Span::styled(format!("  {}{}{}{}{}{}", fit("#", 4), fit("Commit", 9), fit(if foil { "Foil?" } else { "Verified" }, 11), if rw == 0 { String::new() } else { right("Rank", rw) }, right("Lines", 11), right("Gen", 8)), pal.muted())));
                     for c in cs {
                         let sel = s.selected == Some(c.index);
                         // A foil is meant to fail Verus: accepted and not proved is what it is for.
@@ -819,7 +844,7 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
                             Span::styled(format!("  {}", fit(&format!("{}{}", c.index, if sel { "★" } else { "" }), 4)), if sel { pal.tone(Tone::Blue) } else { pal.muted() }),
                             Span::styled(fit(&short(c.commit.as_deref().unwrap_or("")), 9), pal.ink()),
                             Span::styled(fit(v, 11), vs),
-                            Span::styled(right(&c.rank.map_or("—".into(), |r| r.to_string()), 4), pal.ink()),
+                            Span::styled(if rw == 0 { String::new() } else { right(&rank_cell(c), rw) }, pal.ink()),
                             Span::styled(right(&lines, 11), pal.ink()),
                             Span::styled(right(&money(c.generation), 8), pal.ink()),
                             Span::styled(if c.flags.is_empty() { String::new() } else { format!("  {}", c.flags.iter().map(|f| cap(&f.replace('_', " "))).collect::<Vec<_>>().join(" · ")) }, pal.tone(Tone::Red)),
@@ -1007,6 +1032,67 @@ fn groups(s: &SearchTrace) -> Vec<Vec<&Facts>> {
         match out.iter_mut().find(|g| g[0].out == c.out) { Some(g) => g.push(c), None => out.push(vec![c]) }
     }
     out
+}
+
+/// How a search's ranks are shown: one value every candidate has (or none
+/// has), so its column is left out; compaction's, as lines against the base,
+/// where every candidate's rank is −(the base's lines + added − removed), the
+/// manifest's compaction rank being minus the line count; otherwise as recorded.
+#[derive(Debug, PartialEq, Clone, Copy)]
+enum RankShown { Constant(Option<i64>), Lines { base: i64 }, Raw }
+
+fn rank_shown(s: &SearchTrace) -> RankShown {
+    let ranks: Vec<Option<i64>> = s.candidates.iter().map(|c| c.rank).collect();
+    if ranks.windows(2).all(|w| w[0] == w[1]) { return RankShown::Constant(ranks.first().copied().flatten()); }
+    if s.kind == "compaction" {
+        let bases: Option<Vec<i64>> = s.candidates.iter().filter(|c| c.rank.is_some())
+            .map(|c| Some(-c.rank? - c.added? as i64 + c.removed? as i64)).collect();
+        if let Some(b) = bases.filter(|b| !b.is_empty() && b.windows(2).all(|w| w[0] == w[1])) { return RankShown::Lines { base: b[0] }; }
+    }
+    RankShown::Raw
+}
+
+/// A count of lines with its sign: +3, −19, ±0.
+fn signed(n: i64) -> String { if n > 0 { format!("+{n}") } else if n < 0 { format!("−{}", -n) } else { "±0".into() } }
+
+/// What decided a code or compaction search's selection, against the verified
+/// candidate that came next (the spec's `beats`): rank, then the smaller diff,
+/// then the earlier index.
+fn decided(s: &SearchTrace, shown: RankShown) -> Option<String> {
+    let i = s.selected?;
+    let sel = s.candidates.iter().find(|c| c.index == i)?;
+    let (r, d) = (|c: &Facts| c.rank.unwrap_or(0), |c: &Facts| c.diff.unwrap_or(0));
+    let next = s.candidates.iter().filter(|c| c.verified && c.index != i).min_by_key(|c| (-r(c), d(c), c.index))?;
+    Some(if r(sel) != r(next) {
+        match shown {
+            RankShown::Lines { base } => format!("selected #{i} by fewest lines: {} against #{}'s {}", signed(-r(sel) - base), next.index, signed(-r(next) - base)),
+            _ => format!("selected #{i} by rank: {} against #{}'s {}", r(sel), next.index, r(next)),
+        }
+    } else if d(sel) != d(next) {
+        format!("selected #{i} by smallest diff: {} lines against #{}'s {}", d(sel), next.index, d(next))
+    } else {
+        format!("selected #{i} as the earliest: rank and diff tied with #{}", next.index)
+    })
+}
+
+/// The line over a candidate table that says what its rank is and what
+/// selected: `Rank 0 for every candidate; selected #2 by smallest diff: …`.
+fn rank_note(s: &SearchTrace, shown: &RankShown) -> Option<String> {
+    if clears(&s.kind) { return None; }
+    let how = decided(s, *shown);
+    let rank = match shown {
+        RankShown::Constant(Some(r)) => Some(format!("Rank {r} for every candidate")),
+        RankShown::Constant(None) => Some("No rank".to_string()),
+        RankShown::Lines { base } => Some(format!("Rank is −lines, shown against the base's {base}{}", s.selected
+            .and_then(|i| s.candidates.iter().find(|c| c.index == i)).and_then(|c| c.rank).map_or(String::new(), |r| format!(" (#{}★ raw {})", s.selected.unwrap_or(0), signed(r))))),
+        RankShown::Raw => None,
+    };
+    match (rank, how) {
+        (Some(r), Some(h)) => Some(format!("{r}; {h}")),
+        (Some(r), None) => Some(r),
+        (None, Some(h)) => Some(cap(&h)),
+        (None, None) => None,
+    }
 }
 
 /// Why a search blocked, from what its candidates show: too few verified, or
@@ -1766,6 +1852,34 @@ mod tests {
         // The detail's steps say which attempt they are; the list's are short.
         assert_eq!(steps(&g, false), "Attempt 2 of 2 (search 3) · Candidates 12 · Verified 12 · Selected #6 · Foils 2 · Counterexample None found");
         assert_eq!(steps(&g, true), "12→12→#6 · 2 foils · None found · 0b1e1a5");
+    }
+
+    fn ranked(kind: &str, selected: u64, cs: &[(i64, u64, u64, u64)]) -> SearchTrace {
+        serde_json::from_value(serde_json::json!({ "kind": kind, "selected": selected, "candidates": cs.iter().enumerate().map(|(i, (rank, diff, added, removed))|
+            serde_json::json!({ "index": i, "accepted": true, "verified": true, "rank": rank, "diff": diff, "added": added, "removed": removed })).collect::<Vec<_>>() })).unwrap()
+    }
+
+    #[test]
+    fn a_rank_every_candidate_shares_is_said_once_with_what_selected() {
+        // Code's rank is echo 0: the smallest diff selects.
+        let s = ranked("code", 1, &[(0, 159, 150, 9), (0, 154, 150, 4), (0, 155, 150, 5)]);
+        assert_eq!(rank_shown(&s), RankShown::Constant(Some(0)));
+        assert_eq!(rank_note(&s, &rank_shown(&s)).unwrap(), "Rank 0 for every candidate; selected #1 by smallest diff: 154 lines against #2's 155");
+        // Tied on both: the earliest.
+        let s = ranked("code", 0, &[(0, 9, 5, 4), (0, 9, 5, 4)]);
+        assert!(rank_note(&s, &rank_shown(&s)).unwrap().ends_with("selected #0 as the earliest: rank and diff tied with #1"));
+        // A foil's rank selects nothing and is not noted.
+        assert!(rank_note(&ranked("foil", 0, &[(0, 2, 1, 1), (0, 2, 1, 1)]), &RankShown::Constant(Some(0))).is_none());
+    }
+
+    #[test]
+    fn a_compaction_rank_reads_as_lines_against_the_base() {
+        // Rank is −(lines): 11376 at the base, −19 for +28 −47.
+        let s = ranked("compaction", 0, &[(-11357, 75, 28, 47), (-11372, 14, 5, 9)]);
+        assert_eq!(rank_shown(&s), RankShown::Lines { base: 11376 });
+        assert_eq!(rank_note(&s, &rank_shown(&s)).unwrap(), "Rank is −lines, shown against the base's 11376 (#0★ raw −11357); selected #0 by fewest lines: −19 against #1's −4");
+        // Ranks that are not −lines of one base stay as recorded.
+        assert_eq!(rank_shown(&ranked("compaction", 0, &[(-5, 1, 1, 0), (-100, 1, 1, 0)])), RankShown::Raw);
     }
 
     #[test]
