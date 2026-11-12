@@ -665,9 +665,21 @@ fn warm(m: &Manifest, head: &str) -> (bool, bool) {
         // Made once: a later run (the next attempt) leaves the first copy alone.
         let snapshot = scratch("trunk.snapshot/build");
         if WARM.get().is_some() || snapshot.exists() { remove_build(config, &build); return None; }
-        let copied = Command::new("cp").arg("-cR").arg(format!("{}/", build.display())).arg(&snapshot)
-            .stderr(Stdio::null()).status().is_ok_and(|s| s.success());
+        // agent's files there that only agent may read (rustc's incremental session
+        // locks are 0600) are made readable first, or the copy fails. (The directory
+        // itself is engineer's, so agent's chmod reports failure on it: the copy decides.)
+        let _ = as_agent(config, std::path::Path::new("/tmp"), &[], &["chmod".into(), "-R".into(), "a+rX".into(), build.to_string_lossy().into()])
+            .stderr(Stdio::null()).status();
+        let copy = Command::new("cp").arg("-cR").arg(format!("{}/", build.display())).arg(&snapshot).output();
+        let copied = copy.as_ref().is_ok_and(|o| o.status.success());
         remove_build(config, &build);
+        if !copied {
+            // Every build then starts cold: say so where the run's traces are.
+            let why = copy.map_or_else(|e| e.to_string(), |o| String::from_utf8_lossy(&o.stderr).to_string());
+            write_trace(&log.join("trunk-build"), format!("trunk's build was not copied, so every build starts cold: {why}"));
+            let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&snapshot).stderr(Stdio::null()).status();
+            let _ = std::fs::remove_dir_all(&snapshot);
+        }
         copied.then_some(snapshot)
     })();
     TRUNK_PROVED.store(result.1, std::sync::atomic::Ordering::SeqCst);
