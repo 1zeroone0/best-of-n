@@ -703,6 +703,20 @@ fn build_directory(config: &Config, name: &str) -> Result<PathBuf, String> {
     clone_build(config, warm.as_deref(), name)
 }
 
+/// A session's build directory, empty, and trunk's build for bon's cargo to
+/// clone into it at the session's first cargo (once trunk's build is ready).
+fn session_build(config: &Config, name: &str) -> Result<(PathBuf, Option<PathBuf>), String> {
+    if WARMING.load(std::sync::atomic::Ordering::SeqCst) {
+        let start = Instant::now();
+        while WARM.get().is_none() && start.elapsed() < Duration::from_secs(config.agent_process.time) {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+    let d = scratch(name);
+    writable_dir(&d)?;
+    Ok((d, WARM.get().cloned().flatten()))
+}
+
 /// A build directory named `name`: empty, or a copy-on-write clone of `from`.
 fn clone_build(config: &Config, from: Option<&std::path::Path>, name: &str) -> Result<PathBuf, String> {
     let d = scratch(name);
@@ -737,7 +751,8 @@ fn ensure_build(config: &Config, d: &std::path::Path) -> bool {
 
 /// agent empties a build directory; engineer removes the directory itself at cleanup.
 fn remove_build(config: &Config, d: &std::path::Path) {
-    if !d.exists() { return; }
+    // Missing, or empty (a session that never built): nothing of agent's to remove.
+    if std::fs::read_dir(d).map_or(true, |mut e| e.next().is_none()) { return; }
     let _ = as_agent(config, std::path::Path::new("/tmp"), &[], &["rm".into(), "-rf".into(), d.to_string_lossy().into()])
         .stderr(Stdio::null()).status();
 }
@@ -933,6 +948,19 @@ my @args = @ARGV;
 if (@args >= 2 && $args[0] eq 'verus' && $args[1] =~ /^(verify|focus|build|check)$/ && !grep { /^--num-threads/ } @args) {
     my ($sep) = grep { $args[$_] eq '--' } 0 .. $#args;
     if (defined $sep) { splice @args, $sep + 1, 0, '--num-threads', $threads } else { push @args, '--', '--num-threads', $threads }
+}
+# A session's build: trunk's, cloned at its first cargo (bon sets BON_WARM for
+# sessions, never for checks), so a session that never builds costs no clone.
+if ($ENV{BON_WARM} && $ENV{CARGO_TARGET_DIR}) {
+    my $t = $ENV{CARGO_TARGET_DIR};
+    if (open(my $l, '>>', "$t/.bon-warm.lock")) {
+        flock($l, LOCK_EX);
+        unless (-e "$t/.bon-warm") {
+            system('/bin/cp', '-cR', "$ENV{BON_WARM}/", $t) == 0 or warn "bon's cargo: trunk's build not cloned; this build starts cold\n";
+            if (open(my $m, '>', "$t/.bon-warm")) { close $m }
+        }
+        close $l;
+    }
 }
 my $held;  # open until exec, and after it: cargo, and all it starts, hold the slot
 unless ($ENV{BON_CHECK_SLOT}) {
@@ -1854,7 +1882,13 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
     // Its own build, a clone of trunk's, for the session alone: its first cargo
     // is warm. The judge never reuses it (an agent process could forge cargo's
     // fingerprints there and have a planted artifact judged, and cached).
-    let build = match build_directory(config, &format!("{search}.{index}.build/build")) {
+    // bon's cargo makes the clone at the session's first cargo (BON_WARM), so a
+    // session that never builds (one sample) costs no clone; without bon's
+    // cargo, it is made now.
+    let lazy = wrapper(config).is_some();
+    let made = if lazy { session_build(config, &format!("{search}.{index}.build/build")) }
+               else { build_directory(config, &format!("{search}.{index}.build/build")).map(|b| (b, None)) };
+    let (build, warm) = match made {
         Ok(b) => b,
         Err(e) => { write_trace(&trace.join("error"), e); return (None, 0); }
     };
@@ -1863,7 +1897,8 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
     let text = prompt(kind, config, &aim(m, kind, target, start));
     write_trace(&trace.join("prompt"), &text);
     let b = build.to_string_lossy().to_string();
-    let env = [("CARGO_TARGET_DIR", b.clone()), ("BON_BUILD", b), ("CARGO_BUILD_JOBS", config.pools.threads.to_string())];
+    let mut env = vec![("CARGO_TARGET_DIR", b.clone()), ("BON_BUILD", b), ("CARGO_BUILD_JOBS", config.pools.threads.to_string())];
+    if let Some(w) = warm { env.push(("BON_WARM", w.to_string_lossy().to_string())); }
     let c = as_agent_on(config, &with_wrapper(config, config.path.clone()), &dir, &env, &argv);
     let (_, stdout, killed) = supervise(c, Some(text), Duration::from_secs(config.agent_process.time), &trace.join("harness"));
     drop(session);
@@ -2392,6 +2427,21 @@ mod tests {
         assert_eq!(run(&["test", "-q"], &[("BON_CHECK_SLOT", "held"), ("CARGO_BUILD_JOBS", "2")]), "2 held test -q\nfree\n");
         // Done: the slot is free again.
         assert!(std::fs::File::open(slots.join("check.0")).unwrap().try_lock().is_ok());
+        // A session's first cargo clones trunk's build into its own; a later one leaves it alone.
+        let (warm, target) = (d.join("warm"), d.join("target"));
+        for x in [&warm.join("debug"), &target] { std::fs::create_dir_all(x).unwrap(); }
+        std::fs::write(warm.join("debug/artifact"), "trunk").unwrap();
+        let session = [("BON_WARM", warm.to_str().unwrap()), ("CARGO_TARGET_DIR", target.to_str().unwrap()), ("BON_CHECK_SLOT", "held")];
+        run(&["build"], &session);
+        assert_eq!(std::fs::read_to_string(target.join("debug/artifact")).unwrap(), "trunk");
+        std::fs::write(target.join("debug/artifact"), "the session's").unwrap();
+        run(&["build"], &session);
+        assert_eq!(std::fs::read_to_string(target.join("debug/artifact")).unwrap(), "the session's");
+        // A check (no BON_WARM) clones nothing.
+        let other = d.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        run(&["build"], &[("CARGO_TARGET_DIR", other.to_str().unwrap()), ("BON_CHECK_SLOT", "held")]);
+        assert!(!other.join("debug").exists());
         let _ = std::fs::remove_dir_all(&d);
     }
 
