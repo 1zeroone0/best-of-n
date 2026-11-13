@@ -110,7 +110,8 @@ The repository holds the words; this skill does not repeat them.
   (`path`, `build`, `run`, `tests`, `visible`), trunk.
 - `/etc/bon/host.toml`, the host file: agent's `path`, model `prices`, and
   the pools: `generation` (model sessions at once), `checks` (checks at once,
-  the judge's and agents' own cargo), `check_threads`.
+  the judge's and agents' own cargo; by default free memory / 1.5 GB, at
+  most 2 threads per core among them), `check_threads`.
 
 ## Two levels
 

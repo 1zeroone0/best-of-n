@@ -705,9 +705,13 @@ const HOST_TEMPLATE: &str = r#"# bon's host file: facts about this host, not abo
 
 # Two pools, each shared by every bon process on this host; width per search
 # stays what each repository's bon.toml says. generation: model sessions at
-# once (default 64; a session waits on the model). checks: CPU-heavy commands
-# at once, the judge's checks and every cargo an agent process runs (default
-# cores / check_threads, never more than free memory / 1.5 GB). check_threads:
+# once (default 64; a session waits on the model). checks: commands at once,
+# the judge's checks and every cargo an agent process runs. A check slot is a
+# share of memory: by default as many checks run as free memory holds at
+# 1.5 GB each, and no more than 2 threads per core among them, since a check
+# computes only part of its time (it also starts processes, links, writes
+# files, and on macOS waits while the system scans each new binary); the
+# cores are shared among the checks that compute, not divided. check_threads:
 # threads one check may use (default 2). cores and memory_gb: what the default
 # check pool is sized from, this machine's cores and free memory when absent.
 # verdicts: the verdict cache's directory (default /tmp/bon/verdicts). cleanup:
@@ -715,7 +719,7 @@ const HOST_TEMPLATE: &str = r#"# bon's host file: facts about this host, not abo
 # Another host file (a benchmark's, sized as another machine) is named by
 # BON_HOST: it must be writable by its owner alone, root or the user bon runs as.
 # generation = 64
-# checks = 7
+# checks = 14
 # check_threads = 2
 
 # PATH for agent processes and checks. Nothing else is inherited. Checks drop

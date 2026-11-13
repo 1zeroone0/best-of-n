@@ -133,8 +133,8 @@ struct Host {
     #[serde(default)]
     jobs: Option<usize>,
     /// How many checks run at once, host-wide: the judge's and every cargo an
-    /// agent process runs. Default: cores / check_threads, never more than
-    /// free memory / 1.5 GB.
+    /// agent process runs. Default: free memory / 1.5 GB, never more than
+    /// 2 * cores / check_threads (see `check_pool`).
     #[serde(default)]
     checks: Option<usize>,
     /// Threads one check may use (CARGO_BUILD_JOBS, Verus --num-threads). Default 2.
@@ -692,8 +692,8 @@ fn warm(m: &Manifest, head: &str) -> (bool, bool) {
     WARMING.store(true, std::sync::atomic::Ordering::SeqCst);
     let (config, root) = (&m.config, &m.root);
     let mut result = (false, false);
+    let dir = scratch(&format!("trunk/{}", repository_name(root)));
     let built = (|| -> Option<PathBuf> {
-        let dir = scratch(&format!("trunk/{}", repository_name(root)));
         check_directory(root, head, &dir).ok()?;
         let build = scratch("trunk.build/build");
         writable_dir(&build).ok()?;
@@ -704,8 +704,6 @@ fn warm(m: &Manifest, head: &str) -> (bool, bool) {
         let tests = config.checks.test.iter().enumerate().all(|(k, v)| run(v, format!("trunk-test-{k}")));
         let proved = config.checks.verify.iter().enumerate().all(|(k, v)| run(v, format!("trunk-verify-{k}")));
         result = (tests, proved);
-        let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
-        let _ = std::fs::remove_dir_all(&dir);
         // agent wrote that build, and every agent process runs as agent: what
         // every build clones is engineer's copy of it, which none can change.
         // Made once: a later run (the next attempt) leaves the first copy alone.
@@ -718,6 +716,7 @@ fn warm(m: &Manifest, head: &str) -> (bool, bool) {
             .stderr(Stdio::null()).status();
         let copy = Command::new("cp").arg("-cR").arg(format!("{}/", build.display())).arg(&snapshot).output();
         let copied = copy.as_ref().is_ok_and(|o| o.status.success());
+        if copied { write_links(&snapshot, &dir); }
         remove_build(config, &build);
         if !copied {
             // Every build then starts cold: say so where the run's traces are.
@@ -728,9 +727,82 @@ fn warm(m: &Manifest, head: &str) -> (bool, bool) {
         }
         copied.then_some(snapshot)
     })();
+    let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
+    let _ = std::fs::remove_dir_all(&dir);
     TRUNK_PROVED.store(result.1, std::sync::atomic::Ordering::SeqCst);
     let _ = WARM.set(built);
     result
+}
+
+/// How a build directory is made from trunk's (as agent: `sh -c CLONE from to`):
+/// a copy-on-write clone of it, then each file `links` (beside it) names is
+/// hard-linked instead. A clone is a new file to macOS, which scans every new
+/// executable and library once, host-wide and one at a time, when it is first
+/// loaded; a hard link is the file trunk's build already loaded. A link that
+/// fails leaves the clone.
+const CLONE: &str = r#"cp -cR "$1/" "$2" || exit 1
+l="$(dirname "$1")/links"
+[ -f "$l" ] || exit 0
+while IFS= read -r f; do ln -f "$1/$f" "$2/$f" 2>/dev/null; done < "$l"
+exit 0"#;
+
+/// How many clones run at once, host-wide. Clones that run together contend
+/// in the file system: one alone costs 0.1 CPU-s, each of 7 at once 0.6, of
+/// 14 at once 1.2, and 14 take longer at once than two at a time.
+const CLONES: usize = 2;
+
+/// Make `to` from `from` as CLONE says, as agent, in one of the CLONES slots.
+fn clone_into(config: &Config, from: &std::path::Path, to: &std::path::Path) -> bool {
+    let argv: Vec<String> = vec!["/bin/sh".into(), "-c".into(), CLONE.into(), "sh".into(), from.to_string_lossy().into(), to.to_string_lossy().into()];
+    let _slot = Slot::take_in(&slots_dir(), "clone", CLONES);
+    as_agent(config, std::path::Path::new("/tmp"), &[], &argv).status().is_ok_and(|s| s.success())
+}
+
+/// Name, beside trunk's build `snapshot`, the files every build may share with
+/// it rather than clone: the libraries a compiler loads (proc macros) of crates
+/// none of whose sources is in the repository (`checkout`), per their
+/// dep-info. No candidate can change such a crate's sources, and the toolchain
+/// and environment are the checks' own, so cargo never rebuilds it in place;
+/// were it to, the write fails (the file is engineer's) and the check fails
+/// closed. No agent process can write the shared file.
+fn write_links(snapshot: &std::path::Path, checkout: &std::path::Path) {
+    let mut links = Vec::new();
+    let mut dirs = vec![snapshot.to_path_buf()];
+    while let Some(d) = dirs.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            let p = e.path();
+            if !e.file_type().is_ok_and(|t| t.is_dir()) { continue; }
+            // <profile>/deps, or <triple>/<profile>/deps: never deeper.
+            if p.file_name().is_some_and(|n| n == "deps") { links.extend(shared_in(snapshot, &p, checkout)); }
+            else if p.strip_prefix(snapshot).map_or(0, |r| r.components().count()) < 2 { dirs.push(p); }
+        }
+    }
+    let file = snapshot.with_file_name("links");
+    let text: String = links.iter().map(|l| format!("{l}\n")).collect();
+    if std::fs::write(&file, text).is_ok() {
+        let _ = std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o644));
+    }
+}
+
+/// In one deps directory: each `lib<stem>.dylib` (or `.so`) whose `<stem>.d`
+/// lists only absolute sources outside `checkout`, relative to `snapshot`.
+fn shared_in(snapshot: &std::path::Path, deps: &std::path::Path, checkout: &std::path::Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(deps).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        let Some(stem) = name.strip_suffix(".d") else { continue };
+        let Ok(text) = std::fs::read_to_string(e.path()) else { continue };
+        // The first rule: `<output>: <source> <source> …`, spaces in a path escaped.
+        let Some((_, sources)) = text.lines().next().and_then(|l| l.split_once(": ")) else { continue };
+        let sources: Vec<String> = sources.replace("\\ ", "\0").split(' ').filter(|s| !s.is_empty()).map(|s| s.replace('\0', " ")).collect();
+        let outside = |s: &String| { let p = std::path::Path::new(s); p.is_absolute() && !p.starts_with(checkout) };
+        if sources.is_empty() || !sources.iter().all(outside) { continue; }
+        for lib in [format!("lib{stem}.dylib"), format!("lib{stem}.so")] {
+            let p = deps.join(&lib);
+            if p.is_file() { if let Ok(r) = p.strip_prefix(snapshot) { out.push(r.to_string_lossy().to_string()); } }
+        }
+    }
+    out
 }
 
 /// A build directory that starts as a copy-on-write clone of trunk's build:
@@ -767,9 +839,7 @@ fn clone_build(config: &Config, from: Option<&std::path::Path>, name: &str) -> R
     // engineer makes the directory; agent fills it with a clone.
     writable_dir(&d)?;
     if let Some(w) = from {
-        let argv: Vec<String> = vec!["cp".into(), "-cR".into(), format!("{}/", w.display()), d.to_string_lossy().into()];
-        let ok = as_agent(config, std::path::Path::new("/tmp"), &[], &argv).status().map_err(|e| e.to_string())?.success();
-        if !ok { return Err(format!("{} as agent", argv.join(" "))); }
+        if !clone_into(config, w, &d) { return Err(format!("cannot clone {} into {} as agent", w.display(), d.display())); }
     }
     Ok(d)
 }
@@ -785,10 +855,7 @@ fn ensure_build(config: &Config, d: &std::path::Path) -> bool {
     let _one = one.lock().unwrap_or_else(|e| e.into_inner());
     if d.exists() { return true; }
     let warm = WARM.get().cloned().flatten();
-    let made = writable_dir(d).is_ok() && warm.is_none_or(|w| {
-        let argv: Vec<String> = vec!["cp".into(), "-cR".into(), format!("{}/", w.display()), d.to_string_lossy().into()];
-        as_agent(config, std::path::Path::new("/tmp"), &[], &argv).status().is_ok_and(|s| s.success())
-    });
+    let made = writable_dir(d).is_ok() && warm.is_none_or(|w| clone_into(config, &w, d));
     if !made { remove_build(config, d); let _ = std::fs::remove_dir(d); }
     made
 }
@@ -843,13 +910,21 @@ fn hash(s: &str) -> u64 {
 // ── pools ───────────────────────────────────────────────
 
 /// Memory one check may need: bon's own cold `cargo verus verify` peaks near
-/// 2.3 GB, a warm one near 0.7 GB.
+/// 2.3 GB, a warm one (a clone of trunk's build) near 0.7 GB.
 const CHECK_GB: f64 = 1.5;
+
+/// Threads the running checks may have together, per core. A check computes
+/// for part of its time only: it also starts processes, links, writes files,
+/// and on macOS waits while the system scans each new binary it runs (one at
+/// a time, host-wide). The kernel sandbox's checks use 1.0 CPU-s in 2.6 s
+/// alone, and less of their time under load; the scheduler shares the cores
+/// among those that compute.
+const THREADS_PER_CORE: usize = 2;
 
 /// The host's two pools, each shared by every bon process on the host.
 /// Generation: model sessions at once; a session waits on the model, so it is
-/// wide. Checks: CPU-heavy commands at once, the judge's checks and every cargo
-/// an agent process runs alike, each given `threads` threads.
+/// wide. Checks: commands at once, the judge's checks and every cargo an agent
+/// process runs alike, each given `threads` threads.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Pools { pub generation: usize, pub checks: usize, pub threads: usize }
 
@@ -869,10 +944,12 @@ impl Pools {
     }
 }
 
-/// The default check pool: one check per `threads` cores, never more than free
-/// memory holds at CHECK_GB each, at least one.
+/// The default check pool: as many checks as free memory holds at CHECK_GB
+/// each, and no more than THREADS_PER_CORE threads per core among them; at
+/// least one. Memory is what a check holds whether it computes or waits, so
+/// it bounds them; the cores are shared, not divided.
 fn check_pool(cores: usize, memory_gb: f64, threads: usize) -> usize {
-    (cores / threads.max(1)).min((memory_gb / CHECK_GB) as usize).max(1)
+    ((memory_gb / CHECK_GB) as usize).min(THREADS_PER_CORE * cores / threads.max(1)).max(1)
 }
 
 /// Memory free for checks now, in GB: vm_stat's free, inactive, speculative and
@@ -904,8 +981,7 @@ fn slots_dir() -> PathBuf {
         let d = base().join("checks");
         if let Err(e) = writable_dir(&d) { eprintln!("bon: {}: {e}", d.display()); }
         // Made here, so agent opens them read-only (a sandboxed harness may not create files).
-        for k in 0..256 {
-            let p = d.join(format!("check.{k}"));
+        for p in (0..256).map(|k| d.join(format!("check.{k}"))).chain((0..CLONES).map(|k| d.join(format!("clone.{k}")))) {
             if !p.exists() && std::fs::write(&p, "").is_ok() {
                 let _ = std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o644));
             }
@@ -918,7 +994,19 @@ fn slots_dir() -> PathBuf {
 /// directory, k below the pool's size. The kernel frees a lock when its
 /// holder's last descriptor closes, so a slot a dead process held is free at
 /// once. bon's cargo takes check slots the same way, as agent.
-struct Slot(#[allow(dead_code)] std::fs::File);
+struct Slot(std::fs::File);
+
+/// A slot this process freed: its own waiters look again at once, not at
+/// their next poll (another process's freed slot is found by polling).
+static FREED: (std::sync::Mutex<u64>, std::sync::Condvar) = (std::sync::Mutex::new(0), std::sync::Condvar::new());
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+        *FREED.0.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        FREED.1.notify_all();
+    }
+}
 
 /// A pool's slot as this process holds it: first a place among the process's
 /// own waiters (at most the pool's size of them look for a host-wide slot, so
@@ -964,6 +1052,7 @@ impl Slot {
 
     fn take_in(dir: &std::path::Path, name: &str, n: usize) -> Slot {
         loop {
+            let seen = *FREED.0.lock().unwrap_or_else(|e| e.into_inner());
             for k in 0..n.max(1) {
                 let p = dir.join(format!("{name}.{k}"));
                 // Read-only: a slot file agent made is locked the same way.
@@ -974,7 +1063,8 @@ impl Slot {
                 });
                 if let Ok(f) = f { if f.try_lock().is_ok() { return Slot(f); } }
             }
-            std::thread::sleep(Duration::from_millis(250));
+            let freed = FREED.0.lock().unwrap_or_else(|e| e.into_inner());
+            if *freed == seen { let _ = FREED.1.wait_timeout(freed, Duration::from_millis(250)); }
         }
     }
 }
@@ -1003,7 +1093,21 @@ if ($ENV{BON_WARM} && $ENV{CARGO_TARGET_DIR}) {
     if (open(my $l, '>>', "$t/.bon-warm.lock")) {
         flock($l, LOCK_EX);
         unless (-e "$t/.bon-warm") {
-            system('/bin/cp', '-cR', "$ENV{BON_WARM}/", $t) == 0 or warn "bon's cargo: trunk's build not cloned; this build starts cold\n";
+            # One of the host's clone slots, as bon takes them (see CLONES).
+            my ($c, $open) = (undef, 1);
+            while (!$c && $open) {
+                $open = 0;
+                for my $k (0 .. @CLONES@ - 1) {
+                    my $f;
+                    sysopen($f, "$slots/clone.$k", O_RDONLY) or sysopen($f, "$slots/clone.$k", O_RDONLY | O_CREAT, 0644) or next;
+                    $open = 1;
+                    if (flock($f, LOCK_EX | LOCK_NB)) { $c = $f; last }
+                    close $f;
+                }
+                select(undef, undef, undef, 0.05) unless $c;
+            }
+            system('/bin/sh', '-c', q{@CLONE@}, 'sh', $ENV{BON_WARM}, $t) == 0 or warn "bon's cargo: trunk's build not cloned; this build starts cold\n";
+            close $c if $c;
             if (open(my $m, '>', "$t/.bon-warm")) { close $m }
         }
         close $l;
@@ -1026,6 +1130,9 @@ unless ($ENV{BON_CHECK_SLOT}) {
 exec { 'cargo' } 'cargo', @args or die "bon's cargo: no cargo on PATH: $!\n";
 "#;
 
+/// bon's cargo with trunk's clone spelled in: the same CLONE every build is made by.
+fn cargo_text() -> String { CARGO.replace("@CLONE@", CLONE).replace("@CLONES@", &CLONES.to_string()) }
+
 /// The directory holding bon's cargo for this bon process, engineer's: agent
 /// may read and run it, never write it. None if it could not be written; then
 /// nothing is pooled or capped beyond what bon sets itself.
@@ -1034,7 +1141,7 @@ fn wrapper(config: &Config) -> Option<PathBuf> {
     DIR.get_or_init(|| {
         if is_agent() { return None; }
         let d = scratch("bin");
-        let text = CARGO.replace("@SLOTS@", &slots_dir().to_string_lossy()).replace("@N@", &config.pools.checks.to_string())
+        let text = cargo_text().replace("@SLOTS@", &slots_dir().to_string_lossy()).replace("@N@", &config.pools.checks.to_string())
             .replace("@THREADS@", &config.pools.threads.to_string()).replace("@SELF@", &d.to_string_lossy());
         let p = d.join("cargo");
         let r = std::fs::write(&p, text).and_then(|_| std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)));
@@ -1093,7 +1200,7 @@ fn identity(config: &Config) -> String {
             .envs(config.toolchain.iter().map(|(k, v)| (k.as_str(), v.as_str()))).stdin(Stdio::null()).output()
             .map_or_else(|e| e.to_string(), |o| String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr));
         let host = host_file().ok().and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
-        format!("{id}\0{}\0{}\0{}\0{}\0{}", String::from_utf8_lossy(&host), version("rustc"), version("cargo"), version("verus"), CARGO)
+        format!("{id}\0{}\0{}\0{}\0{}\0{}", String::from_utf8_lossy(&host), version("rustc"), version("cargo"), version("verus"), cargo_text())
     }).clone()
 }
 
@@ -1164,10 +1271,31 @@ fn run_check_with(config: &Config, on: &On, threads: usize, dir: &std::path::Pat
     let t = target.to_string_lossy().to_string();
     let env = [("BON_BUILD", t.clone()), ("CARGO_TARGET_DIR", t), ("CARGO_BUILD_JOBS", threads.to_string()), ("BON_CHECK_SLOT", "held".to_string())];
     let c = as_agent_on(config, &with_wrapper(config, checks_path(config)), dir, &env, &argv);
-    let _slot = Slot::check(config);
+    // The slot the thread holds for its checks (see `holding`), or one for this check alone.
+    let _slot = HOLDING.with(|h| match &mut *h.borrow_mut() {
+        Some(held) => { if held.is_none() { *held = Some(Slot::check(config)); } None }
+        None => Some(Slot::check(config)),
+    });
     let r = supervised(c, None, Duration::from_secs(config.agent_process.time), log);
     if let (Some(k), true) = (&key, r.exited) { store(k, r.ok, &r.stdout, &r.log); }
     (r.ok && !r.killed, r.stdout, r.killed)
+}
+
+thread_local! {
+    /// While `holding`: Some, and the check slot this thread took at its first
+    /// check that ran (None until one runs: the cache may answer them all).
+    static HOLDING: std::cell::RefCell<Option<Option<Held>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Run `f`, its checks in one check slot taken at the first that runs and
+/// freed when `f` returns: a candidate's checks, which run one after another,
+/// wait for a slot once, not once each. Never around work that waits on other
+/// threads' checks, which would hold a slot idle. Nested, the outer holds.
+fn holding<T>(f: impl FnOnce() -> T) -> T {
+    let outer = HOLDING.with(|h| { let mut h = h.borrow_mut(); let outer = h.is_some(); if !outer { *h = Some(None); } outer });
+    let r = f();
+    if !outer { HOLDING.with(|h| *h.borrow_mut() = None); }
+    r
 }
 
 /// Every core: for the checks something waits on alone.
@@ -2061,7 +2189,7 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
     let mut out = Vec::new();
     let mut rank = 0i64;
     match kind {
-        Kind::Code { .. } | Kind::Compaction { .. } | Kind::Foil { .. } => {
+        Kind::Code { .. } | Kind::Compaction { .. } | Kind::Foil { .. } => holding(|| {
             for (k, v) in config.checks.test.iter().enumerate() {
                 if !run_check(config, &on, &cdir, build, v, &trace.join(format!("test-{k}"))).0 { accepted = false; break; }
             }
@@ -2087,7 +2215,7 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
                     rejects_counterexamples = rejects_every_counterexample(m, &commit, start, build, trace);
                 }
             }
-        }
+        }),
         Kind::Counterexample { .. } => {
             // Its test is accepted when it builds on the tree it tests: trunk's own build
             // lags a spec change that adds or changes a gate. Verus's verdict is trunk's.
@@ -2124,7 +2252,7 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
                     }
                 }
                 let on: Vec<(String, PathBuf)> = tasks.iter().map(|(_, _, c, l)| (c.clone(), l.clone())).collect();
-                let results = verdicts(m, &on, bytes, build, &format!("{search}.{index}"));
+                let results = verdicts(m, &on, bytes, &format!("{search}.{index}"));
                 for ((foil, j, _, _), r) in tasks.into_iter().zip(results) {
                     let Some(a) = r else { continue };
                     if foil { accepts_foils.push((j, a)); } else { accepts.push((j, a)); }
@@ -2274,7 +2402,8 @@ fn verdict_in(m: &Manifest, commit: &str, test: &[u8], build: &dyn Fn() -> Optio
         None => {}
     }
     let dir = scratch(&format!("test.{}/{}", hash(&format!("{commit}{log:?}")), repository_name(&m.root)));
-    let result = (|| {
+    // The build and the run, one after another in one check slot.
+    let result = holding(|| {
         materialize(&m.root, commit, &dir).ok()?;
         let p = dir.join(&config.counterexample.path);
         std::fs::create_dir_all(p.parent().unwrap_or(&dir)).ok()?;
@@ -2285,7 +2414,7 @@ fn verdict_in(m: &Manifest, commit: &str, test: &[u8], build: &dyn Fn() -> Optio
         if !built { return None; }
         let (ok, _, killed) = run_check(config, &on, &dir, &build, run, log);
         (!killed).then_some(ok)
-    })();
+    });
     let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
     let _ = std::fs::remove_dir_all(&dir);
     result
@@ -2294,9 +2423,9 @@ fn verdict_in(m: &Manifest, commit: &str, test: &[u8], build: &dyn Fn() -> Optio
 /// A test's verdict on each of `tasks` (a commit, its log), at once through the
 /// check pool. Tasks on one tree run one after another, so the first's result
 /// answers the rest from the cache; a verdict that must run builds in its own
-/// copy-on-write clone of `build` (cargo locks a build directory: one build at
-/// a time), removed after. `name` names those clones.
-fn verdicts(m: &Manifest, tasks: &[(String, PathBuf)], test: &[u8], build: &std::path::Path, name: &str) -> Vec<Option<bool>> {
+/// clone of trunk's build (cargo locks a build directory: one build at a
+/// time), removed after. `name` names those clones.
+fn verdicts(m: &Manifest, tasks: &[(String, PathBuf)], test: &[u8], name: &str) -> Vec<Option<bool>> {
     let config = &m.config;
     let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
     for (i, (commit, _)) in tasks.iter().enumerate() {
@@ -2317,10 +2446,10 @@ fn verdicts(m: &Manifest, tasks: &[(String, PathBuf)], test: &[u8], build: &std:
                     let (commit, log) = &tasks[i];
                     let made: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
                     let make = || {
-                        // From the judge's build if a check made it, else from trunk's.
+                        // From trunk's build, whose shared files it links (a judge's
+                        // build's copy of them would be new files again).
                         let warm = WARM.get().cloned().flatten();
-                        let from = if build.exists() { Some(build) } else { warm.as_deref() };
-                        let d = clone_build(config, from, &format!("{name}.verdict.{i}/build")).ok()?;
+                        let d = clone_build(config, warm.as_deref(), &format!("{name}.verdict.{i}/build")).ok()?;
                         *made.lock().unwrap() = Some(d.clone());
                         Some(d)
                     };
@@ -2464,16 +2593,51 @@ mod tests {
     fn the_pools_are_sized_from_the_host_file() {
         let host = |keys: &str| -> Host { toml::from_str(&format!("{keys}\npath = []\nrustup_home = \"\"\ncargo_home = \"\"\n[prices]\n")).unwrap() };
         // queue 26: width stays what bon.toml says; the pools bound what runs at once.
-        // A host file sized as a 24 GB, 12-core laptop with 16 GB free: 6 checks of 2 threads; 64 sessions.
-        assert_eq!(Pools::of(&host("cores = 12\nmemory_gb = 16")), Pools { generation: 64, checks: 6, threads: 2 });
+        // A host file sized as a 24 GB, 12-core laptop with 16 GB free: memory holds 10 checks of 2 threads; 64 sessions.
+        assert_eq!(Pools::of(&host("cores = 12\nmemory_gb = 16")), Pools { generation: 64, checks: 10, threads: 2 });
         // Memory binds before cores: 7 GB free holds 4 checks.
         assert_eq!(Pools::of(&host("cores = 14\nmemory_gb = 7")).checks, 4);
+        // Threads bind before memory: 14 cores take 28 threads, 14 checks of 2.
+        assert_eq!(Pools::of(&host("cores = 14\nmemory_gb = 45")).checks, 14);
         // Every knob; at least one of each.
         assert_eq!(Pools::of(&host("generation = 500\nchecks = 3\ncheck_threads = 4")), Pools { generation: 500, checks: 3, threads: 4 });
         assert_eq!(Pools::of(&host("cores = 1\nmemory_gb = 0.5\ncheck_threads = 0")).checks, 1);
         // The older `jobs` is the generation pool.
         assert_eq!(Pools::of(&host("jobs = 7\nchecks = 5\ncheck_threads = 3")), Pools { generation: 7, checks: 5, threads: 3 });
-        assert_eq!(check_pool(14, 40.0, 2), 7);
+        assert_eq!(check_pool(14, 40.0, 2), 14);
+        assert_eq!(check_pool(14, 40.0, 1), 26);
+    }
+
+    #[test]
+    fn a_build_shares_only_libraries_built_from_outside_the_repository() {
+        let d = std::env::temp_dir().join(format!("bon-links-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (snapshot, checkout) = (d.join("build"), d.join("checkout"));
+        let deps = snapshot.join("debug/deps");
+        std::fs::create_dir_all(&deps).unwrap();
+        let file = |name: &str, text: &str| std::fs::write(deps.join(name), text).unwrap();
+        // A registry proc macro: every source absolute, outside the checkout.
+        file("macros-1.d", "/b/debug/deps/libmacros-1.dylib: /home/registry/macros/src/lib.rs /home/registry/macros/src/a\\ b.rs\n\n/x:\n");
+        file("libmacros-1.dylib", "");
+        // The repository's own proc macro (relative), and one whose source is in the checkout.
+        file("own-2.d", "/b/debug/deps/libown-2.dylib: src/lib.rs\n");
+        file("libown-2.dylib", "");
+        file("path-3.d", &format!("/b/debug/deps/libpath-3.dylib: {}/macros/lib.rs\n", checkout.display()));
+        file("libpath-3.dylib", "");
+        // A registry library that is no dylib: cloned like the rest.
+        file("syn-4.d", "/b/debug/deps/libsyn-4.rlib: /home/registry/syn/src/lib.rs\n");
+        file("libsyn-4.rlib", "");
+        write_links(&snapshot, &checkout);
+        assert_eq!(std::fs::read_to_string(d.join("links")).unwrap(), "debug/deps/libmacros-1.dylib\n");
+        // CLONE clones the build, then links what `links` names.
+        let to = d.join("clone");
+        assert!(Command::new("/bin/sh").args(["-c", CLONE, "sh"]).arg(&snapshot).arg(&to).status().unwrap().success());
+        use std::os::unix::fs::MetadataExt;
+        let ino = |p: &std::path::Path| std::fs::metadata(p).unwrap().ino();
+        assert_eq!(ino(&to.join("debug/deps/libmacros-1.dylib")), ino(&deps.join("libmacros-1.dylib")));
+        assert_ne!(ino(&to.join("debug/deps/libown-2.dylib")), ino(&deps.join("libown-2.dylib")));
+        assert!(to.join("debug/deps/libsyn-4.rlib").exists());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -2483,7 +2647,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         let (bin, toolchain, slots) = (d.join("bin"), d.join("toolchain"), d.join("slots"));
         for x in [&bin, &toolchain, &slots] { std::fs::create_dir_all(x).unwrap(); }
-        let text = CARGO.replace("@SLOTS@", &slots.to_string_lossy()).replace("@N@", "1").replace("@THREADS@", "3").replace("@SELF@", &bin.to_string_lossy());
+        let text = cargo_text().replace("@SLOTS@", &slots.to_string_lossy()).replace("@N@", "1").replace("@THREADS@", "3").replace("@SELF@", &bin.to_string_lossy());
         std::fs::write(bin.join("cargo"), text).unwrap();
         // The toolchain's cargo, here: it says what it was given and whether slot 0 is held.
         std::fs::write(toolchain.join("cargo"), format!("#!/bin/sh\necho \"$CARGO_BUILD_JOBS $BON_CHECK_SLOT $*\"\n/usr/bin/lockf -k -t 0 {} /usr/bin/true && echo free || echo held\n", slots.join("check.0").display())).unwrap();
