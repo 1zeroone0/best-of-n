@@ -1087,8 +1087,12 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
                                 else if rejected.len() == members.len() { ("Rejects".into(), pal.ink()) } else { (format!("Rejects {}", rejected.join(" ")), pal.ink()) };
                             row.push(Span::styled(fit(&m, mw), st));
                             for j in &foils { let (v, st) = verdict(c.accepts_foils.iter().find(|(k, _)| k == j).map(|(_, a)| *a)); row.push(Span::styled(fit(v, 9), st)); }
-                            if !c.flags.is_empty() { row.push(Span::styled(c.flags.iter().map(|f| cap(&f.replace('_', " "))).collect::<Vec<_>>().join(" · "), pal.tone(Tone::Red))); }
+                            // Its flags beside it where they fit, else under it: never cut.
+                            let flags = c.flags.iter().map(|f| cap(&f.replace('_', " "))).collect::<Vec<_>>().join(" · ");
+                            let beside = !flags.is_empty() && width_of(&row) + flags.chars().count() + 2 <= wd;
+                            if beside { row.push(Span::styled(format!("  {flags}"), pal.tone(Tone::Red))); }
                             t.push(Line::from(row));
+                            if !flags.is_empty() && !beside { t.extend(hanging(&flags, 8, wd, pal.tone(Tone::Red))); }
                         }
                         continue;
                     }

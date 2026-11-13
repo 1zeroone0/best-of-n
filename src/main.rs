@@ -181,7 +181,8 @@ fn main() {
     // built from; trunk is what the last fetch or push left in the remote's ref.
     let (remote, branch) = best_of_n::trusted::remote_trunk(r);
     let at_trunk = |p: &str| git(r, &["show", &format!("refs/remotes/{remote}/{branch}:{p}")]).ok();
-    if at_trunk("Cargo.toml").is_some_and(|t| t.contains("name = \"best-of-n\"")) {
+    // Said before a search only, where the kernel decides: other commands' own lines stay one.
+    if SEARCHES.contains(&name) && at_trunk("Cargo.toml").is_some_and(|t| t.contains("name = \"best-of-n\"")) {
         let differ = stale(at_trunk);
         if !differ.is_empty() {
             eprintln!("bon: this bon was built from another kernel than trunk's ({}); reinstall: cargo install --path . --locked", differ.join(", "));

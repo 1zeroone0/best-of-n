@@ -648,7 +648,8 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
                 let w = s["width"].as_u64().map_or(String::new(), |w| format!(" of {w}"));
                 let n = |k: &str| s[k].as_u64().unwrap_or(0);
                 let now = now_counts(n("in_flight"), n("in_checks"), n("waiting"));
-                format!("{}: {}{w} agent processes returned{}, {} verified so far", s["kind"].as_str().unwrap_or("search"), s["returned"],
+                let many = s["width"].as_u64().unwrap_or(s["returned"].as_u64().unwrap_or(0)) != 1;
+                format!("{}: {}{w} agent {} returned{}, {} verified so far", s["kind"].as_str().unwrap_or("search"), s["returned"], if many { "processes" } else { "process" },
                     if now.is_empty() { String::new() } else { format!(" ({now})") }, s["verified"])
             }).unwrap_or_else(|| "starting".into()),
             // Pushed says the rest: they agreed, and no counterexample split them.

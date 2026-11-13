@@ -281,9 +281,11 @@ fn of(root: &Path, state: &Value) -> Vec<Value> {
                 if contested > 0 { format!("; {contested} cue{} only one agent process cited", if contested == 1 { "" } else { "s" }) } else { String::new() }),
             format!("{}: {}{}", ids.join(", "), intents.first().and_then(|x| x["intent"].as_str()).unwrap_or(""), if intents.len() > 1 { " …" } else { "" }),
         ]);
+        // The transcript's name inside single quotes, a quote in it closed and escaped.
+        let q = source.replace('\'', "'\\''");
         i["choices"] = json!([
             { "choice": "accept", "how": format!("git am {path}"), "cost": format!("{} queued; {}", ids.join(", "), push_cost(state, "code")) },
-            { "choice": "reject", "how": format!("git commit --allow-empty -m 'queue: not {source}' -m 'Source: {source}'"), "cost": "nothing; bon queue will not propose it again" },
+            { "choice": "reject", "how": format!("git commit --allow-empty -m 'queue: not {q}' -m 'Source: {q}'"), "cost": "nothing; bon queue will not propose it again" },
         ]);
         if let Some((hash, time, subject, _)) = cites.iter().find(|(_, _, _, s)| s.iter().any(|s| s == source)) {
             let added = git(root, &["diff-tree", "--no-commit-id", "--numstat", "-r", hash, "--", ".bon/queue.tsv"]).split_whitespace().next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
@@ -406,7 +408,7 @@ pub fn text(pending: &[&Interrupt], now: i64, width: usize) -> String {
 /// The terminal's width, when standard output is one; else no wrapping.
 fn width() -> usize {
     use std::io::IsTerminal;
-    if !std::io::stdout().is_terminal() { return usize::MAX / 2; }
+    if !std::io::stdout().is_terminal() { return crate::view::REPORT_W; }
     ratatui::crossterm::terminal::size().map_or(80, |(w, _)| w as usize).max(20)
 }
 

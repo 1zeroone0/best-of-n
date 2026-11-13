@@ -3292,7 +3292,9 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, p: &Pro
     // made only if a check must run (the verdict cache may answer them all).
     let judge = named_build(&format!("{search}.{index}.judge/build"), Start::Trunk);
     // What its checks said is kept with it, for a push or landing to check again.
-    let (captured, decided) = deciding(|| capture(m, kind, search, index, start, &dir, &judge, target, foils, trace));
+    // A program that never started wrote nothing: its untouched directory is no candidate to judge.
+    let (captured, decided) = if started { deciding(|| capture(m, kind, search, index, start, &dir, &judge, target, foils, trace)) }
+        else { (Err(format!("its program never started (exit {}); nothing to judge", exit.map_or("none".to_string(), |c| c.to_string()))), Default::default()) };
     if let Ok(c) = &captured { keep_decided(&c.commit.iter().collect::<String>(), decided); }
     let candidate = captured.map_err(|e| { write_trace(&trace.join("error"), &e); }).ok();
     remove_build(config, &judge);
