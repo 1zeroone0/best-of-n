@@ -59,7 +59,8 @@ const LIGHT: Palette = Palette {
 ///   header; In flight in Where It Went.
 /// - Yellow, stopped short and waiting on someone: a blocked goal or search,
 ///   why it blocked and a reason inferred for it, and Blocked in Where It Went;
-///   a proposal waiting for engineer (its dot and ● Waiting); a code or
+///   a proposal waiting for engineer (its dot and ● Waiting); a pending
+///   interrupt (its dot in Project's Pending, and ● Pending N in the header); a code or
 ///   compaction search that neither selected nor blocked nor runs; any outcome
 ///   without a tone of its own.
 /// - Blue, selected: the selected candidate (its index and ★), a search that
@@ -642,6 +643,37 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
         }
         Tab::Project => {
             let t = &p.totals;
+            // What waits on engineer comes first: each pending interrupt, oldest
+            // first, what happened, and each choice with its cost and how it is made.
+            let pending: Vec<&projection::Interrupt> = p.interrupts.iter().filter(|i| i.resolved.is_none()).collect();
+            if !pending.is_empty() {
+                out.push(header("Pending", Some(pending.len())));
+                let names = pending.iter().flat_map(|i| i.choices.iter().map(|c| c.choice.chars().count() + 4).chain([i.kind.chars().count() + 4])).max().unwrap_or(0) + 2;
+                let at = names.min(w / 3).max(6);
+                let labeled = |out: &mut Vec<Row>, label: Vec<Span<'static>>, text: &str, style: Style| {
+                    let first = width_of(&label) < at;
+                    if !first { out.push(Row::text(Line::from(label.clone()))); }
+                    for (k, l) in hanging(text, at, w, style).into_iter().enumerate() {
+                        let mut v = if k == 0 && first { label.clone() } else { Vec::new() };
+                        let used = width_of(&v);
+                        v.push(Span::raw(" ".repeat(at.saturating_sub(used))));
+                        v.push(Span::styled(l.spans[0].content.chars().skip(at).collect::<String>(), style));
+                        out.push(Row::text(Line::from(v)));
+                    }
+                };
+                for (k, i) in pending.iter().enumerate() {
+                    if k > 0 { out.push(blank()); }
+                    let repo = if i.repository.is_empty() || p.repo.name.as_deref() == Some(i.repository.as_str()) { String::new() } else { format!(" · {}", i.repository) };
+                    labeled(&mut out, vec![Span::styled("  ● ", pal.tone(Tone::Yellow)), Span::styled(cap(&i.kind), pal.ink())],
+                        &format!("{} · raised {}{repo}", i.about, ago(p.repo.now, i.raised).to_lowercase()), pal.ink());
+                    for line in &i.what { labeled(&mut out, Vec::new(), line, pal.muted()); }
+                    for c in &i.choices {
+                        labeled(&mut out, vec![Span::styled(format!("    {}", cap(&c.choice)), pal.ink())], &c.cost, pal.ink());
+                        labeled(&mut out, Vec::new(), &c.how, pal.faint());
+                    }
+                }
+                out.push(blank());
+            }
             let lw = 18;
             let num = |s: String| Span::styled(right(&s, 9), pal.ink());
             let line = |label: &str, value: Vec<Span<'static>>| Row::text(kv(pal, 3, lw, label, value));
@@ -718,6 +750,7 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
                 (view::success_table(t), vec!["Success probability per agent process", "Success probability per attempt", "Attempt a"]),
                 (run, vec!["Time, cost to a push", "Median, 90th percentile"]),
                 (view::per_verified_table(t), vec!["Cost per verified candidate"]),
+                (view::turnaround_table(t), vec!["Turnaround"]),
             ];
             for (k, (rows, names)) in tables.into_iter().enumerate() {
                 // The run-time distribution's fits stand under its table, or alone where nothing pushed.
@@ -1389,6 +1422,9 @@ fn draw(f: &mut Frame, app: &mut App) {
         left.push(Span::styled(format!("● Running {running}"), pal.tone(Tone::Orange)));
         if !now.is_empty() { left.push(Span::styled(format!(" · agent processes {now}"), pal.ink())); }
     } else { left.push(Span::styled("Idle", pal.muted())); }
+    // What waits on engineer: the pending interrupts, which Project lists first.
+    let pending = p.interrupts.iter().filter(|i| i.resolved.is_none()).count();
+    if pending > 0 { left.push(Span::styled(format!("   ● Pending {pending}"), pal.tone(Tone::Yellow))); }
     let t = &p.totals;
     let cost = |gw: &str, rate: bool| {
         let mut v = vec![Span::styled(money(Some(t.generation)), pal.ink()), Span::styled(format!(" {gw} + "), pal.muted()),

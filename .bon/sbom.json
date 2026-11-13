@@ -2554,6 +2554,10 @@
       },
       {
         "name": "bon:trusted-file",
+        "value": "src/interrupt.rs"
+      },
+      {
+        "name": "bon:trusted-file",
         "value": "src/tui.rs"
       },
       {

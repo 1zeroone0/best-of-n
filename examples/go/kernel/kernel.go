@@ -139,6 +139,8 @@ type Projection struct {
 	Queue *[]QueueLine `json:"queue"`
 	// Queue proposals waiting for engineer: patches bon queue wrote.
 	Proposals []Proposal `json:"proposals"`
+	// What only engineer can answer, oldest first: pending, then resolved.
+	Interrupts []Interrupt `json:"interrupts"`
 	// Intents no longer on the queue, and the commit that took each off, newest first.
 	Retired []Retired `json:"retired"`
 	// What no search may change: bon's directory, the checks, trusted code.
@@ -209,6 +211,88 @@ type Totals struct {
 	// Time and cost to a push, by kind, and each search's as a fixed part
 	// plus a part per distinct tree.
 	RunTime []RunTime `json:"run_time"`
+	// Interrupt turnaround, by kind.
+	Turnaround []Turnaround `json:"turnaround"`
+}
+
+// One kind of interrupt's turnaround: of its interrupts, how many resolved
+// and how many are pending, and the seconds from raised to resolved of those
+// that resolved, as median and 90th percentile.
+type Turnaround struct {
+	Kind     string `json:"kind"`
+	Resolved uint64 `json:"resolved"`
+	Pending  uint64 `json:"pending"`
+	Time     Spread `json:"time"`
+}
+
+// Every record a bon process writes, in one shape: what ran (program), what
+// it was given (context), what it returned (output), how it was judged
+// (verdict) and which behavior its output showed (behavior). An agent
+// process: its program, its prompt, its candidate's commit, what its checks
+// said (proved, accepted, rejected), its agree outputs' hashes. A check: its
+// command, the tree it ran on, its output, its exit, its output's hash. A
+// decision: engineer, what the interrupt showed, the commit that answered it,
+// what came of it, the choice it showed.
+type Record struct {
+	Program  *string `json:"program"`
+	Context  *string `json:"context"`
+	Output   *string `json:"output"`
+	Verdict  *string `json:"verdict"`
+	Behavior *string `json:"behavior"`
+}
+
+// What only engineer can answer, derived from the traces and never stored:
+// pending until the action that answers it, which bon recognises from what is
+// already recorded; there is no dismiss. Kinds: `proposal` (a queue proposal
+// awaiting acceptance), `blocked` (an attempt blocked with its width list or
+// its limit spent), `transcript` (a transcript the host file routes nowhere).
+type Interrupt struct {
+	Kind string `json:"kind"`
+	// The kind and what it is about: `blocked <trace>`, `proposal <source>`, `transcript <sha256>`.
+	Id string `json:"id"`
+	// The repository's name, and its root.
+	Repository string `json:"repository"`
+	Root       string `json:"root"`
+	// What it is about: a goal's title, a proposal's source, a transcript.
+	About string `json:"about"`
+	// A block's reason, by the kernel's word; `limit` for a limit spent.
+	Reason   *string `json:"reason"`
+	Raised   int64   `json:"raised"`
+	Resolved *int64  `json:"resolved"`
+	// What happened, in a line or two, from the trace.
+	What []string `json:"what"`
+	// What engineer may do, and what each costs.
+	Choices []Choice `json:"choices"`
+	// The action that resolved it.
+	Answer *Answer `json:"answer"`
+	// What came of it: how the first bon process of its kind after it ended;
+	// for a proposal it accepted, whether its intents are still queued.
+	CameOfIt *string `json:"came_of_it"`
+	// Its decision record, once bon has written it; its verdict is what came of it.
+	Decision *Record `json:"decision"`
+	// The transcript of the session that answered it, by path and SHA-256.
+	Transcript *Transcript `json:"transcript"`
+}
+
+// One choice: its name, how it is made, and what it costs, from the traces.
+type Choice struct {
+	Choice string `json:"choice"`
+	How    string `json:"how"`
+	Cost   string `json:"cost"`
+}
+
+// The action that answered an interrupt: its commit, if it was one, and its
+// subject, or a later attempt's trace; and which choice it showed.
+type Answer struct {
+	Commit  *string `json:"commit"`
+	Subject string  `json:"subject"`
+	Choice  string  `json:"choice"`
+}
+
+// A pointer to a transcript, and its hash.
+type Transcript struct {
+	Path   string `json:"path"`
+	Sha256 string `json:"sha256"`
 }
 
 // One kind's success probability, over every attempt (`attempt` none) or
@@ -501,6 +585,8 @@ type Facts struct {
 	Accepts []Tuple2[int64, bool] `json:"accepts"`
 	// A test's verdict on each foil it ran on, by index in the foil search.
 	AcceptsFoils []Tuple2[int64, bool] `json:"accepts_foils"`
+	// It, in the one shape every record has.
+	Record Record `json:"record"`
 }
 
 // A queue proposal: a patch adding intents, each with the cue it came from.

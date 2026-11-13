@@ -16,7 +16,7 @@
               "hashes": [
                 {
                   "algorithm": "SHA-256",
-                  "value": "23166278c301485a27619a0a4a4150fbe8abffb3c47b1add5cb141f6911ef3f8"
+                  "value": "230152350c0d81432f0417d54ad3e16402c4f2f8f5eed037383ef6b826189453"
                 }
               ],
               "href": "sbom.json",
@@ -523,6 +523,12 @@
             "class": "file",
             "name": "trusted",
             "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "src/interrupt.rs"
+          },
+          {
+            "class": "file",
+            "name": "trusted",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
             "value": "src/tui.rs"
           },
           {
@@ -637,7 +643,7 @@
         "props": [
           {
             "name": "version",
-            "value": "absent"
+            "value": "2.1.318 (Claude Code)"
           },
           {
             "class": "tool",
@@ -834,12 +840,12 @@
       }
     ],
     "metadata": {
-      "last-modified": "2026-11-13T07:09:47Z",
+      "last-modified": "2026-11-13T06:40:30Z",
       "oscal-version": "1.2.3",
       "remarks": "proven: in the kernel, verified by Verus. trusted: reviewed by the owner, not verified. configured: a fact of the manifest. tested: program code and every other file, judged by the checks. Every control claim is proposed and awaits GRC review.",
       "title": "best-of-n",
-      "version": "f69be13a6faa"
+      "version": "c56b488362fc"
     },
-    "uuid": "6d213d82-61e6-48d9-a657-66ad0196ad5c"
+    "uuid": "3872ed73-6d1d-4961-a919-4e9809190d3e"
   }
 }

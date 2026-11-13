@@ -20,6 +20,8 @@ pub struct Projection {
     pub queue: Option<Vec<QueueLine>>,
     /// Queue proposals waiting for engineer: patches bon queue wrote.
     pub proposals: Vec<Proposal>,
+    /// What only engineer can answer, oldest first: pending, then resolved.
+    pub interrupts: Vec<Interrupt>,
     /// Intents no longer on the queue, and the commit that took each off, newest first.
     pub retired: Vec<Retired>,
     /// What no search may change: bon's directory, the checks, trusted code.
@@ -98,6 +100,100 @@ pub struct Totals {
     /// Time and cost to a push, by kind, and each search's as a fixed part
     /// plus a part per distinct tree.
     pub run_time: Vec<RunTime>,
+    /// Interrupt turnaround, by kind.
+    pub turnaround: Vec<Turnaround>,
+}
+
+/// One kind of interrupt's turnaround: of its interrupts, how many resolved
+/// and how many are pending, and the seconds from raised to resolved of those
+/// that resolved, as median and 90th percentile.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Turnaround {
+    pub kind: String,
+    pub resolved: u64,
+    pub pending: u64,
+    pub time: Spread,
+}
+
+/// Every record a bon process writes, in one shape: what ran (program), what
+/// it was given (context), what it returned (output), how it was judged
+/// (verdict) and which behavior its output showed (behavior). An agent
+/// process: its program, its prompt, its candidate's commit, what its checks
+/// said (proved, accepted, rejected), its agree outputs' hashes. A check: its
+/// command, the tree it ran on, its output, its exit, its output's hash. A
+/// decision: engineer, what the interrupt showed, the commit that answered it,
+/// what came of it, the choice it showed.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Record {
+    pub program: Option<String>,
+    pub context: Option<String>,
+    pub output: Option<String>,
+    pub verdict: Option<String>,
+    pub behavior: Option<String>,
+}
+
+/// What only engineer can answer, derived from the traces and never stored:
+/// pending until the action that answers it, which bon recognises from what is
+/// already recorded; there is no dismiss. Kinds: `proposal` (a queue proposal
+/// awaiting acceptance), `blocked` (an attempt blocked with its width list or
+/// its limit spent), `transcript` (a transcript the host file routes nowhere).
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Interrupt {
+    pub kind: String,
+    /// The kind and what it is about: `blocked <trace>`, `proposal <source>`, `transcript <sha256>`.
+    pub id: String,
+    /// The repository's name, and its root.
+    pub repository: String,
+    pub root: String,
+    /// What it is about: a goal's title, a proposal's source, a transcript.
+    pub about: String,
+    /// A block's reason, by the kernel's word; `limit` for a limit spent.
+    pub reason: Option<String>,
+    pub raised: i64,
+    pub resolved: Option<i64>,
+    /// What happened, in a line or two, from the trace.
+    pub what: Vec<String>,
+    /// What engineer may do, and what each costs.
+    pub choices: Vec<Choice>,
+    /// The action that resolved it.
+    pub answer: Option<Answer>,
+    /// What came of it: how the first bon process of its kind after it ended;
+    /// for a proposal it accepted, whether its intents are still queued.
+    pub came_of_it: Option<String>,
+    /// Its decision record, once bon has written it; its verdict is what came of it.
+    pub decision: Option<Record>,
+    /// The transcript of the session that answered it, by path and SHA-256.
+    pub transcript: Option<Transcript>,
+}
+
+/// One choice: its name, how it is made, and what it costs, from the traces.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Choice {
+    pub choice: String,
+    pub how: String,
+    pub cost: String,
+}
+
+/// The action that answered an interrupt: its commit, if it was one, and its
+/// subject, or a later attempt's trace; and which choice it showed.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Answer {
+    pub commit: Option<String>,
+    pub subject: String,
+    pub choice: String,
+}
+
+/// A pointer to a transcript, and its hash.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Transcript {
+    pub path: String,
+    pub sha256: String,
 }
 
 /// One kind's success probability, over every attempt (`attempt` none) or
@@ -430,6 +526,8 @@ pub struct Facts {
     pub accepts: Vec<(i64, bool)>,
     /// A test's verdict on each foil it ran on, by index in the foil search.
     pub accepts_foils: Vec<(i64, bool)>,
+    /// It, in the one shape every record has.
+    pub record: Record,
 }
 
 /// A queue proposal: a patch adding intents, each with the cue it came from.

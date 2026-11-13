@@ -131,6 +131,25 @@ fn line_counts(c: &Value) -> (Option<u64>, Option<u64>) {
     (added, removed)
 }
 
+/// An agent process in the one shape (`projection::Record`): the five keys of
+/// its facts.json in newer traces; in older ones, what they recorded of each:
+/// its program (`program_of`), the prompt it was given (when its trace has
+/// one), its candidate's commit, what its checks said (from `accepted` and
+/// `proved`), its agree outputs' hashes (`out`).
+fn record_of(facts: &Value, logs: &[String]) -> Value {
+    let c = &facts["candidate"];
+    let or = |k: &str, old: Value| if facts.get(k).is_some() { facts[k].clone() } else { old };
+    let verdict = if c.is_object() { json!(if c["accepted"] != true { "rejected" } else if c["proved"] == true { "proved" } else { "accepted" }) } else { Value::Null };
+    let behavior = c["out"].as_array().filter(|o| !o.is_empty()).map(|o| json!(o.iter().map(|h| h.to_string()).collect::<Vec<_>>().join(","))).unwrap_or(Value::Null);
+    json!({
+        "program": program_of(facts),
+        "context": or("context", if logs.iter().any(|l| l == "prompt") { json!("prompt") } else { Value::Null }),
+        "output": or("output", c["commit"].clone()),
+        "verdict": or("verdict", verdict),
+        "behavior": or("behavior", behavior),
+    })
+}
+
 /// The log of an agent process's program, by its name: `program` in newer
 /// traces, `harness` in older ones.
 const PROGRAM_LOGS: [&str; 2] = ["program", "harness"];
@@ -312,7 +331,7 @@ pub fn date(t: u64) -> String {
 fn now() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) }
 
 /// Dollars to the cent; never `$-0.00`.
-fn money(d: f64) -> String { format!("${:.2}", if d.abs() < 0.005 { 0.0 } else { d }) }
+pub fn money(d: f64) -> String { format!("${:.2}", if d.abs() < 0.005 { 0.0 } else { d }) }
 
 /// A count of things, in words: "1 candidate", "3 candidates".
 fn count(n: usize, one: &str, many: &str) -> String { format!("{n} {}", if n == 1 { one } else { many }) }
@@ -418,6 +437,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
                     None => accepted && (counterexample || c["proved"].as_bool().unwrap_or(false)),
                 };
                 let (lines_added, lines_removed) = line_counts(c);
+                let record = record_of(&facts, &logs);
                 Some((i, json!({
                     "index": i, "program": program_of(&facts), "model": facts["model"],
                     "generation": facts["generation_microdollars"].as_f64().map(|m| m / 1e6),
@@ -432,6 +452,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
                     // A trace from before tests ran on foils (or a candidate that is no test) has none.
                     "accepts": if c["accepts"].is_array() { c["accepts"].clone() } else { json!([]) },
                     "accepts_foils": if c["accepts_foils"].is_array() { c["accepts_foils"].clone() } else { json!([]) },
+                    "record": record,
                 })))
             }).collect();
             candidates.sort_by_key(|(i, _)| *i);
@@ -671,7 +692,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
         json!({ "commits": log.lines().count(), "authors": authors.into_iter().collect::<Vec<_>>() })
     });
 
-    json!({
+    let mut out = json!({
         "configured": configured,
         "groups": groups,
         "repo": {
@@ -712,7 +733,12 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
         "sbom": sbom(root),
         "spec": spec(root, &manifest),
         "system": system(root, &format!("{remote}/{trunk_name}"), &manifest),
-    })
+    });
+    // What only engineer can answer, from all of the above; and how long each took him.
+    let interrupts = crate::interrupt::interrupts(&[(root, &out)]);
+    out["totals"]["turnaround"] = json!(crate::interrupt::turnaround(&interrupts));
+    out["interrupts"] = json!(interrupts);
+    out
 }
 
 /// The SBOM: trunk's, or the working tree's until it is committed.
@@ -945,14 +971,14 @@ fn utilization(processes: &[Value]) -> Value {
 }
 
 /// The median: the middle value, or the mean of the two middle ones.
-fn median(v: &[f64]) -> Option<f64> {
+pub fn median(v: &[f64]) -> Option<f64> {
     let mut s = v.to_vec(); s.sort_by(f64::total_cmp);
     let n = s.len();
     if n == 0 { None } else if n % 2 == 1 { Some(s[n / 2]) } else { Some((s[n / 2 - 1] + s[n / 2]) / 2.0) }
 }
 
 /// The 90th percentile, by nearest rank: the ⌈0.9 n⌉-th smallest.
-fn p90(v: &[f64]) -> Option<f64> {
+pub fn p90(v: &[f64]) -> Option<f64> {
     let mut s = v.to_vec(); s.sort_by(f64::total_cmp);
     let k = (0.9 * s.len() as f64).ceil() as usize;
     s.get(k.max(1) - 1).copied()
@@ -1071,8 +1097,19 @@ pub fn utilization_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
     out
 }
 
+/// The turnaround table, its header first: each kind of interrupt, how many
+/// resolved and are pending, and the median and 90th percentile of the time
+/// from raised to resolved.
+pub fn turnaround_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
+    if t.turnaround.is_empty() { return Vec::new(); }
+    let mut out = vec![["Turnaround", "Resolved", "Pending", "Median", "90th percentile"].map(String::from).to_vec()];
+    let opt = |v: Option<f64>| v.map_or("—".to_string(), dur);
+    for r in &t.turnaround { out.push(vec![cap(&r.kind), r.resolved.to_string(), r.pending.to_string(), opt(r.time.median), opt(r.time.p90)]); }
+    out
+}
+
 /// What the measures' words mean: each measure's formula, said once.
-pub const MEASURE_NOTES: [(&str, &str); 9] = [
+pub const MEASURE_NOTES: [(&str, &str); 10] = [
     ("Success probability per agent process", "verified ÷ agent processes, over reported searches; a foil search's foils ÷ its agent processes"),
     ("Success probability per attempt", "pushed ÷ attempts that ended (pushed, blocked, landed)"),
     ("Attempt a", "the same, over each bon process's a-th attempt and the searches on it"),
@@ -1082,6 +1119,7 @@ pub const MEASURE_NOTES: [(&str, &str); 9] = [
     ("Median, 90th percentile", "the middle value (the mean of the middle two); the ⌈0.9 n⌉-th smallest"),
     ("Per search (inferred)", "least squares: seconds or cost = fixed + per tree × distinct trees, over reported searches"),
     ("Utilization", "held slot-seconds ÷ (size × wall); held: programs' seconds, checks' seconds (none for a cached verdict); wall: the union of the searches' wall times"),
+    ("Turnaround", "an interrupt's raise to the action that resolved it"),
 ];
 
 /// A reason attempts blocked, in words, with its count and how many of those
@@ -1204,8 +1242,9 @@ pub fn measure_lines(t: &crate::projection::Totals) -> Vec<String> {
         lines.push(String::new());
     }
     if !fits.is_empty() { lines.extend(fits); lines.push(String::new()); }
-    let u = utilization_table(t);
-    if !u.is_empty() { lines.extend(aligned(&u)); lines.push(String::new()); }
+    for table in [utilization_table(t), turnaround_table(t)] {
+        if !table.is_empty() { lines.extend(aligned(&table)); lines.push(String::new()); }
+    }
     if lines.is_empty() { return lines; }
     lines.extend(MEASURE_NOTES.iter().map(|(k, v)| format!("{k}: {v}")));
     lines
@@ -1237,6 +1276,16 @@ pub fn text(s: &Value) -> String {
         r["name"].as_str().unwrap_or(""), r["remote"].as_str().unwrap_or(""), r["trunk"].as_str().unwrap_or(""), &trunk_head[..7.min(trunk_head.len())],
         opt(&t["generation"]), opt(&t["time_cost"]), t["rate"].as_f64().map_or(String::new(), |r| format!(" at ${r:.0}/h")),
         opt(&t["cost"]), opt(&t["per_verified_candidate"]), opt(&t["per_push"])));
+    // What waits on engineer, first: each pending interrupt in a line; bon pending has its choices.
+    let pending: Vec<&Value> = s["interrupts"].as_array().into_iter().flatten().filter(|i| i["resolved"].is_null()).collect();
+    if !pending.is_empty() {
+        out.push_str(&format!("pending ({}; bon pending has the choices and what each costs)\n", pending.len()));
+        for i in &pending {
+            out.push_str(&format!("  {:<10} {} · raised {} ago\n      {}\n", i["kind"].as_str().unwrap_or(""), i["about"].as_str().unwrap_or(""),
+                dur((s["repo"]["now"].as_i64().unwrap_or(0) - i["raised"].as_i64().unwrap_or(0)).max(0) as f64), i["what"][0].as_str().unwrap_or("")));
+        }
+        out.push('\n');
+    }
     out.push_str(&outcomes(t));
     let f = &s["filter"];
     if !f["since"].is_null() || !f["until"].is_null() || !f["find"].is_null() {
@@ -1796,6 +1845,12 @@ mod tests {
 
     #[test]
     fn older_and_newer_trace_keys_read_by_presence() {
+        // The one shape: a newer trace's five keys as written; an older one's from what it recorded.
+        let newer = json!({ "program": "bon-sample", "context": "prompt", "output": "c1", "verdict": "proved", "behavior": "7,9", "candidate": { "accepted": false } });
+        assert_eq!(record_of(&newer, &[]), json!({ "program": "bon-sample", "context": "prompt", "output": "c1", "verdict": "proved", "behavior": "7,9" }));
+        let older = json!({ "harness": "claude", "candidate": { "commit": "c2", "accepted": true, "proved": false, "out": [] } });
+        assert_eq!(record_of(&older, &["argv".into(), "prompt".into()]), json!({ "program": "claude", "context": "prompt", "output": "c2", "verdict": "accepted", "behavior": null }));
+        assert_eq!(record_of(&json!({ "harness": "codex", "candidate": null }), &[]), json!({ "program": "codex", "context": null, "output": null, "verdict": null, "behavior": null }));
         // program: the newer word; harness: an older trace's.
         assert_eq!(program_of(&json!({ "program": "codex", "harness": "old" })), json!("codex"));
         assert_eq!(program_of(&json!({ "harness": "claude" })), json!("claude"));

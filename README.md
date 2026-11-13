@@ -48,6 +48,7 @@ bon
 | `bon types [--check]` | the types programs are built on, in TypeScript, Go and Python |
 | `bon account [--check]` | write what is proven, trusted, configured and tested, as OSCAL with its SBOM, or fail if it is stale |
 | `bon check` | every check on the working tree, as candidates are judged; whose fix a failure is; each file that breaks a rule on what a search may write |
+| `bon pending [--transcript FILE]` | what only you can answer, oldest first: what happened, the choices and what each costs |
 | `bon new <name>` | set up a project: a spec with the core nouns, its gates, an empty implementation, the manifest and the queue |
 
 **You decide** the spec and the checks; the [queue](.bon/queue.tsv) holds what
@@ -57,6 +58,28 @@ directory; each check runs as its check slot's own user (`check0`, `check1`,
 …), which writes only its own build directory. bon works on git's objects and the remote's trunk, never your
 working tree: edit while it searches, and pull to follow. Every search's record
 goes to a private git remote of its own, never this repository.
+
+## The trace
+
+Every record a bon process writes has one shape: what ran (**program**), what
+it was given (**context**), what it returned (**output**), how it was judged
+(**verdict**), and which **behavior** its output showed.
+
+| record | program | context | output | verdict | behavior |
+|---|---|---|---|---|---|
+| an agent process, `<pid>/<search>/<index>/facts.json` | its program | `prompt` | its candidate's commit | `proved`, `accepted` or `rejected` | its agree outputs' hashes |
+| a check, its log | `program:` its command | `context:` the tree, and any test written into it | the log's stdout and stderr | `exit:` | `behavior:` its stdout's hash |
+| a decision, `decisions.jsonl` | `engineer` | what the interrupt showed | the commit that answered it | what came of it (derived) | the choice it showed |
+
+Older traces lack some of these keys; the view reads what they recorded of
+each instead. What only you can answer reaches you as an **interrupt**, which
+the view derives from the traces and never stores: a queue proposal, an
+attempt blocked with its width list or limit spent, or a transcript the host
+file routes nowhere. It is **pending** until the action that answers it (a
+commit, or the attempt run again); there is no dismiss. `bon pending` lists
+them and exits 2 while any is pending; when it first sees one resolved it
+writes its decision record, with a pointer to and the SHA-256 of the
+transcript its `--transcript` names, never the transcript itself.
 
 ## What is proven, and what is trusted
 
@@ -117,7 +140,7 @@ once per user layer).
 | [`src/gates.rs`](src/gates.rs) | each decision's contract |
 | [`src/exec.rs`](src/exec.rs) | the decisions, proven |
 | [`src/trusted.rs`](src/trusted.rs) | what Verus does not check; no search may change it |
-| [`src/tui.rs`](src/tui.rs), [`src/projection.rs`](src/projection.rs) | the view, and what it shows as types |
+| [`src/tui.rs`](src/tui.rs), [`src/projection.rs`](src/projection.rs), [`src/interrupt.rs`](src/interrupt.rs) | the view, what it shows as types, and what waits on you |
 | [`template/`](template/) | the project `bon new` sets up |
 | [`examples/`](examples/) | programs on the emitted types: TypeScript, Go, Python with PyTorch |
 | [`.bon/`](.bon/) | the manifest, the queue, the account and its SBOM |
