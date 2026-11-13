@@ -75,30 +75,32 @@ fn read_words(p: &Path) -> Option<Vec<u64>> {
     Some(b.chunks(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect())
 }
 
-/// Which bon processes the projection covers: those last active in
+/// Which bon processes the projection covers: those that started in
 /// [since, until] (unix seconds), whose pid, kind, goal, outcome or any commit
-/// contains `find`. Totals are over the same set.
+/// contains `find`, in any case. Totals are over the same set.
 #[derive(Default, Clone)]
 pub struct Filter { pub since: Option<u64>, pub until: Option<u64>, pub find: Option<String> }
 
 impl Filter {
-    /// From arguments: --since YYYY-MM-DD, --until YYYY-MM-DD (UTC, whole days), --find TEXT.
-    pub fn args(args: &[String]) -> Result<Filter, String> {
-        let at = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
-        let day = |s: String| -> Result<u64, String> {
-            let p: Vec<i64> = s.split('-').map(|x| x.parse().map_err(|_| format!("{s}: not YYYY-MM-DD"))).collect::<Result<_, _>>()?;
-            let [y, m, d] = p[..] else { return Err(format!("{s}: not YYYY-MM-DD")) };
-            Ok((days_from_civil(y, m, d) * 86400) as u64)
+    /// From `--since YYYY-MM-DD`, `--until YYYY-MM-DD` (UTC, whole days) and
+    /// `--find TEXT`; a date that is no calendar date is refused.
+    pub fn new(since: Option<&str>, until: Option<&str>, find: Option<String>) -> Result<Filter, String> {
+        let day = |flag: &str, s: &str| -> Result<u64, String> {
+            let p: Vec<i64> = s.split('-').map(|x| x.parse().unwrap_or(-1)).collect();
+            let t = match p[..] { [y, m, d] if y >= 1970 && (1..=12).contains(&m) && d >= 1 => days_from_civil(y, m, d) * 86400, _ => -1 };
+            // A calendar date reads back as itself: 2026-02-30 does not.
+            if t < 0 || date(t as u64) != s { return Err(format!("{flag} {s} is not a date; write it as YYYY-MM-DD")); }
+            Ok(t as u64)
         };
         Ok(Filter {
-            since: at("--since").map(day).transpose()?,
-            until: at("--until").map(day).transpose()?.map(|t| t + 86399),
-            find: at("--find").map(|f| f.to_lowercase()),
+            since: since.map(|s| day("--since", s)).transpose()?,
+            until: until.map(|s| day("--until", s)).transpose()?.map(|t| t + 86399),
+            find: find.filter(|f| !f.is_empty()),
         })
     }
     fn covers(&self, time: u64, text: &str) -> bool {
         self.since.is_none_or(|s| time >= s) && self.until.is_none_or(|u| time <= u)
-            && self.find.as_ref().is_none_or(|f| text.to_lowercase().contains(f))
+            && self.find.as_ref().is_none_or(|f| text.to_lowercase().contains(&f.to_lowercase()))
     }
 }
 
@@ -330,11 +332,65 @@ pub fn date(t: u64) -> String {
 
 fn now() -> u64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()) }
 
-/// Dollars to the cent; never `$-0.00`.
-pub fn money(d: f64) -> String { format!("${:.2}", if d.abs() < 0.005 { 0.0 } else { d }) }
+// ── formats ─────────────────────────────────────────────
+//
+// One format per kind of thing, in the report, the view, bon pending and
+// bon's errors, each written by one function here:
+//   money      $12.44, −$12.44, never −$0.00; — for none         money, money_or
+//   duration   48s, 7m48s, 31h05m, −58s                             dur
+//   age        now, 4m ago, 2h05m ago, 3d ago                       ago
+//   date       2026-11-12 (UTC; Traces' day headings are local)     date
+//   count      1 candidate, 3 candidates                            count
+//   share      87% (296 of 339); <1% under one percent; — of none   share, percent
+//   negative   − (U+2212), never -                                  signed, money, dur
+//   commit     its first 7 characters                               short
+//   trunk      trunk origin/main 499a245                            trunk
+//   case       a section header in Title Case; a label in sentence case;
+//              a word shown as a value with its first letter upper case;
+//              a command's own status line in lower case            cap
+//   empty      one sentence, its first letter upper case: No bon process yet
+
+/// Dollars to the cent, a negative with −: `$12.44`, `−$12.44`; never `−$0.00`.
+pub fn money(d: f64) -> String {
+    let c = (d * 100.0).round() / 100.0;
+    if c < 0.0 { format!("−${:.2}", -c) } else { format!("${:.2}", c.abs()) }
+}
+
+/// Dollars, or — for none (or a value that is no number).
+pub fn money_or(v: Option<f64>) -> String { v.filter(|v| v.is_finite()).map_or("—".into(), money) }
 
 /// A count of things, in words: "1 candidate", "3 candidates".
-fn count(n: usize, one: &str, many: &str) -> String { format!("{n} {}", if n == 1 { one } else { many }) }
+pub fn count(n: usize, one: &str, many: &str) -> String { format!("{n} {}", if n == 1 { one } else { many }) }
+
+/// An integer with its sign: +3, −19, ±0.
+pub fn signed(n: i64) -> String { if n > 0 { format!("+{n}") } else if n < 0 { format!("−{}", -n) } else { "±0".into() } }
+
+/// A commit by its first 7 characters.
+pub fn short(c: &str) -> String { c.chars().take(7).collect() }
+
+/// A word shown as a value: its first letter upper case.
+pub fn cap(s: &str) -> String { let mut c = s.chars(); c.next().map_or(String::new(), |f| f.to_uppercase().chain(c).collect()) }
+
+/// Trunk as bon works on it, the remote's ref: `trunk origin/main 499a245`;
+/// what the manifest or git does not say is left out, and nothing when neither says anything.
+pub fn trunk(remote: Option<&str>, branch: Option<&str>, head: Option<&str>) -> String {
+    let at = match (remote, branch) { (Some(r), Some(b)) => format!("{r}/{b}"), (None, Some(b)) => b.to_string(), _ => String::new() };
+    let head = head.map(short).unwrap_or_default();
+    if at.is_empty() && head.is_empty() { return String::new(); }
+    ["trunk", &at, &head].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" ")
+}
+
+/// How long ago `t` was at `now`: `now`, `4m ago`, `2h05m ago`, `3d ago`.
+pub fn ago(now: i64, t: i64) -> String {
+    let s = (now - t).max(0);
+    match s { 0..=59 => "now".into(), 60..=3599 => format!("{}m ago", s / 60), 3600..=86399 => format!("{}h{:02}m ago", s / 3600, s % 3600 / 60), _ => format!("{}d ago", s / 86400) }
+}
+
+/// A fraction as a percentage: `87%`; `<1%` for more than none and under one.
+pub fn percent(x: f64) -> String { if x > 0.0 && x < 0.005 { "<1%".into() } else { format!("{:.0}%", 100.0 * x) } }
+
+/// A share with what it is of: `87% (296 of 339)`; — of none.
+pub fn share(k: u64, n: u64) -> String { if n == 0 { "—".into() } else { format!("{} ({k} of {n})", percent(k as f64 / n as f64)) } }
 
 /// The projection: what bon is doing, what it pushed, what is queued, and what
 /// it cost, assembled from disk on every request, in the spec's words. `bon`
@@ -346,6 +402,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
     let configured = toml_output.is_some();
     let toml_text = toml_output.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
     let manifest: toml::Value = toml::from_str(&toml_text).unwrap_or(toml::Value::Table(Default::default()));
+    // Trunk as bon works on it (`trusted::remote_trunk`): the manifest's, else origin/main.
     let trunk_name = manifest.get("trunk").and_then(|v| v.as_str()).unwrap_or("main").to_string();
     let remote = manifest.get("remote").and_then(|v| v.as_str()).unwrap_or("origin").to_string();
     let limit = manifest.get("limit").and_then(|v| v.as_float().or(v.as_integer().map(|i| i as f64)));
@@ -439,7 +496,13 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
                     "commit": c["commit"], "accepted": accepted, "verified": verified,
                     "rank": c["rank"], "diff": c["diff"], "changed": c["changed"],
                     "lines_added": lines_added, "lines_removed": lines_removed,
-                    "flags": (["killed", "over_limit", "price_mismatch"]).iter().filter(|k| facts[**k] == true).collect::<Vec<_>>(),
+                    // What needs attention: its time limit stopped it, it passed its limit, its
+                    // prices disagree with its program's; or its program never started, or failed
+                    // without a word (charged nothing either way), by its exit.
+                    "flags": (["killed", "over_limit", "price_mismatch"]).iter().filter(|k| facts[**k] == true).map(|k| k.to_string())
+                        .chain((facts["started"] == false || (facts["exit"].as_i64().is_some_and(|c| c != 0) && facts["generation_microdollars"] == 0))
+                            .then(|| facts["exit"].as_i64().map_or("not spawned".to_string(), |c| format!("exit {c}"))))
+                        .collect::<Vec<_>>(),
                     "logs": logs,
                     "program_seconds": program_seconds(&e.path()), "check_seconds": checks_seconds,
                     "out": c["out"],
@@ -578,11 +641,11 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
                 format!("{}: {}{w} agent processes returned{}, {} verified so far", s["kind"].as_str().unwrap_or("search"), s["returned"],
                     if now.is_empty() { String::new() } else { format!(" ({now})") }, s["verified"])
             }).unwrap_or_else(|| "starting".into()),
-            "pushed" => format!("{}, they agreed, and no counterexample split them; the selected one was pushed",
-                              main.map(tally).unwrap_or_default()),
+            // Pushed says the rest: they agreed, and no counterexample split them.
+            "pushed" => main.map(tally).unwrap_or_default(),
             "blocked" => format!("{}; {}", main.map(tally).unwrap_or_default(),
                                  last.trim_start_matches("blocked:").trim()),
-            "found" => "verified tests reject trunk: a code search carries the selected one".into(),
+            "found" => "verified tests reject trunk; the best landed on trunk".into(),
             "not found" => "fewer than two verified tests reject trunk".into(),
             "proposal" => "a proposal for the queue is ready to review".into(),
             _ => {
@@ -603,7 +666,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
         // A short title; `about` holds the whole of what it stands for.
         let started = match kind.as_str() { "code" | "compaction" => goal.clone(), "counterexample" => base.clone(), _ => String::new() };
         let at = started[..7.min(started.len())].to_string();
-        let lines = |n: i64| if n == 0 { "±0 lines".to_string() } else { format!("{n:+} lines") };
+        let lines = |n: i64| format!("{} lines", signed(n));
         let title = match kind.as_str() {
             "code" => format!("from {at}"),
             "compaction" => match net {
@@ -627,6 +690,8 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
         }));
     }
 
+    // Newest first by when each started, as recorded: a directory's time changes when it is copied.
+    processes.sort_by_key(|p| std::cmp::Reverse(p["time"].as_u64().unwrap_or(0)));
     // Each candidate's tree, and each search's count of distinct trees, from git.
     trees(root, &mut processes);
 
@@ -687,12 +752,18 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
         json!({ "commits": log.lines().count(), "authors": authors.into_iter().collect::<Vec<_>>() })
     });
 
+    // Cost per verified candidate over reported searches, as its table by kind and model is.
+    let rows = per_verified(&processes);
+    let verified_reported: u64 = rows.iter().filter_map(|r| r["verified"].as_u64()).sum();
+    let per_verified_candidate = (verified_reported > 0).then(|| rows.iter()
+        .map(|r| r["generation"].as_f64().unwrap_or(0.0) + r["time_cost"].as_f64().unwrap_or(0.0)).sum::<f64>() / verified_reported as f64);
     let mut out = json!({
         "configured": configured,
         "groups": groups,
         "repo": {
             "name": root.file_name().map(|n| n.to_string_lossy().to_string()),
-            "head": head, "trunk": trunk_name, "remote": remote, "remote_head": remote_head,
+            // Its head only where the ref exists: a project not yet pushed has none.
+            "head": head, "trunk": trunk_name, "remote": remote, "remote_head": (!remote_head.is_empty()).then_some(&remote_head),
             "subject": git(root, &["log", "-1", "--format=%s", &remote_head]),
             "remote_time": git(root, &["log", "-1", "--format=%ct", &remote_head]).parse::<u64>().ok(),
             "since_push": since_push, "last_push": last_push,
@@ -705,7 +776,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
             "not_pushed": groups.iter().filter(|g| g["outcome"] != "pushed" && g["running"] != true).filter_map(|g| g["cost"].as_f64()).sum::<f64>(),
             "in_flight": groups.iter().filter(|g| g["running"] == true).filter_map(|g| g["cost"].as_f64()).sum::<f64>(),
             "rate": manifest.get("rate").and_then(|v| v.as_float().or(v.as_integer().map(|i| i as f64))),
-            "per_verified_candidate": (verified_all > 0).then(|| cost_all / verified_all as f64),
+            "per_verified_candidate": per_verified_candidate,
             "per_push": (!push_costs.is_empty()).then(|| push_costs.iter().sum::<f64>() / push_costs.len() as f64),
             "pushes": push_costs.len(),
             "verified": verified_all, "candidates": candidates_all,
@@ -913,13 +984,14 @@ fn success(processes: &[Value]) -> Vec<Value> {
         "agent_processes": n, "successes": v, "ended": ended, "pushed": pushed })).collect()
 }
 
-/// Cost per verified candidate by kind, program and model: each row's agent
-/// processes (those that returned facts), how many were verified, their
-/// generation, and their share of each search's time cost (the search's time
-/// × its agent processes in the row ÷ its agent processes that returned).
+/// Cost per verified candidate by kind, program and model, over reported
+/// searches (as success probability is): each row's agent processes (those
+/// that returned facts), how many were verified, their generation, and their
+/// share of each search's time cost (the search's time × its agent processes
+/// in the row ÷ its agent processes that returned).
 fn per_verified(processes: &[Value]) -> Vec<Value> {
     let mut by: BTreeMap<(String, String, String), (u64, u64, f64, f64)> = BTreeMap::new();
-    for s in all_searches(processes) {
+    for s in all_searches(processes).filter(|s| reported(s)) {
         let cs = s["candidates"].as_array().cloned().unwrap_or_default();
         let share = s["time_cost"].as_f64().unwrap_or(0.0) / cs.len().max(1) as f64;
         for c in &cs {
@@ -1026,14 +1098,11 @@ pub fn dur(s: f64) -> String {
     if neg { format!("−{t}") } else { t }
 }
 
-/// A share as a percentage, with what it is of: `87% (296 of 339)`; — of none.
-fn share(k: u64, n: u64) -> String { if n == 0 { "—".into() } else { format!("{:.0}% ({k} of {n})", 100.0 * k as f64 / n as f64) } }
-
 /// The success probability table, its header first: one row per kind, and one
 /// per attempt index under it where the kind ran in more than one.
 pub fn success_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
     if t.success.is_empty() { return Vec::new(); }
-    let mut out = vec![vec!["Success probability".to_string(), "Per agent process".into(), "Per attempt".into()]];
+    let mut out = vec![vec!["Success Probability".to_string(), "Per agent process".into(), "Per attempt".into()]];
     let row = |label: String, r: &crate::projection::Success| vec![label, share(r.successes, r.agent_processes), share(r.pushed, r.ended)];
     for r in t.success.iter().filter(|r| r.attempt.is_none()) {
         out.push(row(cap(&r.kind), r));
@@ -1047,7 +1116,7 @@ pub fn success_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
 /// program and model.
 pub fn per_verified_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
     if t.per_verified.is_empty() { return Vec::new(); }
-    let mut out = vec![["Cost per verified candidate", "Per verified", "Verified", "Agent processes", "Gen", "Time"].map(String::from).to_vec()];
+    let mut out = vec![["Cost per Verified Candidate", "Per verified", "Verified", "Agent processes", "Gen", "Time"].map(String::from).to_vec()];
     for r in &t.per_verified {
         let word = |s: &str| if s.is_empty() { "—".to_string() } else { s.to_string() };
         out.push(vec![format!("{} · {} · {}", cap(&r.kind), word(&r.program), word(&r.model)),
@@ -1063,11 +1132,13 @@ pub fn run_time_table(t: &crate::projection::Totals) -> (Vec<Vec<String>>, Vec<S
     let pushed: Vec<&crate::projection::RunTime> = t.run_time.iter().filter(|r| r.pushes > 0).collect();
     let mut rows = Vec::new();
     if !pushed.is_empty() {
-        rows.push(["Run-time distribution", "Pushes", "Median", "90th percentile"].map(String::from).to_vec());
+        rows.push(["Run-Time Distribution", "Pushes", "Median", "90th percentile"].map(String::from).to_vec());
         let opt = |v: Option<f64>, f: &dyn std::ops::Fn(f64) -> String| v.map_or("—".to_string(), f);
+        // A 90th percentile of one push is that push: none.
+        let p90 = |r: &crate::projection::RunTime, v: Option<f64>| v.filter(|_| r.pushes > 1);
         for r in &pushed {
-            rows.push(vec![format!("{} time to a push", cap(&r.kind)), r.pushes.to_string(), opt(r.time.median, &dur), opt(r.time.p90, &dur)]);
-            rows.push(vec![format!("{} cost to a push", cap(&r.kind)), r.pushes.to_string(), opt(r.cost.median, &money), opt(r.cost.p90, &money)]);
+            rows.push(vec![format!("{} time to a push", cap(&r.kind)), r.pushes.to_string(), opt(r.time.median, &dur), opt(p90(r, r.time.p90), &dur)]);
+            rows.push(vec![format!("{} cost to a push", cap(&r.kind)), r.pushes.to_string(), opt(r.cost.median, &money), opt(p90(r, r.cost.p90), &money)]);
         }
     }
     let fits = t.run_time.iter().map(|r| match &r.fit {
@@ -1079,15 +1150,19 @@ pub fn run_time_table(t: &crate::projection::Totals) -> (Vec<Vec<String>>, Vec<S
 }
 
 /// The utilization table, its header first: each of the host's two semaphores,
-/// its held slot-seconds, the wall time, their ratio, its size and utilization
-/// (— where the traces have no size).
+/// its held slot-seconds, the wall time and their ratio; and, where a trace
+/// records a size, its size and utilization (— for one it does not).
 pub fn utilization_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
     let u = &t.utilization;
     if u.searches == 0 || u.wall <= 0.0 { return Vec::new(); }
-    let mut out = vec![["Utilization", "Held", "Wall", "Held ÷ wall", "Size", "Utilization"].map(String::from).to_vec()];
+    let sized = u.agent_processes.size.is_some() || u.check_processes.size.is_some();
+    let mut head = vec!["Utilization", "Held", "Wall", "Held ÷ wall"];
+    if sized { head.extend(["Size", "Utilization"]); }
+    let mut out = vec![head.into_iter().map(String::from).collect::<Vec<_>>()];
     for (name, p) in [("agent_processes", &u.agent_processes), ("check_processes", &u.check_processes)] {
-        out.push(vec![name.to_string(), dur(p.held), dur(u.wall), format!("{:.2}", p.held / u.wall),
-            p.size.map_or("—".into(), |s| s.to_string()), p.size.map_or("—".into(), |s| format!("{:.0}%", 100.0 * p.held / (s as f64 * u.wall)))]);
+        let mut row = vec![name.to_string(), dur(p.held), dur(u.wall), format!("{:.2}", p.held / u.wall)];
+        if sized { row.extend([p.size.map_or("—".into(), |s| s.to_string()), p.size.map_or("—".into(), |s| percent(p.held / (s as f64 * u.wall)))]); }
+        out.push(row);
     }
     out
 }
@@ -1099,7 +1174,8 @@ pub fn turnaround_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
     if t.turnaround.is_empty() { return Vec::new(); }
     let mut out = vec![["Turnaround", "Resolved", "Pending", "Median", "90th percentile"].map(String::from).to_vec()];
     let opt = |v: Option<f64>| v.map_or("—".to_string(), dur);
-    for r in &t.turnaround { out.push(vec![cap(&r.kind), r.resolved.to_string(), r.pending.to_string(), opt(r.time.median), opt(r.time.p90)]); }
+    // A 90th percentile of one is that one: none.
+    for r in &t.turnaround { out.push(vec![cap(&r.kind), r.resolved.to_string(), r.pending.to_string(), opt(r.time.median), opt(r.time.p90.filter(|_| r.resolved > 1))]); }
     out
 }
 
@@ -1109,11 +1185,11 @@ pub const MEASURE_NOTES: [(&str, &str); 10] = [
     ("Success probability per attempt", "pushed ÷ attempts that ended (pushed, blocked, landed)"),
     ("Attempt a", "the same, over each bon process's a-th attempt and the searches on it"),
     ("Agent processes per behavior", "a search's verified candidates showing each distinct out"),
-    ("Cost per verified candidate", "(Σ generation + Σ time × the row's share of each search's agent processes) ÷ verified"),
+    ("Cost per verified candidate", "(Σ generation + Σ time × the row's share of each search's agent processes) ÷ verified, over reported searches"),
     ("Time, cost to a push", "Σ seconds, Σ generation + time, of its kind's bon processes since its last push"),
     ("Median, 90th percentile", "the middle value (the mean of the middle two); the ⌈0.9 n⌉-th smallest"),
     ("Per search (inferred)", "least squares: seconds or cost = fixed + per tree × distinct trees, over reported searches"),
-    ("Utilization", "held slot-seconds ÷ (size × wall); held: programs' seconds, checks' seconds (none for a cached verdict); wall: the union of the searches' wall times"),
+    ("Utilization", "held ÷ wall, and held ÷ (size × wall) where a trace records the size; held: programs' seconds, checks' seconds (none for a cached verdict); wall: the union of the searches' wall times"),
     ("Turnaround", "an interrupt's raise to the action that resolved it"),
 ];
 
@@ -1126,8 +1202,6 @@ pub fn reason_count(r: &crate::projection::Reason) -> String {
     if let Some(f) = w.get_mut(0..1) { f.make_ascii_uppercase(); }
     if r.inferred > 0 { format!("{w} ({}, {} inferred)", r.count, r.inferred) } else { format!("{w} ({})", r.count) }
 }
-
-fn cap(s: &str) -> String { let mut c = s.chars(); c.next().map_or(String::new(), |f| f.to_uppercase().chain(c).collect()) }
 
 /// The attempts table, its header first: one row per kind, and one per width
 /// under it when the kind ran at more than one. Every attempt is in exactly
@@ -1169,7 +1243,7 @@ pub fn attempt_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
 pub fn process_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
     if t.ended.is_empty() { return Vec::new(); }
     let running = t.ended.iter().any(|e| e.running > 0);
-    let mut head = vec!["Bon processes", "All", "Pushed", "Blocked", "Exited"];
+    let mut head = vec!["bon Processes", "All", "Pushed", "Blocked", "Exited"];
     if running { head.push("Running"); }
     head.push("Expected blocked");
     let mut out = vec![head.into_iter().map(String::from).collect::<Vec<_>>()];
@@ -1198,8 +1272,8 @@ pub fn reason_rows(t: &crate::projection::Totals) -> Vec<(String, Vec<String>)> 
 pub const OUTCOME_NOTES: [(&str, &str); 4] = [
     ("All", "Pushed + blocked + exited (+ landed, running)"),
     ("Exited", "Its bon process stopped: on the error it recorded, or, in older traces, with no transition"),
-    ("Expected", "Σ (1 − success probability per attempt)^attempts, over processes"),
-    ("Inferred", "No word: the kernel's, or the sentence's"),
+    ("Expected", "Σ (1 − success probability per attempt)^attempts, over the bon processes that pushed or blocked"),
+    ("Inferred", "The trace recorded no reason; it is read from the kernel or the sentence"),
 ];
 
 /// A table as aligned text: the first column left, the rest right.
@@ -1213,7 +1287,7 @@ fn aligned(rows: &[Vec<String>]) -> Vec<String> {
     }).collect()
 }
 
-/// The outcome tables as aligned text, each kind's reasons, and what the words mean.
+/// The outcome tables as aligned text, and each kind's reasons.
 pub fn outcome_lines(t: &crate::projection::Totals) -> Vec<String> {
     let attempts = attempt_table(t);
     if attempts.is_empty() { return Vec::new(); }
@@ -1221,13 +1295,11 @@ pub fn outcome_lines(t: &crate::projection::Totals) -> Vec<String> {
     for (label, items) in reason_rows(t) { lines.push(format!("{label}  {}", items.join(" · "))); }
     lines.push(String::new());
     lines.extend(aligned(&process_table(t)));
-    lines.push(String::new());
-    lines.extend(OUTCOME_NOTES.iter().map(|(k, v)| format!("{k}: {v}")));
     lines
 }
 
 /// The measures as aligned text: success probability, cost per verified
-/// candidate, the run-time distribution and utilization, then each formula.
+/// candidate, the run-time distribution, utilization and turnaround.
 pub fn measure_lines(t: &crate::projection::Totals) -> Vec<String> {
     let mut lines = Vec::new();
     let (run, fits) = run_time_table(t);
@@ -1240,15 +1312,8 @@ pub fn measure_lines(t: &crate::projection::Totals) -> Vec<String> {
     for table in [utilization_table(t), turnaround_table(t)] {
         if !table.is_empty() { lines.extend(aligned(&table)); lines.push(String::new()); }
     }
-    if lines.is_empty() { return lines; }
-    lines.extend(MEASURE_NOTES.iter().map(|(k, v)| format!("{k}: {v}")));
+    lines.pop();
     lines
-}
-
-fn outcomes(t: &Value) -> String {
-    let lines = serde_json::from_value::<crate::projection::Totals>(t.clone()).map(|t| { let mut l = outcome_lines(&t);
-        let m = measure_lines(&t); if !m.is_empty() { l.push(String::new()); l.extend(m); } l }).unwrap_or_default();
-    if lines.is_empty() { String::new() } else { lines.join("\n") + "\n\n" }
 }
 
 /// What a running search's agent processes are doing: `4 in flight, 2 in
@@ -1258,44 +1323,61 @@ pub fn now_counts(in_flight: u64, in_checks: u64, waiting: u64) -> String {
         .map(|(n, w)| format!("{n} {w}")).collect::<Vec<_>>().join(", ")
 }
 
-/// The projection as text, for `bon`.
+/// An outcome as a value: `None found` for not found, else its word, capitalized.
+pub fn outcome_label(outcome: &str) -> String { if outcome == "not found" { "None found".into() } else { cap(outcome) } }
+
+/// The projection as text, for `bon`, in the order the view's Project reads:
+/// where trunk is and what it all cost; what waits on engineer; what runs now;
+/// what ran lately; then the measures and the queue.
 pub fn text(s: &Value) -> String {
-    if s["configured"] != true { return "no .bon/bon.toml at trunk's head: run bon init\n".into(); }
     let mut out = String::new();
     let r = &s["repo"];
     let t = &s["totals"];
-    let opt = |v: &Value| v.as_f64().map_or("—".to_string(), money);
-    // Trunk as bon works on it, the remote's ref; then generation and time side by side, then the total.
-    let trunk_head = r["remote_head"].as_str().unwrap_or("");
-    out.push_str(&format!("{} · trunk {}/{} {} · {} generation + {} time{} = {} · {} per verified candidate · {} per push\n\n",
-        r["name"].as_str().unwrap_or(""), r["remote"].as_str().unwrap_or(""), r["trunk"].as_str().unwrap_or(""), &trunk_head[..7.min(trunk_head.len())],
-        opt(&t["generation"]), opt(&t["time_cost"]), t["rate"].as_f64().map_or(String::new(), |r| format!(" at ${r:.0}/h")),
-        opt(&t["cost"]), opt(&t["per_verified_candidate"]), opt(&t["per_push"])));
+    let opt = |v: &Value| money_or(v.as_f64());
+    let now = r["now"].as_i64().unwrap_or(0);
+    // Trunk as bon works on it; generation and time side by side, then the total.
+    let rate = t["rate"].as_f64().filter(|r| *r > 0.0).map_or(String::new(), |r| format!(" at ${r:.0}/h"));
+    let at = trunk(r["remote"].as_str(), r["trunk"].as_str(), r["remote_head"].as_str());
+    out += &format!("{}{} · {} generation + {} time{rate} = {}\n", r["name"].as_str().unwrap_or(""),
+        if at.is_empty() { String::new() } else { format!(" · {at}") }, opt(&t["generation"]), opt(&t["time_cost"]), opt(&t["cost"]));
+    // Each rate with what it divides: what reached a push, over how many pushes.
+    let pushes = t["pushes"].as_u64().unwrap_or(0);
+    let basis = if pushes > 0 { format!(" ({} over {})", opt(&t["pushed"]), count(pushes as usize, "push", "pushes")) } else { String::new() };
+    if !t["per_verified_candidate"].is_null() || pushes > 0 {
+        out += &format!("{} per verified candidate · {} per push{basis}\n", opt(&t["per_verified_candidate"]), opt(&t["per_push"]));
+    }
+    // What every figure here is over, when it is not everything.
+    let f = &s["filter"];
+    if !f["since"].is_null() || !f["until"].is_null() || !f["find"].is_null() {
+        out += &format!("Only bon processes{}{}{}\n",
+            f["since"].as_u64().map_or(String::new(), |t| format!(" since {}", date(t))),
+            f["until"].as_u64().map_or(String::new(), |t| format!(" until {}", date(t))),
+            f["find"].as_str().map_or(String::new(), |t| format!(" matching \"{t}\"")));
+    }
     // What waits on engineer, first: each pending interrupt in a line; bon pending has its choices.
     let pending: Vec<&Value> = s["interrupts"].as_array().into_iter().flatten().filter(|i| i["resolved"].is_null()).collect();
     if !pending.is_empty() {
-        out.push_str(&format!("pending ({}; bon pending has the choices and what each costs)\n", pending.len()));
+        out += &format!("\nPending  {} · bon pending has each one's choices and what each costs\n", pending.len());
         for i in &pending {
-            out.push_str(&format!("  {:<10} {} · raised {} ago\n      {}\n", i["kind"].as_str().unwrap_or(""), i["about"].as_str().unwrap_or(""),
-                dur((s["repo"]["now"].as_i64().unwrap_or(0) - i["raised"].as_i64().unwrap_or(0)).max(0) as f64), i["what"][0].as_str().unwrap_or("")));
+            out += &format!("  {:<10} {} · raised {}\n", cap(i["kind"].as_str().unwrap_or("")), i["about"].as_str().unwrap_or(""), ago(now, i["raised"].as_i64().unwrap_or(0)));
+            out += &wrap(i["what"][0].as_str().unwrap_or(""), 6, 8);
         }
-        out.push('\n');
-    }
-    out.push_str(&outcomes(t));
-    let f = &s["filter"];
-    if !f["since"].is_null() || !f["until"].is_null() || !f["find"].is_null() {
-        out.push_str(&format!("only bon processes{}{}{}\n\n",
-            f["since"].as_u64().map_or(String::new(), |t| format!(" since {}", date(t))),
-            f["until"].as_u64().map_or(String::new(), |t| format!(" until {}", date(t))),
-            f["find"].as_str().map_or(String::new(), |t| format!(" matching \"{t}\""))));
     }
     let procs = s["processes"].as_array().cloned().unwrap_or_default();
     let running: Vec<&Value> = procs.iter().filter(|p| p["running"] == true).collect();
-    out.push_str("now\n");
-    if running.is_empty() { out.push_str("  no search is running\n"); }
-    for p in &running { out.push_str(&format!("  {} {}: {}\n", p["kind"].as_str().unwrap_or(""), p["goal"].as_str().unwrap_or(""), p["sentence"].as_str().unwrap_or(""))); }
-    out.push_str("\nrecent\n");
-    for g in s["groups"].as_array().into_iter().flatten().filter(|g| g["running"] != true).take(8) {
+    out += "\nNow\n";
+    if running.is_empty() { out += "  Idle\n"; }
+    for p in &running {
+        let goal = p["goal"].as_str().unwrap_or("");
+        // A commit by its 7 characters; a transcript by its path.
+        let goal = if goal.chars().all(|c| c.is_ascii_hexdigit()) { short(goal) } else { goal.to_string() };
+        out += &wrap(&format!("{} {goal}: {}", cap(p["kind"].as_str().unwrap_or("")), p["sentence"].as_str().unwrap_or("")), 2, 4);
+    }
+    out += "\nRecent\n";
+    let recent: Vec<&Value> = s["groups"].as_array().into_iter().flatten().filter(|g| g["running"] != true).take(8).collect();
+    if recent.is_empty() { out += if f["since"].is_null() && f["until"].is_null() && f["find"].is_null() { "  No bon process yet\n" } else { "  No bon process in this range\n" }; }
+    let protected: Vec<String> = serde_json::from_value(s["protected"].clone()).unwrap_or_default();
+    for g in recent {
         let n = g["processes"].as_array().map_or(0, |p| p.len());
         // Generation and time side by side, then the total: to the push when it pushed.
         let split = |x: &Value| format!("{} generation + {} time = {}", money(x["generation"].as_f64().unwrap_or(0.0)),
@@ -1305,22 +1387,59 @@ pub fn text(s: &Value) -> String {
             Some(_) => format!("{} to push", split(&g["push"])),
             None => format!("{} cost", split(g)),
         };
-        out.push_str(&format!("  {:<14} {:<9} {}\n      {}\n      {}{cost}\n",
-            g["kind"].as_str().unwrap_or(""), g["outcome"].as_str().unwrap_or(""), g["title"].as_str().unwrap_or(""),
-            g["sentence"].as_str().unwrap_or(""), if n > 1 { format!("{n} bon processes · ") } else { String::new() }));
-        // A blocked search's protected change, which search found but may not make: for the model.
-        let protected: Vec<String> = serde_json::from_value(s["protected"].clone()).unwrap_or_default();
+        out += &format!("  {:<15}{:<12}{}\n", cap(g["kind"].as_str().unwrap_or("")), outcome_label(g["outcome"].as_str().unwrap_or("")), g["title"].as_str().unwrap_or(""));
+        out += &wrap(g["sentence"].as_str().unwrap_or(""), 6, 8);
+        out += &wrap(&format!("{}{cost}", if n > 1 { format!("{} · ", count(n, "bon process", "bon processes")) } else { String::new() }), 6, 8);
+        // Why a blocked goal blocked, when every candidate needed a protected file: the
+        // change search found but may not make, for the model (a fact, not a request).
+        if g["outcome"] != "blocked" { continue; }
         let traced: crate::projection::GoalTrace = serde_json::from_value(g.clone()).unwrap_or_default();
         for search in traced.processes.iter().flat_map(|p| &p.searches).filter(|x| x.blocked.is_some()) {
             if let Some((files, diff)) = crate::tui::needed(search, &protected) {
-                out.push_str(&format!("      every accepted, proved candidate changed protected {}: review and apply: {diff}\n", files.join(", ")));
+                out += &wrap(&format!("every accepted, proved candidate changed protected {}: {diff}", files.join(", ")), 6, 8);
             }
         }
     }
-    if s["queue"].is_null() { out.push_str("\nqueue: none at trunk's head yet (.bon/queue.tsv)\n"); return out; }
-    let q = s["queue"].as_array().cloned().unwrap_or_default();
-    out.push_str(&format!("\nqueue ({} not yet in the spec)\n", q.len()));
-    for i in &q { out.push_str(&format!("  {:>3}  {}\n", i["id"], i["intent"].as_str().unwrap_or(""))); }
+    let measures = serde_json::from_value::<crate::projection::Totals>(t.clone()).map(|t| {
+        let mut l = outcome_lines(&t);
+        let m = measure_lines(&t);
+        if !l.is_empty() && !m.is_empty() { l.push(String::new()); }
+        l.extend(m);
+        l
+    }).unwrap_or_default();
+    if !measures.is_empty() { out += &format!("\n{}\n", measures.join("\n")); }
+    let Some(q) = s["queue"].as_array() else { out += "\nQueue\n  None at trunk's head yet (.bon/queue.tsv)\n"; return out };
+    out += &format!("\nQueue  {} not yet in the spec\n", q.len());
+    if q.is_empty() { out += "  Nothing queued\n"; }
+    let w = q.iter().map(|i| i["id"].to_string().len() + 1).max().unwrap_or(0);
+    for i in q {
+        let text = wrap(i["intent"].as_str().unwrap_or(""), 4 + w, 4 + w);
+        out += &format!("  {:<w$}  {}", format!("#{}", i["id"]), &text[4 + w..]);
+    }
+    out
+}
+
+/// The report's width: prose wraps at it, whatever the terminal's.
+pub const REPORT_W: usize = 80;
+
+/// Prose wrapped at `REPORT_W`, its first line indented `first`, the rest
+/// `rest`, each line ended; a word longer than a line (a path, a command) is
+/// never broken: it stands on its own line.
+pub fn wrap(text: &str, first: usize, rest: usize) -> String {
+    let mut out = String::new();
+    let mut line = " ".repeat(first);
+    let mut empty = true;
+    for word in text.split_whitespace() {
+        if !empty && line.chars().count() + 1 + word.chars().count() > REPORT_W {
+            out += &line; out.push('\n');
+            line = " ".repeat(rest);
+            empty = true;
+        }
+        if !empty { line.push(' '); }
+        line.push_str(word);
+        empty = false;
+    }
+    out += &line; out.push('\n');
     out
 }
 
@@ -1770,6 +1889,58 @@ mod tests {
     fn end(e: &'static str, reason: Option<&str>, from: Option<&'static str>) -> End { End { end: e, reason: reason.map(String::from), from } }
 
     #[test]
+    fn each_kind_of_thing_has_one_format() {
+        // Money: to the cent, a negative with −, never −$0.00; — for none.
+        assert_eq!((money(12.444), money(-12.444), money(-0.004), money(0.0)), ("$12.44".into(), "−$12.44".into(), "$0.00".into(), "$0.00".into()));
+        assert_eq!((money_or(None), money_or(Some(f64::NAN)), money_or(Some(1.5))), ("—".into(), "—".into(), "$1.50".into()));
+        // Durations and ages.
+        assert_eq!((dur(48.0), dur(468.0), dur(31.0 * 3600.0 + 300.0), dur(-58.0)), ("48s".into(), "7m48s".into(), "31h05m".into(), "−58s".into()));
+        assert_eq!((ago(100, 70), ago(1000, 700), ago(10000, 2500), ago(400000, 0)), ("now".into(), "5m ago".into(), "2h05m ago".into(), "4d ago".into()));
+        // Shares and percentages; signed counts; commits; trunk.
+        assert_eq!((share(296, 339), share(0, 0), percent(0.001), percent(0.0)), ("87% (296 of 339)".into(), "—".into(), "<1%".into(), "0%".into()));
+        assert_eq!((signed(3), signed(-19), signed(0)), ("+3".into(), "−19".into(), "±0".into()));
+        assert_eq!(short("499a245c0ffee"), "499a245");
+        assert_eq!(trunk(Some("origin"), Some("main"), Some("499a245c0ffee")), "trunk origin/main 499a245");
+        assert_eq!(trunk(Some("origin"), Some("main"), None), "trunk origin/main");
+        assert_eq!(trunk(None, None, None), "");
+        assert_eq!((count(1, "push", "pushes"), count(3, "push", "pushes"), cap("blocked"), outcome_label("not found")), ("1 push".into(), "3 pushes".into(), "Blocked".into(), "None found".into()));
+    }
+
+    #[test]
+    fn a_filter_refuses_what_is_no_date_and_finds_in_any_case() {
+        for bad in ["2026-13-45", "2026-02-30", "yesterday", "2026-1-5", "1969-12-31", "2026-11"] {
+            assert_eq!(Filter::new(Some(bad), None, None).err().unwrap(), format!("--since {bad} is not a date; write it as YYYY-MM-DD"), "{bad}");
+        }
+        let f = Filter::new(Some("2026-11-12"), Some("2026-11-12"), Some("Code".into())).unwrap();
+        assert_eq!((f.since, f.until), (Some(1_794_441_600), Some(1_794_441_600 + 86399)));
+        // The text and what is looked for compare without case, typed or given as an argument.
+        assert!(f.covers(1_794_441_600, "123 code from abc pushed") && !f.covers(1_794_441_600, "123 compaction"));
+        assert!(Filter { find: Some("CODE".into()), ..Default::default() }.covers(0, "Code"));
+        assert!(Filter::new(None, None, Some(String::new())).unwrap().find.is_none());
+    }
+
+    #[test]
+    fn the_report_reads_in_the_order_attention_needs_it() {
+        let s = json!({ "configured": true,
+            "repo": { "name": "r", "remote": "origin", "trunk": "main", "remote_head": "499a245c0", "now": 10000 },
+            "totals": { "cost": 3.0, "generation": 1.0, "time_cost": 2.0, "rate": 0, "per_verified_candidate": 1.5, "per_push": 3.0, "pushes": 1, "pushed": 3.0 },
+            "interrupts": [{ "kind": "blocked", "about": "code from 1a2b3c4", "raised": 2500, "resolved": null, "what": ["1 of 8 candidates verified; too_few_verified"] }],
+            "processes": [{ "running": true, "kind": "code", "goal": "1a2b3c4", "sentence": "code: 3 of 8 agent processes returned" }],
+            "groups": [{ "kind": "code", "outcome": "pushed", "title": "from 9bb8a5b", "sentence": "8 of 8 candidates verified", "processes": [{}],
+                         "push": { "cost": 3.0, "generation": 1.0, "time_cost": 2.0 } },
+                       { "kind": "counterexample", "outcome": "not found", "title": "trunk at 14444a0", "sentence": "fewer than two verified tests reject trunk", "processes": [{}] }],
+            "filter": { "since": 1_762_905_600 }, "queue": [{ "id": 14, "intent": "Each trace records." }] });
+        let t = text(&s);
+        let at = |x: &str| t.find(x).unwrap_or_else(|| panic!("{x} not in:\n{t}"));
+        // Trunk and cost, what the figures are over, what is pending, what runs, then what ran, then the queue.
+        assert!(t.starts_with("r · trunk origin/main 499a245 · $1.00 generation + $2.00 time = $3.00\n$1.50 per verified candidate · $3.00 per push ($3.00 over 1 push)\nOnly bon processes since 2025-11-12\n"), "{t}");
+        assert!(at("Pending  1") < at("Now\n  Code 1a2b3c4") && at("Now") < at("Recent") && at("Recent") < at("Queue  1"), "{t}");
+        assert!(t.contains("  Blocked    code from 1a2b3c4 · raised 2h05m ago") && t.contains("  Counterexample None found  trunk at 14444a0") && t.contains("  #14  Each trace records."), "{t}");
+        // No rate, no `at $0/h`; a pushed row says its tally, not why it pushed.
+        assert!(!t.contains("$0/h") && !t.contains("the selected one was pushed"), "{t}");
+    }
+
+    #[test]
     fn every_attempt_ends_one_way() {
         // A block in today's words, then a block in an old sentence, then a push.
         let mut searches = [s("code", true), s("foil", true), s("counterexample", true), s("code", true), s("foil", true), s("counterexample", true), s("code", true), s("counterexample", true)];
@@ -1953,7 +2124,9 @@ mod tests {
     #[test]
     fn cost_per_verified_candidate_shares_a_searchs_time_by_its_agent_processes() {
         let c = |program: &str, verified: bool, g: f64| json!({ "program": program, "model": "m", "verified": verified, "generation": g });
-        let ps = [json!({ "searches": [{ "kind": "code", "time_cost": 30.0, "candidates": [c("a", true, 1.0), c("a", true, 1.0), c("b", false, 4.0)] }] })];
+        // A search that has not reported counts nothing, as in success probability.
+        let ps = [json!({ "searches": [{ "kind": "code", "time": 1, "time_cost": 30.0, "candidates": [c("a", true, 1.0), c("a", true, 1.0), c("b", false, 4.0)] },
+            { "kind": "code", "time": null, "candidates": [c("a", true, 9.0)] }] })];
         let rows = per_verified(&ps);
         // a: 2 of the 3 agent processes, so 20 of the 30 time; b: 10.
         assert_eq!((rows[0]["program"].as_str(), rows[0]["generation"].as_f64(), rows[0]["time_cost"].as_f64(), rows[0]["verified"].as_u64()), (Some("a"), Some(2.0), Some(20.0), Some(2)));
@@ -2037,7 +2210,7 @@ mod tests {
         assert_eq!(r[1], ("Code exited".to_string(), vec!["During a search (1)".to_string()]));
         // Bon processes: 4, of which 2 pushed, 1 blocked, 1 exited; expected is over the 3 that pushed or blocked.
         let p = process_table(&t);
-        assert_eq!(p[0], ["Bon processes", "All", "Pushed", "Blocked", "Exited", "Expected blocked"]);
+        assert_eq!(p[0], ["bon Processes", "All", "Pushed", "Blocked", "Exited", "Expected blocked"]);
         let x = |k: i32| 0.6f64.powi(k);
         assert_eq!(p[1], ["Code", "4", "2", "1", "1", &format!("{:.1}", x(2) + x(1) + x(1))]);
     }

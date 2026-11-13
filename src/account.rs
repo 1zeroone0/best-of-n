@@ -66,7 +66,7 @@ pub fn run(root: &str, check: bool) -> Result<(), String> {
         let was = facts(&parse(old_doc.as_ref()), &parse(old_sbom.as_ref()));
         let is = facts(&parse(Some(&doc)), &parse(Some(&sbom)));
         for line in changes(&was, &is) { println!("{line}"); }
-        return Err("stale: run bon account and commit .bon/".into());
+        return Err("the account is stale; run bon account and commit .bon/".into());
     }
     let unchanged = old_doc.as_deref() == Some(doc.as_str()) && old_sbom.as_deref() == Some(sbom.as_str());
     if !unchanged {

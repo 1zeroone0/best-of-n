@@ -31,12 +31,9 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 use crate::projection::Interrupt;
-use crate::view::dur;
+use crate::view::{ago, money_or as money, share};
 
 fn git(root: &Path, args: &[&str]) -> String { super::git(root, args).unwrap_or_default() }
-
-/// Dollars to the cent; — for none.
-fn money(v: Option<f64>) -> String { v.map_or("—".into(), |d| format!("${:.2}", if d.abs() < 0.005 { 0.0 } else { d })) }
 
 fn now() -> i64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64) }
 
@@ -58,9 +55,6 @@ fn choices_for(reason: Option<&str>) -> &'static [&'static str] {
 fn widened<'a>(reason: Option<&str>, kind: &'a str) -> &'a str {
     match reason { Some("too_few_tests" | "undiscriminating") => "counterexample", _ => kind }
 }
-
-/// A share in words: `50% (1 of 2)`; `none measured` of none.
-fn share(k: u64, n: u64) -> String { if n == 0 { "none measured".into() } else { format!("{:.0}% ({k} of {n})", 100.0 * k as f64 / n as f64) } }
 
 /// The manifest at a commit (`HEAD`: this checkout's).
 fn manifest(root: &Path, at: &str) -> toml::Value {
@@ -359,16 +353,12 @@ pub fn turnaround(interrupts: &[Value]) -> Vec<Value> {
     }).collect()
 }
 
-/// Words, wrapped to `w` columns.
+/// Words, wrapped to `w` columns; a word longer than a line (a path in a
+/// command) is never broken, so the command still runs as shown.
 fn wrap(text: &str, w: usize) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut line = String::new();
-    // A word longer than a line is cut at the line's end.
-    let words = text.split_whitespace().flat_map(|word| {
-        let c: Vec<char> = word.chars().collect();
-        c.chunks(w.max(1)).map(|p| p.iter().collect::<String>()).collect::<Vec<_>>()
-    });
-    for word in words {
+    for word in text.split_whitespace() {
         if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > w { out.push(std::mem::take(&mut line)); }
         if !line.is_empty() { line.push(' '); }
         line.push_str(&word);
@@ -402,7 +392,7 @@ pub fn text(pending: &[&Interrupt], now: i64, width: usize) -> String {
         if k > 0 { out.push('\n'); }
         // The repository, where the listing spans more than one.
         let repo = if pending.iter().all(|x| x.root == i.root) { String::new() } else { format!(" · {}", i.repository) };
-        put(&i.kind, &format!("{} · raised {} ago{repo}", i.about, dur((now - i.raised).max(0) as f64)), &mut out);
+        put(&crate::view::cap(&i.kind), &format!("{} · raised {}{repo}", i.about, ago(now, i.raised)), &mut out);
         for w in &i.what { put("", w, &mut out); }
         for c in &i.choices {
             put(&format!("  {}", c.choice), &c.cost, &mut out);
@@ -424,26 +414,14 @@ fn width() -> usize {
 /// now recognises for the first time is recorded (`trusted::record_decision`),
 /// with FILE, the transcript of the agent session that runs it, as a pointer
 /// and its hash. Exits 0 when nothing is pending and 2 when something is.
-pub fn run(root: &str, args: &[String]) -> Result<(), String> {
-    let transcript = match args.get(1).map(String::as_str) {
-        None => None,
-        Some("--transcript") => Some(args.get(2).ok_or("--transcript takes the session's transcript file")?.clone()),
-        Some("-h" | "--help") => {
-            // Its lines of the usage, as the README's table says it.
-            let lines: Vec<&str> = super::USAGE.lines().skip_while(|l| !l.starts_with("  bon pending")).take(2).collect();
-            println!("usage:\n{}", lines.join("\n"));
-            return Ok(());
-        }
-        Some(other) => return Err(format!("bon pending takes --transcript FILE, not {other}")),
-    };
-    if let Some(t) = &transcript { if !Path::new(t).is_file() { return Err(format!("{t}: no such transcript file")); } }
+pub fn run(root: &str, transcript: Option<&str>) -> Result<(), String> {
+    if let Some(t) = transcript { if !Path::new(t).is_file() { return Err(format!("--transcript {t}: no such file; name this session's transcript file")); } }
     let path = Path::new(root);
-    if git(path, &["show", "HEAD:.bon/bon.toml"]).is_empty() { return Err("no .bon/bon.toml at trunk's head: run bon init".into()); }
     let state = crate::view::state(path, &crate::view::Filter::default());
     let all: Vec<Interrupt> = serde_json::from_value(state["interrupts"].clone()).map_err(|e| format!("the interrupts do not match their types: {e}"))?;
     let mut recorded = 0;
     for (r, record) in unrecorded(&all) {
-        best_of_n::trusted::record_decision(Path::new(&r), record, transcript.as_deref().map(Path::new))?;
+        best_of_n::trusted::record_decision(Path::new(&r), record, transcript.map(Path::new))?;
         recorded += 1;
     }
     if recorded > 0 { if let Err(e) = best_of_n::trusted::persist(path) { eprintln!("bon: traces not persisted: {e}"); } }
@@ -485,8 +463,10 @@ mod tests {
         long.choices[0].how = format!("git am .bon/traces/proposals/{}.patch", "a".repeat(60));
         for w in [24, 60, 100, 400] {
             let t = text(&[&i, &long], 3600, w);
-            assert!(t.lines().all(|l| l.chars().count() <= w.max(24)), "{w}:\n{t}");
-            assert!(t.contains("widen") && t.contains("raised 1h00m ago"), "{t}");
+            // Every line fits, but one that is a single unbroken word: the path stays whole.
+            assert!(t.lines().all(|l| l.chars().count() <= w.max(24) || !l.trim().contains(' ')), "{w}:\n{t}");
+            assert!(t.contains(&format!(".bon/traces/proposals/{}.patch", "a".repeat(60))), "{t}");
+            assert!(t.contains("widen") && t.contains("raised 1h00m ago") && t.contains("Blocked"), "{t}");
         }
         // Two columns: every text starts at one column.
         let t = text(&[&i], 3600, 100);

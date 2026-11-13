@@ -14,125 +14,237 @@ mod tui;
 mod types;
 mod view;
 
-const USAGE: &str = "usage:
-  bon [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--find TEXT]
-                          what is running, what was pushed, the queue, and what it cost, over that range
-  bon code                search for code that trunk's checks accept; push it
-  bon compaction          search for code and tests with what is stale removed or written cleaner; push it
-  bon counterexample      search trunk for what the spec forbids; if found, a code search carries its test
-  bon init                create a manifest and queue in this git repository
-  bon new <name>          set up a project: a spec with the core nouns, its gates, an empty implementation, the manifest and the queue
-  bon queue               turn each new transcript into a proposal for the queue
-  bon view                the same in the terminal view, as `bon` opens it in a terminal
-  bon background [--plist] the stalest of compaction and counterexample, on spare capacity
-  bon setup [--dry-run] [--for <user>]
-                          create user agent and group bon, and let <user> (default: you) run commands as agent;
-                          run it as an administrator
-  bon account [--check]   write what is proven, trusted, configured and tested, as OSCAL with its SBOM, or fail if it is stale
-  bon pending [--transcript FILE]
-                          what only you can answer, oldest first: what happened, the choices and what each costs
-  bon types [--check]     write the types programs are built on, or fail if one is stale
-  bon spec [NAME]         the spec's vocabulary and how it reaches the code, or one item
-  bon check               every check on the working tree, as agent, the way candidates are judged
-  bon cost                write .bon/cost.toml, what reaching trunk cost (bon does after each push)";
+// ── commands ────────────────────────────────────────────
+
+/// Every command: its name, its arguments as the usage writes them, and its
+/// one sentence. The usage, each command's `--help`, every argument error and
+/// the README's table come from here (a test holds the README to it).
+pub(crate) const COMMANDS: [(&str, &str, &str); 17] = [
+    ("", "[--since YYYY-MM-DD] [--until YYYY-MM-DD] [--find TEXT]",
+        "the view: Project, Spec, Queue, Traces, over that range (piped, plain text)"),
+    ("code", "", "search for code that trunk's checks accept; push it"),
+    ("counterexample", "", "look for a behavior on trunk the spec forbids, with tests written blind"),
+    ("compaction", "", "remove what is stale, behavior unchanged"),
+    ("queue", "", "turn each new transcript into a proposal for the queue"),
+    ("background", "[--plist]", "the stalest of compaction and counterexample, on spare capacity; --plist, a launchd job that runs it every five minutes"),
+    ("spec", "[NAME]", "the spec's vocabulary and how it reaches the code, or one item"),
+    ("types", "[--check]", "write the types programs are built on, in TypeScript, Go and Python, or fail if one is stale"),
+    ("account", "[--check]", "write what is proven, trusted, configured and tested, as OSCAL with its SBOM, or fail if it is stale"),
+    ("check", "", "every check on the working tree, as candidates are judged; whose fix a failure is; each file that breaks a rule on what a search may write"),
+    ("pending", "[--transcript FILE]", "what only you can answer, oldest first: what happened, the choices and what each costs"),
+    ("new", "<name>", "set up a project: a spec with the core nouns, its gates, an empty implementation, the manifest and the queue"),
+    ("init", "", "create a manifest and queue in this git repository"),
+    ("setup", "[--dry-run] [--for USER]", "create user agent and group bon, and let USER (default: you) run commands as agent; run it as an administrator"),
+    ("cost", "", "write .bon/cost.toml, what reaching trunk cost (bon does after each push)"),
+    ("view", "[--state | --frame WxH [--tab N] [--focus K] [--light]]", "the view, as bon opens it in a terminal; --state, its projection as JSON; --frame, one frame of it as HTML"),
+    ("help", "", "every command, its arguments and what it does"),
+];
+
+/// How bon exits, said once, under the usage.
+const EXIT: &str = "exit: 0 done; 1 an error (one line on stderr); 2 something pending (bon pending)";
 
 /// The commands that grant capabilities.
 const SEARCHES: [&str; 5] = ["code", "compaction", "counterexample", "queue", "background"];
 
+/// A command's head as the usage writes it: `bon account [--check]`.
+fn signature(c: &(&str, &str, &str)) -> String {
+    ["bon", c.0, c.1].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" ")
+}
+
+/// One command's lines of the usage: its signature, and its sentence from
+/// column 26, wrapped to 80 columns; a signature too long for the gap puts the
+/// sentence on the next line.
+fn usage_of(c: &(&str, &str, &str)) -> String {
+    const AT: usize = 26;
+    let head = format!("  {}", signature(c));
+    let mut lines: Vec<String> = Vec::new();
+    let mut line = if head.chars().count() < AT - 1 { format!("{head:<AT$}") } else { lines.push(head); " ".repeat(AT) };
+    for word in c.2.split_whitespace() {
+        if line.chars().count() > AT && line.chars().count() + 1 + word.chars().count() > 80 {
+            lines.push(std::mem::replace(&mut line, " ".repeat(AT)));
+        }
+        if line.chars().count() > AT { line.push(' '); }
+        line.push_str(word);
+    }
+    lines.push(line);
+    lines.join("\n")
+}
+
+/// The whole usage: every command, then how bon exits.
+fn usage() -> String {
+    format!("usage:\n{}\n\n{EXIT}", COMMANDS.iter().map(usage_of).collect::<Vec<_>>().join("\n"))
+}
+
+/// What a command's arguments are, read from its signature: each `--option`,
+/// with the word for its value if it takes one; and each positional word,
+/// required when it is not in brackets.
+fn grammar(sig: &str) -> (Vec<(String, Option<String>)>, Vec<(String, bool)>) {
+    let (mut options, mut words) = (Vec::new(), Vec::new());
+    let mut depth = 0;
+    let mut tokens: Vec<(String, bool)> = Vec::new();
+    for t in sig.split_whitespace() {
+        let bracketed = depth > 0 || t.starts_with('[');
+        depth += t.matches('[').count() as i32 - t.matches(']').count() as i32;
+        let w = t.trim_matches(|c| c == '[' || c == ']');
+        if !w.is_empty() && w != "|" { tokens.push((w.to_string(), bracketed)); }
+    }
+    let mut i = 0;
+    while i < tokens.len() {
+        let (t, bracketed) = &tokens[i];
+        if t.starts_with("--") {
+            let value = tokens.get(i + 1).filter(|(n, _)| !n.starts_with("--")).map(|(n, _)| n.clone());
+            if value.is_some() { i += 1; }
+            options.push((t.clone(), value));
+        } else { words.push((t.clone(), !bracketed)); }
+        i += 1;
+    }
+    (options, words)
+}
+
+/// A command's arguments, parsed against its signature.
+#[derive(Default)]
+struct Parsed { options: Vec<(String, Option<String>)>, words: Vec<String> }
+
+impl Parsed {
+    fn has(&self, o: &str) -> bool { self.options.iter().any(|(k, _)| k == o) }
+    fn value(&self, o: &str) -> Option<String> { self.options.iter().find(|(k, _)| k == o).and_then(|(_, v)| v.clone()) }
+}
+
+/// Parse `args` against command `c`'s signature: an option it does not name,
+/// a value missing, a word too many or one missing is an error.
+fn parse(c: &(&str, &str, &str), args: &[String]) -> Result<Parsed, String> {
+    let (options, words) = grammar(c.1);
+    // What to do about it: the command's own usage, which fits a line where its signature might not.
+    let usage = format!("{} --help shows its usage", signature(&(c.0, "", "")));
+    let name = if c.0.is_empty() { "bon" } else { c.0 };
+    let mut out = Parsed::default();
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a.starts_with('-') && a.len() > 1 {
+            let Some((o, value)) = options.iter().find(|(o, _)| o == a) else {
+                return Err(format!("{a} is not an option of {name}; {usage}"));
+            };
+            let v = match value {
+                Some(word) => { i += 1; Some(args.get(i).filter(|v| !v.starts_with("--")).cloned().ok_or(format!("{o} needs {word}; {usage}"))?) }
+                None => None,
+            };
+            if out.has(o) { return Err(format!("{o} given twice; {usage}")); }
+            out.options.push((o.clone(), v));
+        } else {
+            if out.words.len() == words.len() { return Err(format!("{a} is not an argument of {name}; {usage}")); }
+            out.words.push(a.clone());
+        }
+        i += 1;
+    }
+    if let Some((w, _)) = words.iter().skip(out.words.len()).find(|(_, required)| *required) { return Err(format!("{name} needs {w}; {usage}")); }
+    Ok(out)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // The command, and its arguments; bare bon is the command with no name.
+    let (name, rest) = match args.first() { Some(a) if !a.starts_with('-') => (a.as_str(), &args[1..]), _ => ("", &args[..]) };
+    if name.is_empty() && matches!(rest, [v] if v == "--version" || v == "-V") {
+        println!("bon {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+    let Some(command) = COMMANDS.iter().find(|c| c.0 == name) else { fail(&format!("unknown command {name}; bon help lists every command")) };
+    // Help has no effect: it is answered before anything else is read.
+    if rest.iter().any(|a| a == "-h" || a == "--help") || (name == "help" && rest.is_empty()) {
+        println!("{}", if name.is_empty() || name == "help" { usage() } else { format!("usage:\n{}", usage_of(command)) });
+        return;
+    }
+    let parsed = parse(command, rest).unwrap_or_else(|e| fail(&e));
     let root = match git(Path::new("."), &["rev-parse", "--show-toplevel"]) {
         Ok(r) => r,
-        // init checks for a repository itself; account and types also run without .git (checks).
-        Err(_) if matches!(args.first().map(String::as_str), Some("init" | "new" | "setup" | "account" | "types" | "help" | "-h" | "--help")) => ".".into(),
-        Err(e) => fail(&format!("not in a git repository: {e}")),
+        // These read no repository: account and types run in a checkout without .git (checks).
+        Err(_) if matches!(name, "new" | "setup") || (matches!(name, "account" | "types") && Path::new(".bon/bon.toml").is_file()) => ".".into(),
+        Err(_) => fail("not in a git repository; run bon in one, or start one with bon new <name>"),
     };
-    let command = args.first().map(String::as_str).unwrap_or("");
+    // What a command reads its settings from: trunk's manifest, or the working tree's.
+    let r = Path::new(&root);
+    if matches!(name, "" | "view" | "spec" | "pending" | "cost" | "code" | "compaction" | "counterexample" | "queue" | "background") {
+        match git(r, &["show", "HEAD:.bon/bon.toml"]) {
+            Err(_) if r.join(".bon/bon.toml").is_file() => fail("no .bon/bon.toml at trunk's head: it is not committed; commit .bon/"),
+            Err(_) => fail("no .bon/bon.toml at trunk's head; run bon init"),
+            Ok(t) => if let Err(e) = toml::from_str::<toml::Value>(&t) {
+                fail(&format!(".bon/bon.toml at trunk's head is not TOML ({}); correct it and commit .bon/", e.message()));
+            },
+        }
+    }
+    if matches!(name, "account" | "types" | "check") && !r.join(".bon/bon.toml").is_file() { fail("no .bon/bon.toml; run bon init"); }
     // In bon's own repository the installed bon decides with the kernel it was
     // built from; trunk is what the last fetch or push left in the remote's ref.
-    let (remote, branch) = best_of_n::trusted::remote_trunk(Path::new(&root));
-    let at_trunk = |p: &str| git(Path::new(&root), &["show", &format!("refs/remotes/{remote}/{branch}:{p}")]).ok();
+    let (remote, branch) = best_of_n::trusted::remote_trunk(r);
+    let at_trunk = |p: &str| git(r, &["show", &format!("refs/remotes/{remote}/{branch}:{p}")]).ok();
     if at_trunk("Cargo.toml").is_some_and(|t| t.contains("name = \"best-of-n\"")) {
         let differ = stale(at_trunk);
         if !differ.is_empty() {
             eprintln!("bon: this bon was built from another kernel than trunk's ({}); reinstall: cargo install --path . --locked", differ.join(", "));
         }
     }
-    if !SEARCHES.contains(&command) {
-        if let Err(e) = dispatch(&root, &args) { fail(&e) }
+    if !SEARCHES.contains(&name) || (name == "background" && parsed.has("--plist")) {
+        if let Err(e) = dispatch(&root, name, &parsed) { fail(&e) }
         return;
     }
-    // Before a search: the client of every role it may run reaches its model as agent, or the command that fixes it.
-    let checked = best_of_n::trusted::head(&root).and_then(|h| best_of_n::trusted::manifest(&root, &h)).and_then(|m| best_of_n::trusted::programs_logged_in(&m));
+    // Before a search, before anything is reserved: every role it may run
+    // starts as agent, and its client reaches its model; or what fixes it.
+    let checked = best_of_n::trusted::head(&root).and_then(|h| best_of_n::trusted::manifest(&root, &h))
+        .and_then(|m| best_of_n::trusted::programs_executable(&m).and_then(|_| best_of_n::trusted::programs_logged_in(&m)));
     // Trunk is the remote's: what the last fetch or push left in its ref.
     let trunk = || best_of_n::trusted::head(&root).map(|h| h.iter().collect::<String>()).unwrap_or_default();
     let before = trunk();
-    let result = checked.and_then(|_| dispatch(&root, &args));
+    let result = checked.and_then(|_| dispatch(&root, name, &parsed));
     // A push or a landed test moved trunk: the cost file follows it, as its own commit.
     if result.is_ok() && trunk() != before {
-        if let Err(e) = record_cost(Path::new(&root)) { eprintln!("bon: .bon/cost.toml not updated: {e}"); }
+        if let Err(e) = record_cost(r) { eprintln!("bon: .bon/cost.toml not updated: {e}"); }
     }
     // Only commands that grant capabilities make directories under /tmp/bon, so
     // only they clean up and record how they ended; bon run inside a check
     // (help, account) never touches it.
-    best_of_n::trusted::end(Path::new(&root), result)
+    best_of_n::trusted::end(r, result)
 }
 
-fn dispatch(root: &str, args: &[String]) -> Result<(), String> {
+fn dispatch(root: &str, name: &str, a: &Parsed) -> Result<(), String> {
     let root = root.to_string();
-    match args.first().map(String::as_str) {
-        Some("code") => process::to_push(&root, false).map(|_| println!("pushed")),
-        Some("compaction") => process::to_push(&root, true).map(|_| println!("pushed")),
-        Some("init") => init(&root),
-        Some("new") => new::run(args.get(1).map(String::as_str)),
-        Some("counterexample") => counterexample(&root),
-        Some("background") if args.get(1).map(String::as_str) == Some("--plist") => { plist(&root); Ok(()) }
-        Some("background") => background(&root),
-        Some("view") if args.iter().any(|a| a == "--frame") => {
-            // bon view --frame WxH [--tab N] [--light]: one frame of the terminal view, as HTML.
-            let size = args.iter().position(|a| a == "--frame").and_then(|i| args.get(i + 1)).cloned().unwrap_or("120x32".into());
-            let (w, h) = size.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))).ok_or("--frame WxH")?;
-            let tab = args.iter().position(|a| a == "--tab").and_then(|i| args.get(i + 1)).and_then(|t| t.parse::<usize>().ok()).unwrap_or(4);
-            let focus = args.iter().position(|a| a == "--focus").and_then(|i| args.get(i + 1)).and_then(|t| t.parse::<usize>().ok()).unwrap_or(0);
-            print!("{}", tui::frame(&root, w, h, tab.saturating_sub(1), focus, args.iter().any(|a| a == "--light"))?);
+    let filter = || view::Filter::new(a.value("--since").as_deref(), a.value("--until").as_deref(), a.value("--find"));
+    match name {
+        "code" => process::to_push(&root, false).map(|_| println!("pushed")),
+        "compaction" => process::to_push(&root, true).map(|_| println!("pushed")),
+        "init" => init(&root),
+        "new" => new::run(&a.words[0]),
+        "counterexample" => counterexample(&root),
+        "background" if a.has("--plist") => { plist(&root); Ok(()) }
+        "background" => background(&root),
+        "view" if a.has("--state") && (a.has("--frame") || a.has("--tab") || a.has("--focus") || a.has("--light")) =>
+            Err("--state goes alone; bon view --help shows its usage".into()),
+        "view" if a.has("--frame") => {
+            let size = a.value("--frame").unwrap_or_default();
+            let (w, h) = size.split_once('x').and_then(|(w, h)| Some((w.parse::<u16>().ok()?, h.parse::<u16>().ok()?)))
+                .filter(|(w, h)| *w > 0 && *h > 0).ok_or(format!("--frame {size} is not WxH; write it as 120x40"))?;
+            let number = |o: &str, of: std::ops::RangeInclusive<usize>, what: &str| -> Result<usize, String> {
+                a.value(o).map_or(Ok(*of.start()), |v| v.parse::<usize>().ok().filter(|n| of.contains(n)).ok_or(format!("{o} {v} is not {what}")))
+            };
+            let tab = number("--tab", 1..=4, "a tab; write 1 to 4")?;
+            let focus = number("--focus", 0..=usize::MAX, "a row; write 0 or more")?;
+            print!("{}", tui::frame(&root, w, h, tab - 1, focus, a.has("--light"))?);
             Ok(())
         }
-        Some("view") if args.iter().any(|a| a == "--typed") => {
-            let p = projection::read(std::path::Path::new(&root), &view::Filter::args(args)?)?;
-            println!("{} bon processes, {} goals, {} searches, {} agent processes, {} spec items, {} queue lines", p.processes.len(), p.groups.len(),
-                p.processes.iter().map(|b| b.searches.len()).sum::<usize>(), p.processes.iter().flat_map(|b| &b.searches).map(|s| s.candidates.len()).sum::<usize>(),
-                p.spec.as_ref().map_or(0, |s| s.items.len()), p.queue.as_ref().map_or(0, |q| q.len()));
-            Ok(())
-        }
-        Some("view") if args.iter().any(|a| a == "--state") => {
-            println!("{}", serde_json::to_string_pretty(&view::state(std::path::Path::new(&root), &view::Filter::args(args)?)).unwrap_or_default());
-            Ok(())
-        }
-        Some("view") => tui::run(&root, view::Filter::args(args)?),
-        Some("queue") => queue(&root),
-        Some("setup") => {
-            let dry_run = args.iter().any(|a| a == "--dry-run");
-            let user = args.iter().position(|a| a == "--for").and_then(|i| args.get(i + 1)).cloned();
-            setup(dry_run, user)
-        }
-        Some("account") => match args.get(1).map(String::as_str) {
-            None => account::run(&root, false),
-            Some("--check") => account::run(&root, true),
-            // Its line of the usage, as the README's table says it.
-            Some("-h" | "--help") => { println!("usage:\n{}", USAGE.lines().find(|l| l.starts_with("  bon account")).unwrap_or_default()); Ok(()) }
-            Some(other) => Err(format!("bon account takes --check, not {other}")),
-        },
-        Some("types") => types::run(&root, args.get(1).map(String::as_str) == Some("--check")),
-        Some("spec") => { print!("{}", tui::spec_text(&root, args.get(1).map(String::as_str), 100)?); Ok(()) }
-        Some("check") => check(&root),
-        Some("pending") => interrupt::run(&root, args),
-        Some("cost") => { let p = projection::read(Path::new(&root), &view::Filter::default())?; let t = cost_toml(&p);
+        "view" if a.has("--state") => { println!("{}", serde_json::to_string_pretty(&view::state(Path::new(&root), &view::Filter::default())).unwrap_or_default()); Ok(()) }
+        "view" if a.has("--tab") || a.has("--focus") || a.has("--light") => Err("--tab, --focus and --light go with --frame; bon view --help shows its usage".into()),
+        "view" => tui::run(&root, view::Filter::default()),
+        "queue" => queue(&root),
+        "setup" => setup(a.has("--dry-run"), a.value("--for")),
+        "account" => account::run(&root, a.has("--check")),
+        "types" => types::run(&root, a.has("--check")),
+        "spec" => { print!("{}", tui::spec_text(&root, a.words.first().map(String::as_str), 100)?); Ok(()) }
+        "check" => check(&root),
+        "pending" => interrupt::run(&root, a.value("--transcript").as_deref()),
+        "cost" => { let p = projection::read(Path::new(&root), &view::Filter::default())?; let t = cost_toml(&p);
             std::fs::write(Path::new(&root).join(".bon/cost.toml"), &t).map_err(|e| e.to_string())?; print!("{t}"); Ok(()) }
-        Some("help" | "-h" | "--help") => { println!("{USAGE}"); Ok(()) }
-        None if tui::wanted() => tui::run(&root, view::Filter::args(args)?),
-        None => status(&root, args),
-        Some(a) if a.starts_with("--") => status(&root, args),
-        Some(other) => Err(format!("unknown command {other}\n{USAGE}")),
+        _ if tui::wanted() => tui::run(&root, filter()?),
+        _ => status(&root, &filter()?),
     }
 }
 
@@ -193,7 +305,7 @@ fn check(root: &str) -> Result<(), String> {
     let reused = reused_ids(&git(r, &["log", "-p", "--reverse", "--format=commit %h", "--", ".bon/queue.tsv"]).unwrap_or_default(), &queue);
     if !reused.is_empty() {
         for (id, commit) in &reused { println!("  FAIL .bon/queue.tsv: id {id} was retired in {commit}; ids are never reused"); }
-        return Err(format!("renumber from {}: one more than any id the queue has held", next_id(r)));
+        return Err(format!("a queue id is reused; renumber from {}, one more than any id the queue has held", next_id(r)));
     }
     let broken = rules(r, &commit, &m)?;
     if !broken.is_empty() { println!("what a search may write, and how its candidates are judged:"); }
@@ -215,9 +327,9 @@ fn check(root: &str) -> Result<(), String> {
         }
         println!("       log: {}", log.strip_prefix(r).unwrap_or(log).display());
     }
-    if failed { return Err("checks reject the working tree".into()); }
+    if failed { return Err("checks reject the working tree; each FAIL above says where".into()); }
     println!("every check accepts the working tree");
-    if !broken.is_empty() { return Err(format!("the working tree breaks a rule in {} places", broken.len())); }
+    if !broken.is_empty() { return Err(format!("the working tree breaks a rule in {} places; each FAIL above names the file and the rule", broken.len())); }
     Ok(())
 }
 
@@ -583,14 +695,19 @@ fn plist(root: &str) {
 </dict></plist>"#);
 }
 
+/// An error, in one line on stderr, and exit 1.
 fn fail(e: &str) -> ! {
-    eprintln!("bon: {e}");
+    eprintln!("bon: {}", e.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("; "));
     std::process::exit(1)
 }
 
+/// A git command's output; or, failing, what bon ran and git's first line.
 fn git(root: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git").args(args).current_dir(root).output().map_err(|e| e.to_string())?;
-    if !out.status.success() { return Err(String::from_utf8_lossy(&out.stderr).trim().to_string()); }
+    let out = Command::new("git").args(args).current_dir(root).output().map_err(|e| format!("git {}: {e}", args[0]))?;
+    if !out.status.success() {
+        let said = String::from_utf8_lossy(&out.stderr);
+        return Err(format!("git {}: {}", args[0], said.lines().find(|l| !l.trim().is_empty()).unwrap_or("failed").trim().trim_start_matches("fatal: ")));
+    }
     Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
 }
 
@@ -598,10 +715,9 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
 fn init(root: &str) -> Result<(), String> {
     use std::io::Write;
     let r = Path::new(root);
-    git(r, &["rev-parse", "--show-toplevel"]).map_err(|e| format!("not in a git repository: {e}"))?;
     let bon = r.join(".bon");
     if std::fs::symlink_metadata(&bon).is_ok() && !bon.is_dir() {
-        return Err(".bon exists but is not a directory".into());
+        return Err(".bon exists and is not a directory; move it aside".into());
     }
     for file in ["bon.toml", "queue.tsv"] {
         if std::fs::symlink_metadata(bon.join(file)).is_ok() {
@@ -703,13 +819,8 @@ fn init_account(r: &Path) -> String {
 
 /// What is running, what was pushed, and the queue: the projection bon view
 /// draws, printed.
-fn status(root: &str, args: &[String]) -> Result<(), String> {
-    let filter = view::Filter::args(args)?;
-    if git(Path::new(root), &["show", "HEAD:.bon/bon.toml"]).is_err() {
-        println!("no .bon/bon.toml at trunk's head: run bon init");
-        return Ok(());
-    }
-    print!("{}", view::text(&view::state(Path::new(root), &filter)));
+fn status(root: &str, filter: &view::Filter) -> Result<(), String> {
+    print!("{}", view::text(&view::state(Path::new(root), filter)));
     Ok(())
 }
 
@@ -719,7 +830,7 @@ fn status(root: &str, args: &[String]) -> Result<(), String> {
 fn queue(root: &str) -> Result<(), String> {
     let r = Path::new(root);
     let config: toml::Value = toml::from_str(&git(r, &["show", "HEAD:.bon/bon.toml"])
-        .map_err(|_| "no .bon/bon.toml at trunk's head; run bon init")?).map_err(|e| e.to_string())?;
+        .map_err(|_| "no .bon/bon.toml at trunk's head; run bon init")?).map_err(|e| format!(".bon/bon.toml at trunk's head: {e}"))?;
     let dir = match config.get("transcripts") {
         Some(v) => v.as_str().ok_or("transcripts in .bon/bon.toml must be a directory string")?,
         None => "transcripts",
@@ -1110,6 +1221,53 @@ fn tokens(text: &str) -> Vec<(String, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_readmes_command_table_is_the_usage_word_for_word() {
+        let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md")).unwrap();
+        // Each row: `signature` | sentence, a pipe in code written \|.
+        let rows: Vec<(String, String)> = readme.lines().filter(|l| l.starts_with("| `bon")).map(|l| {
+            let (code, rest) = l[3..].split_once("` | ").unwrap();
+            (code.replace("\\|", "|"), rest.trim_end_matches(" |").to_string())
+        }).collect();
+        let table: Vec<(String, String)> = COMMANDS.iter().map(|c| (signature(c), c.2.to_string())).collect();
+        assert_eq!(rows, table);
+        assert!(readme.contains(EXIT), "the README says how bon exits, as the usage does");
+        // Every line of the usage fits 80 columns, and each command starts one line of it.
+        let text = usage();
+        assert!(text.lines().all(|l| l.chars().count() <= 80), "{text}");
+        for c in COMMANDS { assert_eq!(text.lines().filter(|l| l.starts_with(&format!("  {}", signature(&c))) && l[2 + signature(&c).len()..].starts_with([' ', '\n']) || *l == format!("  {}", signature(&c))).count(), 1, "{}", c.0); }
+    }
+
+    #[test]
+    fn a_commands_arguments_are_read_from_its_signature_and_nothing_else_is_taken() {
+        let c = |n: &str| *COMMANDS.iter().find(|c| c.0 == n).unwrap();
+        let args = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let ok = parse(&c(""), &args(&["--since", "2026-11-01", "--find", "Code"])).unwrap();
+        assert_eq!((ok.value("--since").as_deref(), ok.value("--find").as_deref(), ok.has("--until")), (Some("2026-11-01"), Some("Code"), false));
+        // An unknown option, a value missing, a word too many, a word missing, an option twice: each an error that says the usage.
+        assert_eq!(parse(&c(""), &args(&["--version", "x"])).err().unwrap(), "--version is not an option of bon; bon --help shows its usage");
+        assert_eq!(parse(&c(""), &args(&["--since"])).err().unwrap(), "--since needs YYYY-MM-DD; bon --help shows its usage");
+        assert_eq!(parse(&c("code"), &args(&["now"])).err().unwrap(), "now is not an argument of code; bon code --help shows its usage");
+        assert_eq!(parse(&c("new"), &[]).err().unwrap(), "new needs <name>; bon new --help shows its usage");
+        assert!(parse(&c("help"), &args(&["code"])).is_err());
+        assert!(parse(&c("account"), &args(&["--check", "--check"])).is_err());
+        assert!(parse(&c("account"), &args(&["--bogus"])).err().unwrap().starts_with("--bogus is not an option of account;"));
+        // Optional words, and an option's value that is another option.
+        assert_eq!(parse(&c("spec"), &args(&["verified"])).unwrap().words, ["verified"]);
+        assert!(parse(&c("spec"), &[]).is_ok());
+        assert!(parse(&c("pending"), &args(&["--transcript", "--x"])).is_err());
+        let v = parse(&c("view"), &args(&["--frame", "80x24", "--tab", "2", "--light"])).unwrap();
+        assert_eq!((v.value("--frame").as_deref(), v.value("--tab").as_deref(), v.has("--light"), v.has("--state")), (Some("80x24"), Some("2"), true, false));
+        assert_eq!(grammar("[--dry-run] [--for USER]"), (vec![("--dry-run".into(), None), ("--for".into(), Some("USER".into()))], vec![]));
+        assert_eq!(grammar("<name>").1, vec![("<name>".to_string(), true)]);
+    }
+
+    #[test]
+    fn an_error_is_one_line_and_says_what_git_was_asked() {
+        let e = git(Path::new("/"), &["rev-parse", "--show-toplevel"]).unwrap_err();
+        assert!(e.starts_with("git rev-parse: ") && !e.contains('\n') && !e.contains("fatal:"), "{e}");
+    }
 
     #[test]
     fn bon_check_names_each_file_that_breaks_a_rule_on_what_a_search_may_write() {

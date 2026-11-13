@@ -21,14 +21,13 @@ const TEMPLATE: [(&str, &str); 9] = [
 ];
 
 /// `bon new <name>`, in the current directory.
-pub fn run(name: Option<&str>) -> Result<(), String> {
-    let name = name.ok_or("bon new takes the project's name")?;
+pub fn run(name: &str) -> Result<(), String> {
     // A Cargo package name, and a directory: a letter, then letters, digits, - or _.
     if !name.starts_with(|c: char| c.is_ascii_lowercase()) || !name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_') {
-        return Err(format!("{name}: a project's name is a lowercase letter, then lowercase letters, digits, - or _"));
+        return Err(format!("{name} is no project's name; name it with a lowercase letter, then lowercase letters, digits, - or _"));
     }
     let dir = Path::new(name);
-    if std::fs::symlink_metadata(dir).is_ok() { return Err(format!("{name} exists; nothing written")); }
+    if std::fs::symlink_metadata(dir).is_ok() { return Err(format!("{name} already exists; nothing written: choose another name, or move it aside")); }
     for (path, text) in TEMPLATE {
         let file = dir.join(path);
         std::fs::create_dir_all(file.parent().unwrap()).map_err(|e| format!("{name}/{path}: {e}"))?;

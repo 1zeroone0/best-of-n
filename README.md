@@ -38,18 +38,26 @@ bon
 
 | | |
 |---|---|
-| `bon` | the view: Project, Spec, Queue, Traces (piped, plain text) |
+| `bon [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--find TEXT]` | the view: Project, Spec, Queue, Traces, over that range (piped, plain text) |
 | `bon code` | search for code that trunk's checks accept; push it |
 | `bon counterexample` | look for a behavior on trunk the spec forbids, with tests written blind |
 | `bon compaction` | remove what is stale, behavior unchanged |
 | `bon queue` | turn each new transcript into a proposal for the queue |
-| `bon background` | the stalest of compaction and counterexample, on spare capacity |
+| `bon background [--plist]` | the stalest of compaction and counterexample, on spare capacity; --plist, a launchd job that runs it every five minutes |
 | `bon spec [NAME]` | the spec's vocabulary and how it reaches the code, or one item |
-| `bon types [--check]` | the types programs are built on, in TypeScript, Go and Python |
+| `bon types [--check]` | write the types programs are built on, in TypeScript, Go and Python, or fail if one is stale |
 | `bon account [--check]` | write what is proven, trusted, configured and tested, as OSCAL with its SBOM, or fail if it is stale |
 | `bon check` | every check on the working tree, as candidates are judged; whose fix a failure is; each file that breaks a rule on what a search may write |
 | `bon pending [--transcript FILE]` | what only you can answer, oldest first: what happened, the choices and what each costs |
 | `bon new <name>` | set up a project: a spec with the core nouns, its gates, an empty implementation, the manifest and the queue |
+| `bon init` | create a manifest and queue in this git repository |
+| `bon setup [--dry-run] [--for USER]` | create user agent and group bon, and let USER (default: you) run commands as agent; run it as an administrator |
+| `bon cost` | write .bon/cost.toml, what reaching trunk cost (bon does after each push) |
+| `bon view [--state \| --frame WxH [--tab N] [--focus K] [--light]]` | the view, as bon opens it in a terminal; --state, its projection as JSON; --frame, one frame of it as HTML |
+| `bon help` | every command, its arguments and what it does |
+
+`bon <command> --help` prints that command's line and does nothing else;
+`bon --version`, the version. exit: 0 done; 1 an error (one line on stderr); 2 something pending (bon pending)
 
 **You decide** the spec and the checks; the [queue](.bon/queue.tsv) holds what
 is wanted and not yet in the spec. **Search decides** the rest, as the POSIX
