@@ -138,42 +138,88 @@ fn fits_policy(o: &Observation, slot: Option<usize>, slots: usize) -> (r: bool)
     true
 }
 
+/// The observation whose permissions the observed map holds for a confined
+/// `user`: agent's, or check slot `slot`'s user's. The map's value is this
+/// observation's `on` the object (`observed_is_seen`).
+pub open spec fn seen(agent: Observation, slots: Seq<Observation>, user: User) -> Observation {
+    match user { User::check(slot) => slots[slot as int], _ => agent }
+}
+
+/// The observed map holds, for a confined user and any object, that user's
+/// observation (`seen`) of the object. One line; the map is an `IMap::new`
+/// whose domain is the confined users and whose value is exactly this.
+proof fn observed_is_seen(agent: Observation, slots: Seq<Observation>, user: User, object: Object)
+    requires spec::confined(user, slots.len()),
+    ensures
+        observed(agent, slots).contains_key((user, object)),
+        #[trigger] observed(agent, slots)[(user, object)] == on(seen(agent, slots, user), object),
+{
+}
+
+/// Each confined user's observation fits the policy ==> the observed map is
+/// isolated. (One direction of `isolated_fits`.)
+proof fn isolated_from_fits(agent: Observation, slots: Seq<Observation>)
+    requires
+        slots.len() > 0,
+        fits(agent, User::agent, slots.len()),
+        forall|k: int| 0 <= k < slots.len() ==> fits(#[trigger] slots[k], User::check(k as nat), slots.len()),
+    ensures spec::isolated(observed(agent, slots), slots.len()),
+{
+    let s = slots.len();
+    assert forall|user: User, object: Object| #![trigger spec::confined(user, s), spec::named(object, s)]
+        spec::confined(user, s) && spec::named(object, s) implies {
+            &&& observed(agent, slots).contains_key((user, object))
+            &&& (object != Object::Transcripts ==> observed(agent, slots)[(user, object)].len() > 0)
+            &&& forall|path_index: int| 0 <= path_index < observed(agent, slots)[(user, object)].len()
+                ==> observed(agent, slots)[(user, object)][path_index] == Some(spec::policy(user, object))
+    } by {
+        observed_is_seen(agent, slots, user, object);
+        // The observation that fits for this user: agent's, or the slot's.
+        match user {
+            User::check(slot) => {
+                assert(slot < s);
+                assert(slots[slot as int] == seen(agent, slots, user));
+                assert(fits(slots[slot as int], User::check(slot), s));
+            }
+            User::agent => { assert(fits(agent, User::agent, s)); }
+            User::engineer => {}
+        }
+    }
+}
+
+/// The observed map is isolated ==> each confined user's observation fits the
+/// policy. (The other direction of `isolated_fits`.)
+proof fn fits_from_isolated(agent: Observation, slots: Seq<Observation>)
+    requires spec::isolated(observed(agent, slots), slots.len()),
+    ensures
+        slots.len() > 0,
+        fits(agent, User::agent, slots.len()),
+        forall|k: int| 0 <= k < slots.len() ==> fits(#[trigger] slots[k], User::check(k as nat), slots.len()),
+{
+    let s = slots.len();
+    assert forall|object: Object| #![trigger spec::named(object, s)] spec::named(object, s)
+        implies fits_on(on(agent, object), User::agent, object) by {
+        observed_is_seen(agent, slots, User::agent, object);
+    }
+    assert forall|k: int| 0 <= k < s implies fits(#[trigger] slots[k], User::check(k as nat), s) by {
+        assert forall|object: Object| #![trigger spec::named(object, s)] spec::named(object, s)
+            implies fits_on(on(slots[k], object), User::check(k as nat), object) by {
+            observed_is_seen(agent, slots, User::check(k as nat), object);
+            assert(slots[k] == seen(agent, slots, User::check(k as nat)));
+        }
+    }
+}
+
 /// The observed map is isolated exactly when there is a slot and agent's
-/// observation and each slot's user's fit the policy.
+/// observation and each slot's user's fit the policy: the two implications.
 proof fn isolated_fits(agent: Observation, slots: Seq<Observation>)
     ensures spec::isolated(observed(agent, slots), slots.len()) == (slots.len() > 0 && fits(agent, User::agent, slots.len())
         && forall|k: int| 0 <= k < slots.len() ==> fits(slots[k], User::check(k as nat), slots.len())),
 {
-    let o = observed(agent, slots);
     let s = slots.len();
-    let domain = ISet::new(|key: (User, Object)| spec::confined(key.0, s));
-    // What the map says of a confined user is what that user's observation says.
-    assert forall|user: User, object: Object| spec::confined(user, s) implies
-        o.contains_key((user, object)) && o[(user, object)] == on(match user { User::check(slot) => slots[slot as int], _ => agent }, object) by {
-        assert(domain.contains((user, object)));
-    }
-    if spec::isolated(o, s) {
-        assert forall|object: Object| spec::named(object, s) implies fits_on(on(agent, object), User::agent, object) by {
-            assert(spec::confined(User::agent, s));
-        }
-        assert forall|k: int| 0 <= k < s implies fits(slots[k], User::check(k as nat), s) by {
-            assert forall|object: Object| spec::named(object, s) implies fits_on(on(slots[k], object), User::check(k as nat), object) by {
-                assert(spec::confined(User::check(k as nat), s));
-            }
-        }
-    }
-    if s > 0 && fits(agent, User::agent, s) && forall|k: int| 0 <= k < s ==> fits(slots[k], User::check(k as nat), s) {
-        assert forall|user: User, object: Object| spec::confined(user, s) && spec::named(object, s) implies {
-            &&& o.contains_key((user, object))
-            &&& (object != Object::Transcripts ==> o[(user, object)].len() > 0)
-            &&& forall|path_index: int| 0 <= path_index < o[(user, object)].len() ==> o[(user, object)][path_index] == Some(spec::policy(user, object))
-        } by {
-            match user {
-                User::check(slot) => { assert(fits(slots[slot as int], User::check(slot), s)); }
-                _ => {}
-            }
-        }
-    }
+    let rhs = s > 0 && fits(agent, User::agent, s) && forall|k: int| 0 <= k < s ==> fits(slots[k], User::check(k as nat), s);
+    if spec::isolated(observed(agent, slots), s) { fits_from_isolated(agent, slots); }
+    if rhs { isolated_from_fits(agent, slots); }
 }
 
 pub fn isolated(agent: &Observation, slots: &Vec<Observation>) -> (r: bool)
