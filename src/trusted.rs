@@ -517,9 +517,9 @@ impl Signal {
 
 /// What a supervised command did: exit 0, its stdout, whether its time limit
 /// stopped it, whether it exited with a code of its own (not killed, not a
-/// signal, not a spawn that failed: only such a result may be cached), and its
-/// log as written.
-struct Run { ok: bool, stdout: String, killed: bool, exited: bool, log: String }
+/// signal, not a spawn that failed: only such a result may be cached), that
+/// code, whether it was spawned at all, and its log as written.
+struct Run { ok: bool, stdout: String, killed: bool, exited: bool, exit: Option<i32>, spawned: bool, log: String }
 
 /// Run to completion or kill at `time`, with all it started. `spoke`, if
 /// given, is set when the command first writes to stdout.
@@ -532,7 +532,7 @@ fn supervised(mut c: Command, stdin: Option<String>, time: Duration, log: &std::
         Err(e) => {
             let text = format!("spawn: {e}");
             write_trace(log, &text);
-            return Run { ok: false, stdout: String::new(), killed: false, exited: false, log: text };
+            return Run { ok: false, stdout: String::new(), killed: false, exited: false, exit: None, spawned: false, log: text };
         }
     };
     if let Some(text) = stdin {
@@ -582,7 +582,8 @@ fn supervised(mut c: Command, stdin: Option<String>, time: Duration, log: &std::
     let exit = if killed { "killed".to_string() } else { status.and_then(|s| s.code()).map_or("signal".into(), |c| c.to_string()) };
     let text = format!("exit: {exit}\nseconds: {:.1}\n--- stdout\n{stdout}\n--- stderr\n{stderr}", start.elapsed().as_secs_f64());
     write_trace(log, &text);
-    Run { ok: status.is_some_and(|s| s.success()) && !killed, stdout, killed, exited: !killed && status.and_then(|s| s.code()).is_some(), log: text }
+    let code = if killed { None } else { status.and_then(|s| s.code()) };
+    Run { ok: status.is_some_and(|s| s.success()) && !killed, stdout, killed, exited: code.is_some(), exit: code, spawned: true, log: text }
 }
 
 // ── working directories ─────────────────────────────────
@@ -2260,6 +2261,49 @@ pub fn programs_logged_in(m: &Manifest) -> (r: Result<(), String>) {
     Ok(())
 }
 
+/// Whether `$1` runs: a name is looked up on PATH, a path is that file; each
+/// failure says why, on stdout, and exits 1.
+/// A name is looked for as env looks for it, an executable file in a PATH
+/// directory (a shell builtin is no answer); a relative path is the working
+/// directory's, which exists only once the search runs, so it is not checked.
+pub const PROBE: &str = r#"case "$1" in /*) p="$1";; */*) exit 0;; *) p=; IFS=:; for d in $PATH; do [ -f "$d/$1" ] && [ -x "$d/$1" ] && { p="$d/$1"; break; }; done
+  [ -n "$p" ] || { echo "not found on agent's PATH"; exit 1; };; esac
+[ -e "$p" ] || { echo "$p does not exist"; exit 1; }; [ -f "$p" ] && [ -x "$p" ] || { echo "$p is not executable by agent"; exit 1; }"#;
+
+/// Before a search, before anything is reserved: the program of each role
+/// bon.toml names is found and executable as agent, on agent's PATH, the way
+/// an agent process runs it. If one is not, which role and program, and why.
+#[verifier::external_body]
+pub fn programs_executable(m: &Manifest) -> (r: Result<(), String>) {
+    let mut roles: Vec<String> = m.config.searches.all().iter().map(|(_, e)| e.role.clone()).collect();
+    roles.sort(); roles.dedup();
+    for role in roles {
+        let Some(program) = m.config.roles.get(&role).and_then(|r| r.program.first()).cloned() else {
+            return Err(format!("role {role} has no program in the host file; give [roles.{role}] a program"));
+        };
+        let out = as_agent(&m.config, std::path::Path::new("/tmp"), &[], &["/bin/sh".into(), "-c".into(), PROBE.into(), "sh".into(), program.clone()]).output();
+        let why = match out {
+            Ok(o) if o.status.success() => continue,
+            // The probe's own line; what the shell or sudo said, only when it said nothing.
+            Ok(o) => Some(String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty())
+                .unwrap_or_else(|| String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("").trim().to_string()),
+            Err(e) => format!("bon could not run as agent: {e}"),
+        };
+        return Err(format!("agent cannot execute {program} (role {role}): {why}; make it executable by agent, or name another program in the host file"));
+    }
+    Ok(())
+}
+
+/// Whether an agent process's program never started: it wrote nothing, and
+/// it could not be spawned, or `env` could not run it (126: found but not
+/// executable; 127: not found). It reached no model and is charged nothing;
+/// so is one that wrote nothing and exited non-zero (`silent`): there is no
+/// token count to charge, and its exit is flagged, not a spent limit.
+#[verifier::external]
+fn never_started(run: &Run) -> bool {
+    !run.killed && run.stdout.is_empty() && (!run.spawned || matches!(run.exit, Some(126 | 127)))
+}
+
 /// How many agent processes a search of this kind runs on attempt `a`.
 #[verifier::external_body]
 pub fn width(m: &Manifest, kind: &Kind, a: usize) -> usize {
@@ -2770,7 +2814,8 @@ pub fn end(root: &std::path::Path, result: Result<(), String>) -> ! {
     let _ = std::io::stdout().flush();
     match result {
         Ok(()) => std::process::exit(0),
-        Err(e) => { eprintln!("bon: {e}"); std::process::exit(1) }
+        // One line, whatever the error carried.
+        Err(e) => { eprintln!("bon: {}", e.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("; ")); std::process::exit(1) }
     }
 }
 
@@ -2877,11 +2922,15 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, p: &Pro
     if let Some(c) = p.run.context { env.push(("BON_CONTEXT", c.to_string())); }
     let c = as_agent_on(config, &with_wrapper(config, config.path.clone()), &dir, &env, &argv);
     let run = supervised(c, Some(text), Duration::from_secs(config.agent_process.time), &trace.join("program"), spoke);
-    let (stdout, killed) = (run.stdout, run.killed);
+    let started = !never_started(&run);
+    let silent = !run.killed && run.stdout.is_empty() && run.exit != Some(0);
+    let (stdout, killed, exit) = (run.stdout, run.killed, run.exit);
     drop(session);
     remove_build(config, &build);
-    // Without token counts there is no measured cost: charge the whole limit.
-    let (spent, program_cost, prices) = generation(p, config, &stdout).unwrap_or((micro(config.agent_process.limit), None, HashMap::new()));
+    // Without token counts there is no measured cost: charge the whole limit;
+    // a program that never started reached no model, and costs nothing.
+    let (spent, program_cost, prices) = generation(p, config, &stdout)
+        .unwrap_or((if started && !silent { micro(config.agent_process.limit) } else { 0 }, None, HashMap::new()));
     if killed { write_trace(&trace.join("killed"), "time limit"); }
     // The judge's build: a fresh clone of trunk's, which no agent process wrote,
     // made only if a check must run (the verdict cache may answer them all).
@@ -2900,6 +2949,8 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, p: &Pro
         // The program by its name (its argv is the trace's `argv`), its role and its client.
         "program": p.name(), "role": p.role, "client": p.run.client, "model": p.run.model,
         "generation_microdollars": spent, "killed": killed,
+        // Its program's exit code (none when killed or never spawned), and whether it started at all.
+        "exit": exit, "started": started,
         "program_generation_microdollars": program_cost,
         // Its requests over its model's tier threshold, where the output says each request's prompt.
         "requests_over_tier": over_tier(p, config, &stdout),
@@ -4101,6 +4152,35 @@ mod tests {
         assert!(!ok && killed, "{}", std::fs::read_to_string(&log).unwrap_or_default());
         assert!(start.elapsed() < Duration::from_secs(6), "{:?}", start.elapsed());
         let _ = std::fs::remove_file(&log);
+    }
+
+    #[test]
+    fn a_program_that_never_started_is_told_apart_and_why_it_cannot_run_is_said() {
+        // M3: spawn failed, or env could not run it (126, 127), with no output: never started.
+        let log = std::env::temp_dir().join(format!("bon-started-test-{}", std::process::id()));
+        let run = |c: Command| supervised(c, None, Duration::from_secs(10), &log, None);
+        assert!(never_started(&run(Command::new("/nonexistent/program"))));
+        let mut c = Command::new("/usr/bin/env"); c.arg("/etc/hosts");
+        let r = run(c);
+        assert!(r.exit == Some(126) && never_started(&r), "{}", r.log);
+        let mut c = Command::new("/usr/bin/env"); c.arg("no-such-program-anywhere");
+        assert!(never_started(&run(c)));
+        // A program that ran and failed, or printed anything, started.
+        let mut c = Command::new("/bin/sh"); c.args(["-c", "echo token; exit 127"]);
+        assert!(!never_started(&run(c)));
+        let mut c = Command::new("/bin/sh"); c.args(["-c", "exit 1"]);
+        assert!(!never_started(&run(c)));
+        let _ = std::fs::remove_file(&log);
+        // The probe says why, in one line.
+        let probe = |p: &str| { let o = Command::new("/bin/sh").args(["-c", PROBE, "sh", p]).env("PATH", "/usr/bin:/bin").output().unwrap(); (o.status.success(), String::from_utf8_lossy(&o.stdout).trim().to_string()) };
+        assert_eq!(probe("sh"), (true, String::new()));
+        // A builtin is found only as the file env would run.
+        assert_eq!(probe("true"), (true, String::new()));
+        assert_eq!(probe("./relative"), (true, String::new()));
+        assert_eq!(probe("/bin/sh"), (true, String::new()));
+        assert_eq!(probe("no-such-program-anywhere"), (false, "not found on agent's PATH".to_string()));
+        assert_eq!(probe("/etc/hosts"), (false, "/etc/hosts is not executable by agent".to_string()));
+        assert_eq!(probe("/nonexistent/program"), (false, "/nonexistent/program does not exist".to_string()));
     }
 
     /// Trunk with a landed test (accepts only good code) and its evidence (bad
