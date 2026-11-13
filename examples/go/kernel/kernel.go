@@ -175,16 +175,101 @@ type Totals struct {
 	// How many attempts of each kind each reason blocked.
 	Reasons []Reason `json:"reasons"`
 	// How many attempts of each kind exited, by when: during_a_search, or
-	// after_its_searches (reported, before a transition). The trace holds
-	// no error for either.
+	// after_its_searches (reported, before a transition), in older traces,
+	// which hold no error; or the error the bon process recorded.
 	Exits []Reason `json:"exits"`
+	// Success probability by kind, and by attempt.
+	Success []Success `json:"success"`
+	// Cost per verified candidate by kind, program and model.
+	PerVerified []PerVerified `json:"per_verified"`
+	// The host's two semaphores against wall time.
+	Utilization Utilization `json:"utilization"`
+	// Time and cost to a push, by kind, and each search's as a fixed part
+	// plus a part per distinct tree.
+	RunTime []RunTime `json:"run_time"`
+}
+
+// One kind's success probability, over every attempt (`attempt` none) or
+// over each bon process's attempt-th attempt and the searches on it: per
+// agent process, successes ÷ agent processes (successes: verified
+// candidates; a foil search's foils), over reported searches; per attempt,
+// pushed ÷ attempts that ended (pushed, blocked, landed).
+type Success struct {
+	Kind           string  `json:"kind"`
+	Attempt        *uint64 `json:"attempt"`
+	AgentProcesses uint64  `json:"agent_processes"`
+	Successes      uint64  `json:"successes"`
+	Ended          uint64  `json:"ended"`
+	Pushed         uint64  `json:"pushed"`
+}
+
+// The agent processes of one kind, program and model that returned, how many
+// were verified, their generation, and their share of their searches' time
+// cost: cost per verified candidate is (generation + time_cost) ÷ verified.
+type PerVerified struct {
+	Kind           string  `json:"kind"`
+	Program        string  `json:"program"`
+	Model          string  `json:"model"`
+	AgentProcesses uint64  `json:"agent_processes"`
+	Verified       uint64  `json:"verified"`
+	Generation     float64 `json:"generation"`
+	TimeCost       float64 `json:"time_cost"`
+}
+
+// The host's agent_processes and check_processes semaphores over the reported
+// searches in range: `wall` is the union of their wall times, in seconds.
+type Utilization struct {
+	Wall           float64 `json:"wall"`
+	Searches       uint64  `json:"searches"`
+	AgentProcesses Pool    `json:"agent_processes"`
+	CheckProcesses Pool    `json:"check_processes"`
+}
+
+// One semaphore: the slot-seconds held, and its size where every search
+// recorded the same one. Utilization is held ÷ (size × wall).
+type Pool struct {
+	Held float64 `json:"held"`
+	Size *uint64 `json:"size"`
+}
+
+// One kind's run-time distribution: its pushes' time (seconds) and cost to a
+// push, each as median and 90th percentile; and over `searches` of its
+// reported searches, a search's seconds and cost as a fixed part plus a part
+// per distinct tree, by least squares (inferred), none with too few.
+type RunTime struct {
+	Kind     string `json:"kind"`
+	Pushes   uint64 `json:"pushes"`
+	Time     Spread `json:"time"`
+	Cost     Spread `json:"cost"`
+	Searches uint64 `json:"searches"`
+	Fit      *Fit   `json:"fit"`
+}
+
+// A median (the middle value, or the mean of the middle two) and a 90th
+// percentile (the ⌈0.9 n⌉-th smallest); none of no values.
+type Spread struct {
+	Median *float64 `json:"median"`
+	P90    *float64 `json:"p90"`
+}
+
+// Seconds and cost, each a fixed part plus a part per distinct tree.
+type Fit struct {
+	Time PerTree `json:"time"`
+	Cost PerTree `json:"cost"`
+}
+
+// A fixed part, and a part per distinct tree.
+type PerTree struct {
+	Fixed   float64 `json:"fixed"`
+	PerTree float64 `json:"per_tree"`
 }
 
 // Attempts of one kind at one width, by how each ended; `attempts` is their
 // sum. An attempt is a code or compaction search with the foil and
 // counterexample searches on its selection. Landed: a counterexample's test
 // landed on trunk and the bon process went on. Exited: its bon process
-// stopped during it, with no transition.
+// stopped during it, on the error it recorded or, in older traces, with no
+// transition.
 type Attempts struct {
 	Kind     string `json:"kind"`
 	Width    uint64 `json:"width"`
@@ -199,8 +284,8 @@ type Attempts struct {
 // How the bon processes of one kind ended. Exited: stopped short of a final
 // transition (killed, interrupted, an error), which is not a block. `expected`
 // is the share of those that pushed or blocked (1-p)^k predicts would end
-// blocked, p being this kind's measured push rate per attempt that ended and
-// k the attempts each process made.
+// blocked, p being this kind's success probability per attempt (pushed ÷
+// attempts that ended) and k the attempts each process made.
 type Ended struct {
 	Kind     string   `json:"kind"`
 	Pushed   uint64   `json:"pushed"`
@@ -237,24 +322,28 @@ type Push struct {
 	TimeCost       *float64 `json:"time_cost"`
 	ToSelection    *float64 `json:"to_selection"`
 	Counterexample *float64 `json:"counterexample"`
-	Searches       *uint64  `json:"searches"`
-	Processes      *uint64  `json:"processes"`
+	// The wall time of every search run to reach it, summed as cost is.
+	Seconds   *float64 `json:"seconds"`
+	Searches  *uint64  `json:"searches"`
+	Processes *uint64  `json:"processes"`
 }
 
 // The bon processes of one goal: one row of the traces.
 type GoalTrace struct {
-	Kind       string       `json:"kind"`
-	Title      string       `json:"title"`
-	About      About        `json:"about"`
-	Outcome    string       `json:"outcome"`
-	Sentence   string       `json:"sentence"`
-	Cost       float64      `json:"cost"`
-	Generation float64      `json:"generation"`
-	TimeCost   float64      `json:"time_cost"`
-	Push       *Push        `json:"push"`
-	Time       int64        `json:"time"`
-	Running    bool         `json:"running"`
-	Processes  []BonProcess `json:"processes"`
+	Kind       string  `json:"kind"`
+	Title      string  `json:"title"`
+	About      About   `json:"about"`
+	Outcome    string  `json:"outcome"`
+	Sentence   string  `json:"sentence"`
+	Cost       float64 `json:"cost"`
+	Generation float64 `json:"generation"`
+	TimeCost   float64 `json:"time_cost"`
+	// Its searches' wall time, summed.
+	Seconds   float64      `json:"seconds"`
+	Push      *Push        `json:"push"`
+	Time      int64        `json:"time"`
+	Running   bool         `json:"running"`
+	Processes []BonProcess `json:"processes"`
 }
 
 // One run of a bon command, by its pid.
@@ -262,20 +351,22 @@ type BonProcess struct {
 	Pid uint64 `json:"pid"`
 	// Its trace directory under .bon/traces: `<pid>`, or `<pid>.<start>` when
 	// an earlier bon process had the same pid.
-	Trace      string   `json:"trace"`
-	Running    bool     `json:"running"`
-	Kind       string   `json:"kind"`
-	Goal       string   `json:"goal"`
-	Title      string   `json:"title"`
-	About      About    `json:"about"`
-	Outcome    string   `json:"outcome"`
-	Sentence   string   `json:"sentence"`
-	Cost       float64  `json:"cost"`
-	Generation float64  `json:"generation"`
-	TimeCost   float64  `json:"time_cost"`
-	Push       *Push    `json:"push"`
-	Limit      *float64 `json:"limit"`
-	Time       int64    `json:"time"`
+	Trace      string  `json:"trace"`
+	Running    bool    `json:"running"`
+	Kind       string  `json:"kind"`
+	Goal       string  `json:"goal"`
+	Title      string  `json:"title"`
+	About      About   `json:"about"`
+	Outcome    string  `json:"outcome"`
+	Sentence   string  `json:"sentence"`
+	Cost       float64 `json:"cost"`
+	Generation float64 `json:"generation"`
+	TimeCost   float64 `json:"time_cost"`
+	// Its searches' wall time, summed.
+	Seconds float64  `json:"seconds"`
+	Push    *Push    `json:"push"`
+	Limit   *float64 `json:"limit"`
+	Time    int64    `json:"time"`
 	// Each line of its transitions file.
 	Transitions []string      `json:"transitions"`
 	Searches    []SearchTrace `json:"searches"`
@@ -309,6 +400,19 @@ type SearchTrace struct {
 	Time       *int64   `json:"time"`
 	Running    bool     `json:"running"`
 	Background bool     `json:"background"`
+	// A running search's agent processes that have not returned: waiting
+	// (on an agent_processes slot, or making its working directory), in
+	// flight (its program runs), in checks (its program returned; it is judged).
+	Waiting  uint64 `json:"waiting"`
+	InFlight uint64 `json:"in_flight"`
+	InChecks uint64 `json:"in_checks"`
+	// The host's semaphore sizes it ran under, where its trace records them.
+	Pools Pools `json:"pools"`
+	// How many distinct trees its candidates wrote; none where git lacks one.
+	Trees *uint64 `json:"trees"`
+	// Agent processes per behavior: for each distinct `out` its verified
+	// candidates show, how many show it, in the order each first appears.
+	Behaviors  []uint64 `json:"behaviors"`
 	Candidates []Facts  `json:"candidates"`
 	// A code or compaction search: how its attempt ended (pushed, blocked,
 	// landed, exited, running).
@@ -318,6 +422,12 @@ type SearchTrace struct {
 	// Where the reason came from: recorded (the trace's word), kernel (derived
 	// from the searches' words) or sentence (the trace's sentence).
 	ReasonFrom *string `json:"reason_from"`
+}
+
+// The sizes of the host's two semaphores.
+type Pools struct {
+	AgentProcesses *uint64 `json:"agent_processes"`
+	CheckProcesses *uint64 `json:"check_processes"`
 }
 
 // What a search was granted with.
@@ -338,24 +448,27 @@ type GoalRef struct {
 
 // One agent process, from its facts.json.
 type Facts struct {
-	Index      uint64   `json:"index"`
-	Harness    *string  `json:"harness"`
+	Index uint64 `json:"index"`
+	// The program it ran (older traces: their `harness`).
+	Program    *string  `json:"program"`
 	Model      *string  `json:"model"`
 	Generation *float64 `json:"generation"`
 	Commit     *string  `json:"commit"`
 	Accepted   bool     `json:"accepted"`
 	// Verus verified it.
-	Proved   bool    `json:"proved"`
-	Verified bool    `json:"verified"`
-	Rank     *int64  `json:"rank"`
-	Diff     *uint64 `json:"diff"`
-	Added    *uint64 `json:"added"`
-	Removed  *uint64 `json:"removed"`
+	Proved       bool    `json:"proved"`
+	Verified     bool    `json:"verified"`
+	Rank         *int64  `json:"rank"`
+	Diff         *uint64 `json:"diff"`
+	LinesAdded   *uint64 `json:"lines_added"`
+	LinesRemoved *uint64 `json:"lines_removed"`
+	// Its commit's tree, where git has it.
+	Tree *string `json:"tree"`
 	// killed, over limit, price mismatch.
 	Flags []string `json:"flags"`
 	Logs  []string `json:"logs"`
-	// Seconds of its model session, from its harness log.
-	HarnessSeconds *float64 `json:"harness_seconds"`
+	// Seconds its program ran, from its log.
+	ProgramSeconds *float64 `json:"program_seconds"`
 	// Seconds of its checks, summed from their logs.
 	CheckSeconds *float64 `json:"check_seconds"`
 	Changed      []string `json:"changed"`
@@ -522,7 +635,7 @@ type ComponentHash struct {
 	Content string `json:"content"`
 }
 
-// A network service a harness calls.
+// A network service a program calls.
 type Service struct {
 	Name      string   `json:"name"`
 	Endpoints []string `json:"endpoints"`

@@ -86,16 +86,117 @@ pub struct Totals {
     /// How many attempts of each kind each reason blocked.
     pub reasons: Vec<Reason>,
     /// How many attempts of each kind exited, by when: during_a_search, or
-    /// after_its_searches (reported, before a transition). The trace holds
-    /// no error for either.
+    /// after_its_searches (reported, before a transition), in older traces,
+    /// which hold no error; or the error the bon process recorded.
     pub exits: Vec<Reason>,
+    /// Success probability by kind, and by attempt.
+    pub success: Vec<Success>,
+    /// Cost per verified candidate by kind, program and model.
+    pub per_verified: Vec<PerVerified>,
+    /// The host's two semaphores against wall time.
+    pub utilization: Utilization,
+    /// Time and cost to a push, by kind, and each search's as a fixed part
+    /// plus a part per distinct tree.
+    pub run_time: Vec<RunTime>,
+}
+
+/// One kind's success probability, over every attempt (`attempt` none) or
+/// over each bon process's attempt-th attempt and the searches on it: per
+/// agent process, successes ÷ agent processes (successes: verified
+/// candidates; a foil search's foils), over reported searches; per attempt,
+/// pushed ÷ attempts that ended (pushed, blocked, landed).
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Success {
+    pub kind: String,
+    pub attempt: Option<u64>,
+    pub agent_processes: u64,
+    pub successes: u64,
+    pub ended: u64,
+    pub pushed: u64,
+}
+
+/// The agent processes of one kind, program and model that returned, how many
+/// were verified, their generation, and their share of their searches' time
+/// cost: cost per verified candidate is (generation + time_cost) ÷ verified.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct PerVerified {
+    pub kind: String,
+    pub program: String,
+    pub model: String,
+    pub agent_processes: u64,
+    pub verified: u64,
+    pub generation: f64,
+    pub time_cost: f64,
+}
+
+/// The host's agent_processes and check_processes semaphores over the reported
+/// searches in range: `wall` is the union of their wall times, in seconds.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Utilization {
+    pub wall: f64,
+    pub searches: u64,
+    pub agent_processes: Pool,
+    pub check_processes: Pool,
+}
+
+/// One semaphore: the slot-seconds held, and its size where every search
+/// recorded the same one. Utilization is held ÷ (size × wall).
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Pool {
+    pub held: f64,
+    pub size: Option<u64>,
+}
+
+/// One kind's run-time distribution: its pushes' time (seconds) and cost to a
+/// push, each as median and 90th percentile; and over `searches` of its
+/// reported searches, a search's seconds and cost as a fixed part plus a part
+/// per distinct tree, by least squares (inferred), none with too few.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct RunTime {
+    pub kind: String,
+    pub pushes: u64,
+    pub time: Spread,
+    pub cost: Spread,
+    pub searches: u64,
+    pub fit: Option<Fit>,
+}
+
+/// A median (the middle value, or the mean of the middle two) and a 90th
+/// percentile (the ⌈0.9 n⌉-th smallest); none of no values.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Spread {
+    pub median: Option<f64>,
+    pub p90: Option<f64>,
+}
+
+/// Seconds and cost, each a fixed part plus a part per distinct tree.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Fit {
+    pub time: PerTree,
+    pub cost: PerTree,
+}
+
+/// A fixed part, and a part per distinct tree.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct PerTree {
+    pub fixed: f64,
+    pub per_tree: f64,
 }
 
 /// Attempts of one kind at one width, by how each ended; `attempts` is their
 /// sum. An attempt is a code or compaction search with the foil and
 /// counterexample searches on its selection. Landed: a counterexample's test
 /// landed on trunk and the bon process went on. Exited: its bon process
-/// stopped during it, with no transition.
+/// stopped during it, on the error it recorded or, in older traces, with no
+/// transition.
 #[derive(Deserialize, Default, Clone)]
 #[serde(default)]
 pub struct Attempts {
@@ -112,8 +213,8 @@ pub struct Attempts {
 /// How the bon processes of one kind ended. Exited: stopped short of a final
 /// transition (killed, interrupted, an error), which is not a block. `expected`
 /// is the share of those that pushed or blocked (1-p)^k predicts would end
-/// blocked, p being this kind's measured push rate per attempt that ended and
-/// k the attempts each process made.
+/// blocked, p being this kind's success probability per attempt (pushed ÷
+/// attempts that ended) and k the attempts each process made.
 #[derive(Deserialize, Default, Clone)]
 #[serde(default)]
 pub struct Ended {
@@ -158,6 +259,8 @@ pub struct Push {
     pub time_cost: Option<f64>,
     pub to_selection: Option<f64>,
     pub counterexample: Option<f64>,
+    /// The wall time of every search run to reach it, summed as cost is.
+    pub seconds: Option<f64>,
     pub searches: Option<u64>,
     pub processes: Option<u64>,
 }
@@ -174,6 +277,8 @@ pub struct GoalTrace {
     pub cost: f64,
     pub generation: f64,
     pub time_cost: f64,
+    /// Its searches' wall time, summed.
+    pub seconds: f64,
     pub push: Option<Push>,
     pub time: i64,
     pub running: bool,
@@ -198,6 +303,8 @@ pub struct BonProcess {
     pub cost: f64,
     pub generation: f64,
     pub time_cost: f64,
+    /// Its searches' wall time, summed.
+    pub seconds: f64,
     pub push: Option<Push>,
     pub limit: Option<f64>,
     pub time: i64,
@@ -236,6 +343,19 @@ pub struct SearchTrace {
     pub time: Option<i64>,
     pub running: bool,
     pub background: bool,
+    /// A running search's agent processes that have not returned: waiting
+    /// (on an agent_processes slot, or making its working directory), in
+    /// flight (its program runs), in checks (its program returned; it is judged).
+    pub waiting: u64,
+    pub in_flight: u64,
+    pub in_checks: u64,
+    /// The host's semaphore sizes it ran under, where its trace records them.
+    pub pools: Pools,
+    /// How many distinct trees its candidates wrote; none where git lacks one.
+    pub trees: Option<u64>,
+    /// Agent processes per behavior: for each distinct `out` its verified
+    /// candidates show, how many show it, in the order each first appears.
+    pub behaviors: Vec<u64>,
     pub candidates: Vec<Facts>,
     /// A code or compaction search: how its attempt ended (pushed, blocked,
     /// landed, exited, running).
@@ -245,6 +365,14 @@ pub struct SearchTrace {
     /// Where the reason came from: recorded (the trace's word), kernel (derived
     /// from the searches' words) or sentence (the trace's sentence).
     pub reason_from: Option<String>,
+}
+
+/// The sizes of the host's two semaphores.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Pools {
+    pub agent_processes: Option<u64>,
+    pub check_processes: Option<u64>,
 }
 
 /// What a search was granted with.
@@ -272,7 +400,8 @@ pub struct GoalRef {
 #[serde(default)]
 pub struct Facts {
     pub index: u64,
-    pub harness: Option<String>,
+    /// The program it ran (older traces: their `harness`).
+    pub program: Option<String>,
     pub model: Option<String>,
     pub generation: Option<f64>,
     pub commit: Option<String>,
@@ -282,13 +411,15 @@ pub struct Facts {
     pub verified: bool,
     pub rank: Option<i64>,
     pub diff: Option<u64>,
-    pub added: Option<u64>,
-    pub removed: Option<u64>,
+    pub lines_added: Option<u64>,
+    pub lines_removed: Option<u64>,
+    /// Its commit's tree, where git has it.
+    pub tree: Option<String>,
     /// killed, over limit, price mismatch.
     pub flags: Vec<String>,
     pub logs: Vec<String>,
-    /// Seconds of its model session, from its harness log.
-    pub harness_seconds: Option<f64>,
+    /// Seconds its program ran, from its log.
+    pub program_seconds: Option<f64>,
     /// Seconds of its checks, summed from their logs.
     pub check_seconds: Option<f64>,
     pub changed: Vec<String>,
@@ -494,7 +625,7 @@ pub struct ComponentHash {
     pub content: String,
 }
 
-/// A network service a harness calls.
+/// A network service a program calls.
 #[derive(Deserialize, Default, Clone)]
 #[serde(default)]
 pub struct Service {

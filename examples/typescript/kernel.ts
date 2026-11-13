@@ -27,29 +27,47 @@ export interface LastPush { commit: string | null; time: number | null }
 /** Commits on trunk since bon last pushed, and who made them. */
 export interface SincePush { commits: number; authors: Array<string> }
 /** What everything in range cost, and what came of it. */
-export interface Totals { cost: number; generation: number; time_cost: number; pushed: number; not_pushed: number; in_flight: number; rate: number | null; per_verified_candidate: number | null; per_push: number | null; pushes: number; verified: number; candidates: number; attempts: Array<Attempts>; ended: Array<Ended>; reasons: Array<Reason>; exits: Array<Reason> }
-/** Attempts of one kind at one width, by how each ended; `attempts` is their sum. An attempt is a code or compaction search with the foil and counterexample searches on its selection. Landed: a counterexample's test landed on trunk and the bon process went on. Exited: its bon process stopped during it, with no transition. */
+export interface Totals { cost: number; generation: number; time_cost: number; pushed: number; not_pushed: number; in_flight: number; rate: number | null; per_verified_candidate: number | null; per_push: number | null; pushes: number; verified: number; candidates: number; attempts: Array<Attempts>; ended: Array<Ended>; reasons: Array<Reason>; exits: Array<Reason>; success: Array<Success>; per_verified: Array<PerVerified>; utilization: Utilization; run_time: Array<RunTime> }
+/** One kind's success probability, over every attempt (`attempt` none) or over each bon process's attempt-th attempt and the searches on it: per agent process, successes ÷ agent processes (successes: verified candidates; a foil search's foils), over reported searches; per attempt, pushed ÷ attempts that ended (pushed, blocked, landed). */
+export interface Success { kind: string; attempt: number | null; agent_processes: number; successes: number; ended: number; pushed: number }
+/** The agent processes of one kind, program and model that returned, how many were verified, their generation, and their share of their searches' time cost: cost per verified candidate is (generation + time_cost) ÷ verified. */
+export interface PerVerified { kind: string; program: string; model: string; agent_processes: number; verified: number; generation: number; time_cost: number }
+/** The host's agent_processes and check_processes semaphores over the reported searches in range: `wall` is the union of their wall times, in seconds. */
+export interface Utilization { wall: number; searches: number; agent_processes: Pool; check_processes: Pool }
+/** One semaphore: the slot-seconds held, and its size where every search recorded the same one. Utilization is held ÷ (size × wall). */
+export interface Pool { held: number; size: number | null }
+/** One kind's run-time distribution: its pushes' time (seconds) and cost to a push, each as median and 90th percentile; and over `searches` of its reported searches, a search's seconds and cost as a fixed part plus a part per distinct tree, by least squares (inferred), none with too few. */
+export interface RunTime { kind: string; pushes: number; time: Spread; cost: Spread; searches: number; fit: Fit | null }
+/** A median (the middle value, or the mean of the middle two) and a 90th percentile (the ⌈0.9 n⌉-th smallest); none of no values. */
+export interface Spread { median: number | null; p90: number | null }
+/** Seconds and cost, each a fixed part plus a part per distinct tree. */
+export interface Fit { time: PerTree; cost: PerTree }
+/** A fixed part, and a part per distinct tree. */
+export interface PerTree { fixed: number; per_tree: number }
+/** Attempts of one kind at one width, by how each ended; `attempts` is their sum. An attempt is a code or compaction search with the foil and counterexample searches on its selection. Landed: a counterexample's test landed on trunk and the bon process went on. Exited: its bon process stopped during it, on the error it recorded or, in older traces, with no transition. */
 export interface Attempts { kind: string; width: number; attempts: number; pushed: number; blocked: number; landed: number; exited: number; running: number }
-/** How the bon processes of one kind ended. Exited: stopped short of a final transition (killed, interrupted, an error), which is not a block. `expected` is the share of those that pushed or blocked (1-p)^k predicts would end blocked, p being this kind's measured push rate per attempt that ended and k the attempts each process made. */
+/** How the bon processes of one kind ended. Exited: stopped short of a final transition (killed, interrupted, an error), which is not a block. `expected` is the share of those that pushed or blocked (1-p)^k predicts would end blocked, p being this kind's success probability per attempt (pushed ÷ attempts that ended) and k the attempts each process made. */
 export interface Ended { kind: string; pushed: number; blocked: number; exited: number; running: number; expected: number | null }
 /** A reason attempts of one kind blocked, and how many. `inferred` of them have no word in their trace (from before reasons were words): the kernel derived the reason from the searches' words, or the trace's sentence names it. A block nothing names counts under "unrecorded". */
 export interface Reason { kind: string; reason: string; count: number; inferred: number }
 /** Where a goal came from: the goal, the commit and its subject. */
 export interface About { goal: string; from: string; subject: string }
 /** What a push cost, and the commit it pushed. Cost is generation plus time, each summed over every bon process run to reach the push. */
-export interface Push { commit: string | null; cost: number | null; generation: number | null; time_cost: number | null; to_selection: number | null; counterexample: number | null; searches: number | null; processes: number | null }
+export interface Push { commit: string | null; cost: number | null; generation: number | null; time_cost: number | null; to_selection: number | null; counterexample: number | null; seconds: number | null; searches: number | null; processes: number | null }
 /** The bon processes of one goal: one row of the traces. */
-export interface GoalTrace { kind: string; title: string; about: About; outcome: string; sentence: string; cost: number; generation: number; time_cost: number; push: Push | null; time: number; running: boolean; processes: Array<BonProcess> }
+export interface GoalTrace { kind: string; title: string; about: About; outcome: string; sentence: string; cost: number; generation: number; time_cost: number; seconds: number; push: Push | null; time: number; running: boolean; processes: Array<BonProcess> }
 /** One run of a bon command, by its pid. */
-export interface BonProcess { pid: number; trace: string; running: boolean; kind: string; goal: string; title: string; about: About; outcome: string; sentence: string; cost: number; generation: number; time_cost: number; push: Push | null; limit: number | null; time: number; transitions: Array<string>; searches: Array<SearchTrace>; check_seconds: number | null }
+export interface BonProcess { pid: number; trace: string; running: boolean; kind: string; goal: string; title: string; about: About; outcome: string; sentence: string; cost: number; generation: number; time_cost: number; seconds: number; push: Push | null; limit: number | null; time: number; transitions: Array<string>; searches: Array<SearchTrace>; check_seconds: number | null }
 /** One search of a bon process, as its trace recorded it. */
-export interface SearchTrace { search: number; kind: string; goal: string; params: Params; width: number; started: number | null; returned: number; accepted: number; verified: number; selected: number | null; recorded_selected: number | null; recorded_verified: number | null; kernel: string; blocked: string | null; generation: number | null; time_cost: number | null; cost: number | null; rate: number | null; seconds: number | null; time: number | null; running: boolean; background: boolean; candidates: Array<Facts>; end: string | null; reason: string | null; reason_from: string | null }
+export interface SearchTrace { search: number; kind: string; goal: string; params: Params; width: number; started: number | null; returned: number; accepted: number; verified: number; selected: number | null; recorded_selected: number | null; recorded_verified: number | null; kernel: string; blocked: string | null; generation: number | null; time_cost: number | null; cost: number | null; rate: number | null; seconds: number | null; time: number | null; running: boolean; background: boolean; waiting: number; in_flight: number; in_checks: number; pools: Pools; trees: number | null; behaviors: Array<number>; candidates: Array<Facts>; end: string | null; reason: string | null; reason_from: string | null }
+/** The sizes of the host's two semaphores. */
+export interface Pools { agent_processes: number | null; check_processes: number | null }
 /** What a search was granted with. */
 export interface Params { goal: GoalRef; base: string; n: number | null; limit: number | null; authority: string }
 /** A search's goal: a trunk commit, a candidate of a search, or a transcript. */
 export interface GoalRef { trunk: string | null; candidate: string | null; transcript: string | null }
 /** One agent process, from its facts.json. */
-export interface Facts { index: number; harness: string | null; model: string | null; generation: number | null; commit: string | null; accepted: boolean; proved: boolean; verified: boolean; rank: number | null; diff: number | null; added: number | null; removed: number | null; flags: Array<string>; logs: Array<string>; harness_seconds: number | null; check_seconds: number | null; changed: Array<string>; out: Array<number>; accepts: Array<[number, boolean]>; accepts_foils: Array<[number, boolean]> }
+export interface Facts { index: number; program: string | null; model: string | null; generation: number | null; commit: string | null; accepted: boolean; proved: boolean; verified: boolean; rank: number | null; diff: number | null; lines_added: number | null; lines_removed: number | null; tree: string | null; flags: Array<string>; logs: Array<string>; program_seconds: number | null; check_seconds: number | null; changed: Array<string>; out: Array<number>; accepts: Array<[number, boolean]>; accepts_foils: Array<[number, boolean]> }
 /** A queue proposal: a patch adding intents, each with the cue it came from. */
 export interface Proposal { name: string; path: string; source: string; intents: Array<ProposedIntent>; contested: Array<string> }
 export interface ProposedIntent { id: number | null; intent: string; cue: string | null }
@@ -83,5 +101,5 @@ export interface Property { name: string; value: string }
 /** A library, tool or host component. */
 export interface Component { type: string; name: string; version: string; group: string | null; purl: string | null; hashes: Array<ComponentHash> }
 export interface ComponentHash { alg: string; content: string }
-/** A network service a harness calls. */
+/** A network service a program calls. */
 export interface Service { name: string; endpoints: Array<string>; group: string | null }

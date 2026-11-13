@@ -156,15 +156,92 @@ class Totals(TypedDict):
     # How many attempts of each kind each reason blocked.
     reasons: list[Reason]
     # How many attempts of each kind exited, by when: during_a_search, or
-    # after_its_searches (reported, before a transition). The trace holds
-    # no error for either.
+    # after_its_searches (reported, before a transition), in older traces,
+    # which hold no error; or the error the bon process recorded.
     exits: list[Reason]
+    # Success probability by kind, and by attempt.
+    success: list[Success]
+    # Cost per verified candidate by kind, program and model.
+    per_verified: list[PerVerified]
+    # The host's two semaphores against wall time.
+    utilization: Utilization
+    # Time and cost to a push, by kind, and each search's as a fixed part
+    # plus a part per distinct tree.
+    run_time: list[RunTime]
+
+# One kind's success probability, over every attempt (`attempt` none) or
+# over each bon process's attempt-th attempt and the searches on it: per
+# agent process, successes ÷ agent processes (successes: verified
+# candidates; a foil search's foils), over reported searches; per attempt,
+# pushed ÷ attempts that ended (pushed, blocked, landed).
+class Success(TypedDict):
+    kind: str
+    attempt: int | None
+    agent_processes: int
+    successes: int
+    ended: int
+    pushed: int
+
+# The agent processes of one kind, program and model that returned, how many
+# were verified, their generation, and their share of their searches' time
+# cost: cost per verified candidate is (generation + time_cost) ÷ verified.
+class PerVerified(TypedDict):
+    kind: str
+    program: str
+    model: str
+    agent_processes: int
+    verified: int
+    generation: float
+    time_cost: float
+
+# The host's agent_processes and check_processes semaphores over the reported
+# searches in range: `wall` is the union of their wall times, in seconds.
+class Utilization(TypedDict):
+    wall: float
+    searches: int
+    agent_processes: Pool
+    check_processes: Pool
+
+# One semaphore: the slot-seconds held, and its size where every search
+# recorded the same one. Utilization is held ÷ (size × wall).
+class Pool(TypedDict):
+    held: float
+    size: int | None
+
+# One kind's run-time distribution: its pushes' time (seconds) and cost to a
+# push, each as median and 90th percentile; and over `searches` of its
+# reported searches, a search's seconds and cost as a fixed part plus a part
+# per distinct tree, by least squares (inferred), none with too few.
+class RunTime(TypedDict):
+    kind: str
+    pushes: int
+    time: Spread
+    cost: Spread
+    searches: int
+    fit: Fit | None
+
+# A median (the middle value, or the mean of the middle two) and a 90th
+# percentile (the ⌈0.9 n⌉-th smallest); none of no values.
+class Spread(TypedDict):
+    median: float | None
+    p90: float | None
+
+# Seconds and cost, each a fixed part plus a part per distinct tree.
+class Fit(TypedDict):
+    time: PerTree
+    cost: PerTree
+
+# A fixed part, and a part per distinct tree.
+class PerTree(TypedDict):
+    fixed: float
+    per_tree: float
 
 # Attempts of one kind at one width, by how each ended; `attempts` is their
 # sum. An attempt is a code or compaction search with the foil and
 # counterexample searches on its selection. Landed: a counterexample's test
 # landed on trunk and the bon process went on. Exited: its bon process
-# stopped during it, with no transition.
+# stopped during it, on the error it recorded or, in older traces, with no
+# transition.
 class Attempts(TypedDict):
     kind: str
     width: int
@@ -178,8 +255,8 @@ class Attempts(TypedDict):
 # How the bon processes of one kind ended. Exited: stopped short of a final
 # transition (killed, interrupted, an error), which is not a block. `expected`
 # is the share of those that pushed or blocked (1-p)^k predicts would end
-# blocked, p being this kind's measured push rate per attempt that ended and
-# k the attempts each process made.
+# blocked, p being this kind's success probability per attempt (pushed ÷
+# attempts that ended) and k the attempts each process made.
 class Ended(TypedDict):
     kind: str
     pushed: int
@@ -210,6 +287,8 @@ class Push(TypedDict):
     time_cost: float | None
     to_selection: float | None
     counterexample: float | None
+    # The wall time of every search run to reach it, summed as cost is.
+    seconds: float | None
     searches: int | None
     processes: int | None
 
@@ -223,6 +302,8 @@ class GoalTrace(TypedDict):
     cost: float
     generation: float
     time_cost: float
+    # Its searches' wall time, summed.
+    seconds: float
     push: Push | None
     time: int
     running: bool
@@ -244,6 +325,8 @@ class BonProcess(TypedDict):
     cost: float
     generation: float
     time_cost: float
+    # Its searches' wall time, summed.
+    seconds: float
     push: Push | None
     limit: float | None
     time: int
@@ -279,6 +362,19 @@ class SearchTrace(TypedDict):
     time: int | None
     running: bool
     background: bool
+    # A running search's agent processes that have not returned: waiting
+    # (on an agent_processes slot, or making its working directory), in
+    # flight (its program runs), in checks (its program returned; it is judged).
+    waiting: int
+    in_flight: int
+    in_checks: int
+    # The host's semaphore sizes it ran under, where its trace records them.
+    pools: Pools
+    # How many distinct trees its candidates wrote; none where git lacks one.
+    trees: int | None
+    # Agent processes per behavior: for each distinct `out` its verified
+    # candidates show, how many show it, in the order each first appears.
+    behaviors: list[int]
     candidates: list[Facts]
     # A code or compaction search: how its attempt ended (pushed, blocked,
     # landed, exited, running).
@@ -288,6 +384,11 @@ class SearchTrace(TypedDict):
     # Where the reason came from: recorded (the trace's word), kernel (derived
     # from the searches' words) or sentence (the trace's sentence).
     reason_from: str | None
+
+# The sizes of the host's two semaphores.
+class Pools(TypedDict):
+    agent_processes: int | None
+    check_processes: int | None
 
 # What a search was granted with.
 class Params(TypedDict):
@@ -306,7 +407,8 @@ class GoalRef(TypedDict):
 # One agent process, from its facts.json.
 class Facts(TypedDict):
     index: int
-    harness: str | None
+    # The program it ran (older traces: their `harness`).
+    program: str | None
     model: str | None
     generation: float | None
     commit: str | None
@@ -316,13 +418,15 @@ class Facts(TypedDict):
     verified: bool
     rank: int | None
     diff: int | None
-    added: int | None
-    removed: int | None
+    lines_added: int | None
+    lines_removed: int | None
+    # Its commit's tree, where git has it.
+    tree: str | None
     # killed, over limit, price mismatch.
     flags: list[str]
     logs: list[str]
-    # Seconds of its model session, from its harness log.
-    harness_seconds: float | None
+    # Seconds its program ran, from its log.
+    program_seconds: float | None
     # Seconds of its checks, summed from their logs.
     check_seconds: float | None
     changed: list[str]
@@ -469,7 +573,7 @@ class ComponentHash(TypedDict):
     alg: str
     content: str
 
-# A network service a harness calls.
+# A network service a program calls.
 class Service(TypedDict):
     name: str
     endpoints: list[str]

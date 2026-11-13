@@ -112,11 +112,47 @@ fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
     era * 146097 + doe - 719468
 }
 
+// ── trace keys that older traces spell otherwise ────────
+//
+// Each reads the newer word first and the older one where the newer is absent,
+// by key presence, so one function changes when a key's final name does.
+
+/// The program an agent process ran: `program` in newer traces, `harness` in older ones.
+fn program_of(facts: &Value) -> Value {
+    if facts.get("program").is_some() { facts["program"].clone() } else { facts["harness"].clone() }
+}
+
+/// A candidate's lines added and removed: `lines_added` and `lines_removed` in
+/// newer traces (whose `added` is the paths the diff added); `added` and
+/// `removed` as numbers in older ones.
+fn line_counts(c: &Value) -> (Option<u64>, Option<u64>) {
+    let added = if c.get("lines_added").is_some() { c["lines_added"].as_u64() } else { c["added"].as_u64() };
+    let removed = if c.get("lines_removed").is_some() { c["lines_removed"].as_u64() } else { c["removed"].as_u64() };
+    (added, removed)
+}
+
+/// The log of an agent process's program, by its name: `program` in newer
+/// traces, `harness` in older ones.
+const PROGRAM_LOGS: [&str; 2] = ["program", "harness"];
+
+/// The error a bon process ended on, from its transitions' line `exited: <error>`.
+fn exit_error(line: &str) -> Option<&str> { line.strip_prefix("exited: ").map(str::trim) }
+
+/// The sizes of the host's two semaphores a search ran under, where its line
+/// in searches.jsonl records them: `host.agent_processes` and `host.check_processes`.
+/// No trace records them yet.
+fn pool_sizes(summary: &Value) -> (Option<u64>, Option<u64>) {
+    (summary["host"]["agent_processes"].as_u64(), summary["host"]["check_processes"].as_u64())
+}
+
+/// The manifest's table of emitted types: `[types]`, or `[programs]` in older manifests.
+fn types_table(manifest: &toml::Value) -> Option<&toml::Value> { manifest.get("types").or_else(|| manifest.get("programs")) }
+
 /// Where a log falls in an agent process's run, so logs read left to right:
 /// what it was given, what it did, then each check in the order bon runs them,
 /// each numbered log by its number.
 fn run_order(name: &str) -> (usize, u64, String) {
-    const ORDER: [&str; 14] = ["argv", "prompt", "harness", "killed", "error", "build", "test", "carried", "verify", "agree", "rank", "accepts", "counterexample", "trunk"];
+    const ORDER: [&str; 15] = ["argv", "prompt", "program", "harness", "killed", "error", "build", "test", "carried", "verify", "agree", "rank", "accepts", "counterexample", "trunk"];
     let (stem, n) = match name.rsplit_once('-') {
         Some((s, n)) if n.chars().all(|c| c.is_ascii_digit()) => (s, n.parse().unwrap_or(0)),
         _ => (name, 0),
@@ -124,20 +160,38 @@ fn run_order(name: &str) -> (usize, u64, String) {
     (ORDER.iter().position(|o| *o == stem).unwrap_or(ORDER.len()), n, name.to_string())
 }
 
-/// A log's seconds, from its head: each check's and harness's log starts
-/// `exit: X` then `seconds: Y`. None for a log without them (argv, prompt).
+/// A log's seconds, from its head: each check's and program's log starts
+/// `exit: X` then `seconds: Y`. None for a log without them (argv, prompt),
+/// and for a check the verdict cache answered (its first line `cached: <key>`):
+/// it ran nothing, and held no slot.
 fn log_seconds(p: &Path) -> Option<f64> {
     use std::io::BufRead;
     let f = std::fs::File::open(p).ok()?;
-    std::io::BufReader::new(f).lines().take(2).map_while(Result::ok)
-        .find_map(|l| l.strip_prefix("seconds: ").and_then(|s| s.trim().parse().ok()))
+    let head: Vec<String> = std::io::BufReader::new(f).lines().take(2).map_while(Result::ok).collect();
+    if head.first().is_some_and(|l| l.starts_with("cached:")) { return None; }
+    head.iter().find_map(|l| l.strip_prefix("seconds: ").and_then(|s| s.trim().parse().ok()))
 }
 
 /// The seconds of the check logs among `logs` in `dir`: every log with a
-/// `seconds:` head but the harness's. None when none has one.
+/// `seconds:` head but the program's. None when none has one.
 fn check_seconds<'a>(dir: &Path, logs: impl Iterator<Item = &'a str>) -> Option<f64> {
-    let s: Vec<f64> = logs.filter(|l| *l != "harness").filter_map(|l| log_seconds(&dir.join(l))).collect();
+    let s: Vec<f64> = logs.filter(|l| !PROGRAM_LOGS.contains(l)).filter_map(|l| log_seconds(&dir.join(l))).collect();
     (!s.is_empty()).then(|| s.iter().sum())
+}
+
+/// The seconds an agent process's program ran, from its log's head.
+fn program_seconds(dir: &Path) -> Option<f64> { PROGRAM_LOGS.iter().find_map(|l| log_seconds(&dir.join(l))) }
+
+/// Where an agent process of a running search is, from what its trace
+/// directory holds so far: waiting (no argv yet: on an agent_processes slot,
+/// or making its working directory), in flight (its program runs: argv, and
+/// no program log), in checks (its program returned; it is being judged: a
+/// program log, and no facts.json), or returned (facts.json).
+fn stage(dir: &Path) -> &'static str {
+    if dir.join("facts.json").exists() { "returned" }
+    else if PROGRAM_LOGS.iter().any(|l| dir.join(l).exists()) { "in_checks" }
+    else if dir.join("argv").exists() { "in_flight" }
+    else { "waiting" }
 }
 
 /// Each reason's word and the sentence trusted code records it with
@@ -168,7 +222,8 @@ fn blocked_word(b: best_of_n::spec::Blocked) -> &'static str {
 
 /// How one attempt ended: pushed, landed (a counterexample's test landed on
 /// trunk and the process went on), blocked, exited (its bon process stopped
-/// during it, with no transition), or running. A block's reason is the word
+/// during it: on the error its `exited:` line records, or, in older traces,
+/// with no transition), or running. A block's reason is the word
 /// the trace recorded; for a trace from before reasons were words, the one
 /// the kernel derives from its searches' words, else the one its sentence
 /// names; else none (unrecorded).
@@ -205,6 +260,8 @@ fn attempt_ends(searches: &[Value], lines: &[Vec<String>], running: bool,
             };
             End { end: "blocked", reason, from }
         }
+        // Its bon process ended on an error it recorded: the error is the reason.
+        else if let Some(e) = ls.iter().find_map(|t| exit_error(t)) { End { end: "exited", reason: Some(e.to_string()), from: Some("recorded") } }
         else if last && running { End { end: "running", reason: None, from: None } }
         else if let Some(w) = derived() { End { end: "blocked", reason: Some(w.to_string()), from: Some("kernel") } }
         // Followed by another attempt, it ended without a push: a block no word or sentence names.
@@ -347,8 +404,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
                     .filter(|f| !matches!(f.as_str(), "index" | "facts.json" | "candidate.bundle")).collect();
                 let mut logs = logs;
                 logs.sort_by_key(|f| run_order(f));
-                // Its model session and its checks, each by its log's seconds.
-                let harness_seconds = log_seconds(&e.path().join("harness"));
+                // Its program's run and its checks, each by its log's seconds.
                 let checks_seconds = check_seconds(&e.path(), logs.iter().map(String::as_str));
                 let c = &facts["candidate"];
                 let accepted = c["accepted"].as_bool().unwrap_or(false);
@@ -356,17 +412,16 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
                     Some(k) => k.results.get(i).and_then(|r| r.as_ref()).is_some_and(|x| Kernel::verified(k, x)),
                     None => accepted && (counterexample || c["proved"].as_bool().unwrap_or(false)),
                 };
+                let (lines_added, lines_removed) = line_counts(c);
                 Some((i, json!({
-                    "index": i, "harness": facts["harness"], "model": facts["model"],
+                    "index": i, "program": program_of(&facts), "model": facts["model"],
                     "generation": facts["generation_microdollars"].as_f64().map(|m| m / 1e6),
                     "commit": c["commit"], "accepted": accepted, "verified": verified,
                     "rank": c["rank"], "diff": c["diff"], "changed": c["changed"],
-                    // Counts only: a facts.json whose `added` is a list of paths has no count.
-                    "added": c["added"].as_u64(),
-                    "removed": c["removed"].as_u64(),
+                    "lines_added": lines_added, "lines_removed": lines_removed,
                     "flags": (["killed", "over_limit", "price_mismatch"]).iter().filter(|k| facts[**k] == true).collect::<Vec<_>>(),
                     "logs": logs,
-                    "harness_seconds": harness_seconds, "check_seconds": checks_seconds,
+                    "program_seconds": program_seconds(&e.path()), "check_seconds": checks_seconds,
                     "out": c["out"],
                     "proved": c["proved"],
                     // A trace from before tests ran on foils (or a candidate that is no test) has none.
@@ -375,6 +430,15 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
                 })))
             }).collect();
             candidates.sort_by_key(|(i, _)| *i);
+            // A running search's agent processes that have not returned, by where each is.
+            let mut stages = json!({ "waiting": 0, "in_flight": 0, "in_checks": 0 });
+            if live {
+                for e in std::fs::read_dir(&rdir).into_iter().flatten().flatten().filter(|e| e.file_name().to_string_lossy().parse::<usize>().is_ok()) {
+                    let at = stage(&e.path());
+                    if at != "returned" { stages[at] = json!(stages[at].as_u64().unwrap_or(0) + 1); }
+                }
+            }
+            let (agent_pool, check_pool) = pool_sizes(&summary);
             let returned = candidates.len();
             let accepted = candidates.iter().filter(|(_, c)| c["accepted"] == true).count();
             let verified = candidates.iter().filter(|(_, c)| c["verified"] == true).count();
@@ -420,6 +484,9 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
                 "selected": selected, "recorded_selected": recorded, "recorded_verified": summary["verified"],
                 "kernel": if kernel.is_some() { "derived" } else if rdir.join("search.words").exists() { "unreadable" } else { "none" },
                 "blocked": blocked, "cost": cost, "seconds": seconds, "time": summary["time"], "running": live,
+                "waiting": stages["waiting"], "in_flight": stages["in_flight"], "in_checks": stages["in_checks"],
+                "pools": { "agent_processes": agent_pool, "check_processes": check_pool },
+                "behaviors": behaviors(&candidates.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>()),
                 "candidates": candidates.into_iter().map(|(_, c)| c).collect::<Vec<_>>(),
             }));
             decoded.push((!summary.is_null()).then_some(kernel).flatten());
@@ -456,6 +523,8 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
         let cost: f64 = searches.iter().filter_map(|s| s["cost"].as_f64()).sum();
         let generation: f64 = searches.iter().filter_map(|s| s["generation"].as_f64()).sum();
         let time_cost: f64 = searches.iter().filter_map(|s| s["time_cost"].as_f64()).sum();
+        // Its searches' wall time, summed: the time it spent, as its time cost is charged.
+        let seconds: f64 = searches.iter().filter_map(|s| s["seconds"].as_f64()).sum();
         let push = pushes.last().cloned();
         // Its first grant, or the trace's creation time while still starting.
         let time = searches.iter().filter_map(|s| s["started"].as_u64()).min().unwrap_or_else(|| {
@@ -483,7 +552,10 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
         let sentence = match outcome {
             "running" => searches.last().map(|s| {
                 let w = s["width"].as_u64().map_or(String::new(), |w| format!(" of {w}"));
-                format!("{}: {}{w} agent processes returned, {} verified so far", s["kind"].as_str().unwrap_or("search"), s["returned"], s["verified"])
+                let n = |k: &str| s[k].as_u64().unwrap_or(0);
+                let now = now_counts(n("in_flight"), n("in_checks"), n("waiting"));
+                format!("{}: {}{w} agent processes returned{}, {} verified so far", s["kind"].as_str().unwrap_or("search"), s["returned"],
+                    if now.is_empty() { String::new() } else { format!(" ({now})") }, s["verified"])
             }).unwrap_or_else(|| "starting".into()),
             "pushed" => format!("{}, they agreed, and no counterexample split them; the selected one was pushed",
                               main.map(tally).unwrap_or_default()),
@@ -497,7 +569,8 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
                     .map(|b| format!("{}; ", b.trim_start_matches("blocked:").trim())).unwrap_or_default();
                 let at = searches.last().map(|s| format!("during search {}, after {} returned", s["search"],
                     count(s["returned"].as_u64().unwrap_or(0) as usize, "agent process", "agent processes"))).unwrap_or_default();
-                format!("{earlier}the bon process exited {at}; nothing was pushed")
+                let error = transitions.iter().rev().find_map(|t| exit_error(t)).map_or(String::new(), |e| format!(" on {e}"));
+                format!("{earlier}the bon process exited {at}{error}; nothing was pushed")
             }
         };
         // Titles name the kind's goal: a trunk commit or a transcript.
@@ -525,7 +598,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
         });
         processes.push(json!({
             "pid": pid, "trace": trace, "running": running, "kind": kind, "goal": goal, "title": title, "about": about, "base": base, "outcome": outcome, "sentence": sentence,
-            "cost": cost, "generation": generation, "time_cost": time_cost, "push": push, "limit": limit, "time": time,
+            "cost": cost, "generation": generation, "time_cost": time_cost, "seconds": seconds, "push": push, "limit": limit, "time": time,
             "transitions": transitions, "searches": searches,
             // Its checks of trunk before its first search: trunk-test-K, trunk-verify-K, goal-agree-K.
             "check_seconds": check_seconds(&dir, std::fs::read_dir(&dir).into_iter().flatten().flatten()
@@ -533,20 +606,24 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
         }));
     }
 
+    // Each candidate's tree, and each search's count of distinct trees, from git.
+    trees(root, &mut processes);
+
     // Consecutive bon processes of one kind, up to the one that finishes it
     // (pushed, found, not found, a proposal), are one effort: one row.
+    const SUMMED: [&str; 4] = ["cost", "generation", "time_cost", "seconds"];
     let mut groups: Vec<Value> = Vec::new();
     for p in processes.iter().rev() {
         let joins = groups.last().is_some_and(|g: &Value| g["kind"] == p["kind"]
             && !matches!(g["outcome"].as_str(), Some("pushed" | "found" | "not found" | "proposal")));
         if joins {
             let g = groups.last_mut().unwrap();
-            for k in ["cost", "generation", "time_cost"] { g[k] = json!(g[k].as_f64().unwrap_or(0.0) + p[k].as_f64().unwrap_or(0.0)); }
+            for k in SUMMED { g[k] = json!(g[k].as_f64().unwrap_or(0.0) + p[k].as_f64().unwrap_or(0.0)); }
             for k in ["title", "about", "outcome", "sentence", "push", "time", "running"] { g[k] = p[k].clone(); }
             g["processes"].as_array_mut().unwrap().insert(0, p.clone());
         } else {
             groups.push(json!({ "kind": p["kind"], "title": p["title"], "about": p["about"], "outcome": p["outcome"], "sentence": p["sentence"],
-                "cost": p["cost"], "generation": p["generation"], "time_cost": p["time_cost"],
+                "cost": p["cost"], "generation": p["generation"], "time_cost": p["time_cost"], "seconds": p["seconds"],
                 "push": p["push"], "time": p["time"], "running": p["running"], "processes": [p] }));
         }
     }
@@ -554,21 +631,22 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
     // A push's cost is everything run to reach it: every bon process of its
     // kind since the last push of that kind, whatever ran in between, the ones
     // that exited or were blocked first included.
-    // Cost, generation and time, each summed the same way.
-    let mut since: std::collections::HashMap<String, [f64; 3]> = std::collections::HashMap::new();
-    let mut reached: Vec<[f64; 3]> = vec![[0.0; 3]; groups.len()];
+    // Cost, generation, time and seconds, each summed the same way.
+    let mut since: std::collections::HashMap<String, [f64; 4]> = std::collections::HashMap::new();
+    let mut reached: Vec<[f64; 4]> = vec![[0.0; 4]; groups.len()];
     for (k, g) in groups.iter().enumerate().rev() {
         let kind = g["kind"].as_str().unwrap_or_default().to_string();
-        let total = since.entry(kind).or_insert([0.0; 3]);
-        for (i, f) in ["cost", "generation", "time_cost"].iter().enumerate() { total[i] += g[*f].as_f64().unwrap_or(0.0); }
-        if g["outcome"] == "pushed" { reached[k] = *total; *total = [0.0; 3]; }
+        let total = since.entry(kind).or_insert([0.0; 4]);
+        for (i, f) in SUMMED.iter().enumerate() { total[i] += g[*f].as_f64().unwrap_or(0.0); }
+        if g["outcome"] == "pushed" { reached[k] = *total; *total = [0.0; 4]; }
     }
     let mut push_costs = Vec::new();
     for (k, g) in groups.iter_mut().enumerate() {
         if g["outcome"] == "pushed" && g["push"].is_object() {
-            let [cost, generation, time_cost] = reached[k];
+            let [cost, generation, time_cost, seconds] = reached[k];
             g["push"]["generation"] = json!(generation);
             g["push"]["time_cost"] = json!(time_cost);
+            g["push"]["seconds"] = json!(seconds);
             // The foil and counterexample searches that found none on the selection;
             // everything before them is what reaching the selection cost.
             let ce: f64 = g["processes"][0]["searches"].as_array().map_or(0.0, |x| x.iter().rev()
@@ -611,6 +689,8 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
             "pushes": push_costs.len(),
             "verified": verified_all, "candidates": candidates_all,
             "attempts": attempts(&processes), "ended": ended(&processes), "reasons": reasons(&processes, "blocked"), "exits": reasons(&processes, "exited"),
+            "success": success(&processes), "per_verified": per_verified(&processes),
+            "utilization": utilization(&processes), "run_time": run_time(&processes, &groups),
         },
         "processes": processes,
         // The range shown, and the range there is, so a view can offer it.
@@ -707,10 +787,304 @@ fn reasons(processes: &[Value], end: &str) -> Vec<Value> {
     by.into_iter().map(|((kind, reason), (count, inferred))| json!({ "kind": kind, "reason": reason, "count": count, "inferred": inferred })).collect()
 }
 
+// ── measures ────────────────────────────────────────────
+
+/// Every search of every process, in order.
+fn all_searches(processes: &[Value]) -> impl Iterator<Item = &Value> {
+    processes.iter().flat_map(|p| p["searches"].as_array().into_iter().flatten())
+}
+
+/// A search reported (its line is in searches.jsonl): its agent processes and seconds are final.
+fn reported(s: &Value) -> bool { !s["time"].is_null() }
+
+/// A search's successes: its verified candidates; a foil search's foils
+/// (accepted and not proved, the spec's `foil`), which are never verified.
+fn successes(s: &Value) -> u64 {
+    if s["kind"] == "foil" {
+        s["candidates"].as_array().map_or(0, |c| c.iter().filter(|c| c["accepted"] == true && c["proved"] != true).count() as u64)
+    } else { s["verified"].as_u64().unwrap_or(0) }
+}
+
+/// The agent processes per behavior of a search: for each distinct `out` its
+/// verified candidates show (a behavior, as the spec's `behaviors`), how many
+/// verified candidates show it, in the order each first appears.
+fn behaviors(candidates: &[Value]) -> Vec<u64> {
+    let mut by: Vec<(Value, u64)> = Vec::new();
+    for c in candidates.iter().filter(|c| c["verified"] == true) {
+        match by.iter_mut().find(|(o, _)| *o == c["out"]) { Some(b) => b.1 += 1, None => by.push((c["out"].clone(), 1)) }
+    }
+    by.into_iter().map(|(_, n)| n).collect()
+}
+
+/// Each commit's tree, from git: one `git cat-file --batch-check` for all of
+/// them. A commit git does not have is absent.
+fn tree_ids(root: &Path, commits: &[String]) -> std::collections::HashMap<String, String> {
+    use std::io::Write;
+    let mut out = std::collections::HashMap::new();
+    if commits.is_empty() { return out; }
+    let child = Command::new("git").args(["cat-file", "--batch-check=%(objectname) %(objecttype)"]).current_dir(root)
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn();
+    let Ok(mut child) = child else { return out };
+    let input: String = commits.iter().map(|c| format!("{c}^{{tree}}\n")).collect();
+    if let Some(mut stdin) = child.stdin.take() { let _ = stdin.write_all(input.as_bytes()); }
+    let Ok(o) = child.wait_with_output() else { return out };
+    // One line per commit, in order: `<tree> tree`, or `<input> missing`.
+    for (c, l) in commits.iter().zip(String::from_utf8_lossy(&o.stdout).lines()) {
+        if let Some(t) = l.strip_suffix(" tree") { out.insert(c.clone(), t.to_string()); }
+    }
+    out
+}
+
+/// How many distinct trees a search's candidates wrote: those with a commit,
+/// by its tree. None when git does not know some candidate's tree.
+fn distinct_trees(candidates: &[Value]) -> Option<u64> {
+    let mut seen: Vec<&str> = Vec::new();
+    for c in candidates.iter().filter(|c| c["commit"].is_string()) {
+        let t = c["tree"].as_str()?;
+        if !seen.contains(&t) { seen.push(t); }
+    }
+    Some(seen.len() as u64)
+}
+
+/// Each candidate's `tree` and each search's `trees` (distinct trees).
+fn trees(root: &Path, processes: &mut [Value]) {
+    let commits: Vec<String> = all_searches(processes).flat_map(|s| s["candidates"].as_array().into_iter().flatten())
+        .filter_map(|c| c["commit"].as_str().map(String::from)).collect();
+    let of = tree_ids(root, &commits);
+    for p in processes.iter_mut() {
+        for s in p["searches"].as_array_mut().into_iter().flatten() {
+            for c in s["candidates"].as_array_mut().into_iter().flatten() {
+                c["tree"] = json!(c["commit"].as_str().and_then(|x| of.get(x)));
+            }
+            s["trees"] = json!(distinct_trees(s["candidates"].as_array().map_or(&[][..], |v| v)));
+        }
+    }
+}
+
+/// Success probability by kind, over all attempts (`attempt` null) and by
+/// attempt index (1 for each bon process's first code or compaction search
+/// and the searches on it, 2 for its second, …): agent processes and
+/// successes over reported searches, and how many attempts ended (pushed,
+/// blocked, landed) and pushed. A search before any attempt (a counterexample
+/// search on trunk) counts under its kind alone.
+fn success(processes: &[Value]) -> Vec<Value> {
+    let mut by: BTreeMap<(String, u64), [u64; 4]> = BTreeMap::new();
+    for p in processes {
+        let mut attempt = 0u64;
+        for s in p["searches"].as_array().into_iter().flatten() {
+            let kind = s["kind"].as_str().unwrap_or_default().to_string();
+            let main = matches!(kind.as_str(), "code" | "compaction");
+            if main { attempt += 1; }
+            let ended = main && matches!(s["end"].as_str(), Some("pushed" | "blocked" | "landed"));
+            for at in [0].into_iter().chain((attempt > 0).then_some(attempt)) {
+                let e = by.entry((kind.clone(), at)).or_default();
+                if reported(s) { e[0] += s["width"].as_u64().unwrap_or(0); e[1] += successes(s); }
+                if ended { e[2] += 1; if s["end"] == "pushed" { e[3] += 1; } }
+            }
+        }
+    }
+    by.into_iter().map(|((kind, at), [n, v, ended, pushed])| json!({ "kind": kind, "attempt": (at > 0).then_some(at),
+        "agent_processes": n, "successes": v, "ended": ended, "pushed": pushed })).collect()
+}
+
+/// Cost per verified candidate by kind, program and model: each row's agent
+/// processes (those that returned facts), how many were verified, their
+/// generation, and their share of each search's time cost (the search's time
+/// × its agent processes in the row ÷ its agent processes that returned).
+fn per_verified(processes: &[Value]) -> Vec<Value> {
+    let mut by: BTreeMap<(String, String, String), (u64, u64, f64, f64)> = BTreeMap::new();
+    for s in all_searches(processes) {
+        let cs = s["candidates"].as_array().cloned().unwrap_or_default();
+        let share = s["time_cost"].as_f64().unwrap_or(0.0) / cs.len().max(1) as f64;
+        for c in &cs {
+            let word = |v: &Value| v.as_str().unwrap_or("").to_string();
+            let e = by.entry((word(&s["kind"]), word(&c["program"]), word(&c["model"]))).or_default();
+            e.0 += 1;
+            if c["verified"] == true { e.1 += 1; }
+            e.2 += c["generation"].as_f64().unwrap_or(0.0);
+            e.3 += share;
+        }
+    }
+    by.into_iter().map(|((kind, program, model), (n, v, g, t))| json!({ "kind": kind, "program": program, "model": model,
+        "agent_processes": n, "verified": v, "generation": g, "time_cost": t })).collect()
+}
+
+/// The length of the union of intervals [start, end].
+fn union_length(mut spans: Vec<(f64, f64)>) -> f64 {
+    spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let (mut total, mut reach) = (0.0, f64::NEG_INFINITY);
+    for (a, b) in spans {
+        if b <= reach { continue; }
+        total += b - a.max(reach);
+        reach = b;
+    }
+    total
+}
+
+/// The host's two semaphores against wall time, over the reported searches in
+/// range: wall is the union of their wall times; agent_processes' held
+/// slot-seconds are each agent process's program seconds, check_processes'
+/// each check's seconds (a cached verdict held none). A semaphore's size is
+/// the one every search recorded, else none.
+fn utilization(processes: &[Value]) -> Value {
+    let searches: Vec<&Value> = all_searches(processes).filter(|s| reported(s)).collect();
+    let wall = union_length(searches.iter().filter_map(|s| Some((s["started"].as_f64()?, s["started"].as_f64()? + s["seconds"].as_f64()?))).collect());
+    let held = |k: &str| searches.iter().flat_map(|s| s["candidates"].as_array().into_iter().flatten()).filter_map(|c| c[k].as_f64()).sum::<f64>();
+    let size = |k: &str| {
+        let sizes: Vec<Option<u64>> = searches.iter().map(|s| s["pools"][k].as_u64()).collect();
+        sizes.first().copied().flatten().filter(|_| sizes.windows(2).all(|w| w[0] == w[1]))
+    };
+    json!({ "wall": wall, "searches": searches.len(),
+        "agent_processes": { "held": held("program_seconds"), "size": size("agent_processes") },
+        "check_processes": { "held": held("check_seconds"), "size": size("check_processes") } })
+}
+
+/// The median: the middle value, or the mean of the two middle ones.
+fn median(v: &[f64]) -> Option<f64> {
+    let mut s = v.to_vec(); s.sort_by(f64::total_cmp);
+    let n = s.len();
+    if n == 0 { None } else if n % 2 == 1 { Some(s[n / 2]) } else { Some((s[n / 2 - 1] + s[n / 2]) / 2.0) }
+}
+
+/// The 90th percentile, by nearest rank: the ⌈0.9 n⌉-th smallest.
+fn p90(v: &[f64]) -> Option<f64> {
+    let mut s = v.to_vec(); s.sort_by(f64::total_cmp);
+    let k = (0.9 * s.len() as f64).ceil() as usize;
+    s.get(k.max(1) - 1).copied()
+}
+
+/// The fewest searches a fit is made from.
+const FIT_MIN: usize = 3;
+
+/// The least-squares line y = fixed + per · x through (x, y): None with fewer
+/// than FIT_MIN points or one x for all of them, where no split is defined.
+fn fit(points: &[(f64, f64)]) -> Option<(f64, f64)> {
+    let n = points.len() as f64;
+    if points.len() < FIT_MIN { return None; }
+    let (mx, my) = (points.iter().map(|p| p.0).sum::<f64>() / n, points.iter().map(|p| p.1).sum::<f64>() / n);
+    let sxx: f64 = points.iter().map(|p| (p.0 - mx).powi(2)).sum();
+    if sxx == 0.0 { return None; }
+    let per = points.iter().map(|p| (p.0 - mx) * (p.1 - my)).sum::<f64>() / sxx;
+    Some((my - per * mx, per))
+}
+
+/// The run-time distribution by kind: the time and cost to each push (the
+/// seconds and cost of every bon process of its kind since the last push of
+/// that kind), their median and 90th percentile; and, over the kind's
+/// reported searches whose trees git knows, seconds and cost as a fixed part
+/// plus a part per distinct tree, by least squares (inferred).
+fn run_time(processes: &[Value], groups: &[Value]) -> Vec<Value> {
+    let mut kinds: Vec<String> = Vec::new();
+    for k in all_searches(processes).filter_map(|s| s["kind"].as_str()) { if !k.is_empty() && !kinds.iter().any(|x| x == k) { kinds.push(k.to_string()); } }
+    kinds.sort();
+    kinds.into_iter().map(|kind| {
+        let pushes: Vec<&Value> = groups.iter().filter(|g| g["kind"] == kind.as_str() && g["outcome"] == "pushed").map(|g| &g["push"]).filter(|p| p.is_object()).collect();
+        let of = |k: &str| pushes.iter().filter_map(|p| p[k].as_f64()).collect::<Vec<f64>>();
+        let (secs, costs) = (of("seconds"), of("cost"));
+        let points: Vec<(f64, f64, f64)> = all_searches(processes).filter(|s| s["kind"] == kind.as_str() && reported(s))
+            .filter_map(|s| Some((s["trees"].as_f64()?, s["seconds"].as_f64()?, s["cost"].as_f64()?))).collect();
+        let time = fit(&points.iter().map(|p| (p.0, p.1)).collect::<Vec<_>>());
+        let cost = fit(&points.iter().map(|p| (p.0, p.2)).collect::<Vec<_>>());
+        json!({ "kind": kind, "pushes": pushes.len(),
+            "time": { "median": median(&secs), "p90": p90(&secs) }, "cost": { "median": median(&costs), "p90": p90(&costs) },
+            "searches": points.len(),
+            "fit": time.zip(cost).map(|((tf, tp), (cf, cp))| json!({ "time": { "fixed": tf, "per_tree": tp }, "cost": { "fixed": cf, "per_tree": cp } })) })
+    }).collect()
+}
+
+/// Seconds as minutes and seconds, or hours and minutes: 48s, 7m48s, 31h05m.
+pub fn dur(s: f64) -> String {
+    let neg = s < 0.0;
+    let s = s.abs().round() as u64;
+    let t = if s < 60 { format!("{s}s") } else if s < 3600 { format!("{}m{:02}s", s / 60, s % 60) } else { format!("{}h{:02}m", s / 3600, (s % 3600) / 60) };
+    if neg { format!("−{t}") } else { t }
+}
+
+/// A share as a percentage, with what it is of: `87% (296 of 339)`; — of none.
+fn share(k: u64, n: u64) -> String { if n == 0 { "—".into() } else { format!("{:.0}% ({k} of {n})", 100.0 * k as f64 / n as f64) } }
+
+/// The success probability table, its header first: one row per kind, and one
+/// per attempt index under it where the kind ran in more than one.
+pub fn success_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
+    if t.success.is_empty() { return Vec::new(); }
+    let mut out = vec![vec!["Success probability".to_string(), "Per agent process".into(), "Per attempt".into()]];
+    let row = |label: String, r: &crate::projection::Success| vec![label, share(r.successes, r.agent_processes), share(r.pushed, r.ended)];
+    for r in t.success.iter().filter(|r| r.attempt.is_none()) {
+        out.push(row(cap(&r.kind), r));
+        let by: Vec<&crate::projection::Success> = t.success.iter().filter(|x| x.kind == r.kind && x.attempt.is_some()).collect();
+        if by.len() > 1 { for x in by { out.push(row(format!("  Attempt {}", x.attempt.unwrap_or(0)), x)); } }
+    }
+    out
+}
+
+/// The cost per verified candidate table, its header first: one row per kind,
+/// program and model.
+pub fn per_verified_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
+    if t.per_verified.is_empty() { return Vec::new(); }
+    let mut out = vec![["Cost per verified candidate", "Per verified", "Verified", "Agent processes", "Gen", "Time"].map(String::from).to_vec()];
+    for r in &t.per_verified {
+        let word = |s: &str| if s.is_empty() { "—".to_string() } else { s.to_string() };
+        out.push(vec![format!("{} · {} · {}", cap(&r.kind), word(&r.program), word(&r.model)),
+            if r.verified == 0 { "—".into() } else { money((r.generation + r.time_cost) / r.verified as f64) },
+            r.verified.to_string(), r.agent_processes.to_string(), money(r.generation), money(r.time_cost)]);
+    }
+    out
+}
+
+/// The run-time distribution table, its header first: each kind that pushed,
+/// its time and cost to a push; then each kind's fit per search, or why there is none.
+pub fn run_time_table(t: &crate::projection::Totals) -> (Vec<Vec<String>>, Vec<String>) {
+    let pushed: Vec<&crate::projection::RunTime> = t.run_time.iter().filter(|r| r.pushes > 0).collect();
+    let mut rows = Vec::new();
+    if !pushed.is_empty() {
+        rows.push(["Run-time distribution", "Pushes", "Median", "90th percentile"].map(String::from).to_vec());
+        let opt = |v: Option<f64>, f: &dyn std::ops::Fn(f64) -> String| v.map_or("—".to_string(), f);
+        for r in &pushed {
+            rows.push(vec![format!("{} time to a push", cap(&r.kind)), r.pushes.to_string(), opt(r.time.median, &dur), opt(r.time.p90, &dur)]);
+            rows.push(vec![format!("{} cost to a push", cap(&r.kind)), r.pushes.to_string(), opt(r.cost.median, &money), opt(r.cost.p90, &money)]);
+        }
+    }
+    let fits = t.run_time.iter().map(|r| match &r.fit {
+        Some(f) => format!("{} per search (inferred, {}): time {} + {} per distinct tree · cost {} + {} per distinct tree", cap(&r.kind), count(r.searches as usize, "search", "searches"),
+            dur(f.time.fixed), dur(f.time.per_tree), money(f.cost.fixed), money(f.cost.per_tree)),
+        None => format!("{} per search: too few to fit ({}, {} needed, with more than one count of distinct trees)", cap(&r.kind), count(r.searches as usize, "search", "searches"), FIT_MIN),
+    }).collect();
+    (rows, fits)
+}
+
+/// The utilization table, its header first: each of the host's two semaphores,
+/// its held slot-seconds, the wall time, their ratio, its size and utilization
+/// (— where the traces have no size).
+pub fn utilization_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
+    let u = &t.utilization;
+    if u.searches == 0 || u.wall <= 0.0 { return Vec::new(); }
+    let mut out = vec![["Utilization", "Held", "Wall", "Held ÷ wall", "Size", "Utilization"].map(String::from).to_vec()];
+    for (name, p) in [("agent_processes", &u.agent_processes), ("check_processes", &u.check_processes)] {
+        out.push(vec![name.to_string(), dur(p.held), dur(u.wall), format!("{:.2}", p.held / u.wall),
+            p.size.map_or("—".into(), |s| s.to_string()), p.size.map_or("—".into(), |s| format!("{:.0}%", 100.0 * p.held / (s as f64 * u.wall)))]);
+    }
+    out
+}
+
+/// What the measures' words mean: each measure's formula, said once.
+pub const MEASURE_NOTES: [(&str, &str); 9] = [
+    ("Success probability per agent process", "verified ÷ agent processes, over reported searches; a foil search's foils ÷ its agent processes"),
+    ("Success probability per attempt", "pushed ÷ attempts that ended (pushed, blocked, landed)"),
+    ("Attempt a", "the same, over each bon process's a-th attempt and the searches on it"),
+    ("Agent processes per behavior", "a search's verified candidates showing each distinct out"),
+    ("Cost per verified candidate", "(Σ generation + Σ time × the row's share of each search's agent processes) ÷ verified"),
+    ("Time, cost to a push", "Σ seconds, Σ generation + time, of its kind's bon processes since its last push"),
+    ("Median, 90th percentile", "the middle value (the mean of the middle two); the ⌈0.9 n⌉-th smallest"),
+    ("Per search (inferred)", "least squares: seconds or cost = fixed + per tree × distinct trees, over reported searches"),
+    ("Utilization", "held slot-seconds ÷ (size × wall); held: programs' seconds, checks' seconds (none for a cached verdict); wall: the union of the searches' wall times"),
+];
+
 /// A reason attempts blocked, in words, with its count and how many of those
-/// were inferred: `Too few verified (1)`, `Too few tests (5, 5 inferred)`.
+/// were inferred: `Too few verified (1)`, `Too few tests (5, 5 inferred)`. A
+/// recorded error (an exit's reason) reads as written.
 pub fn reason_count(r: &crate::projection::Reason) -> String {
-    let mut w = r.reason.replace('_', " ");
+    let word = r.reason.chars().all(|c| c.is_ascii_lowercase() || c == '_');
+    let mut w = if word { r.reason.replace('_', " ") } else { r.reason.clone() };
     if let Some(f) = w.get_mut(0..1) { f.make_ascii_uppercase(); }
     if r.inferred > 0 { format!("{w} ({}, {} inferred)", r.count, r.inferred) } else { format!("{w} ({})", r.count) }
 }
@@ -721,8 +1095,7 @@ fn cap(s: &str) -> String { let mut c = s.chars(); c.next().map_or(String::new()
 /// under it when the kind ran at more than one. Every attempt is in exactly
 /// one of pushed, blocked, landed, exited and running, and All is their sum;
 /// a column no attempt is in is left out, but for pushed, blocked and exited.
-/// Push rate (p) is pushed over the attempts that ran to an end (pushed,
-/// blocked, landed).
+/// Each kind's success probability per attempt is in `success_table`.
 pub fn attempt_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
     if t.attempts.is_empty() { return Vec::new(); }
     let landed = t.attempts.iter().any(|r| r.landed > 0);
@@ -731,17 +1104,14 @@ pub fn attempt_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
     if landed { head.push("Landed"); }
     head.push("Exited");
     if running { head.push("Running"); }
-    head.push("Push rate");
     let mut out = vec![head.into_iter().map(String::from).collect::<Vec<_>>()];
     let row = |label: String, r: &[&crate::projection::Attempts]| {
         let n = |f: fn(&crate::projection::Attempts) -> u64| r.iter().map(|x| f(x)).sum::<u64>();
         let (pushed, blocked, l, exited, run) = (n(|x| x.pushed), n(|x| x.blocked), n(|x| x.landed), n(|x| x.exited), n(|x| x.running));
-        let ran = pushed + blocked + l;
         let mut v = vec![label, (pushed + blocked + l + exited + run).to_string(), pushed.to_string(), blocked.to_string()];
         if landed { v.push(l.to_string()); }
         v.push(exited.to_string());
         if running { v.push(run.to_string()); }
-        v.push(if ran > 0 { format!("{:.0}%", 100.0 * pushed as f64 / ran as f64) } else { "—".into() });
         v
     };
     let mut kinds: Vec<&str> = t.attempts.iter().map(|r| r.kind.as_str()).collect();
@@ -756,8 +1126,8 @@ pub fn attempt_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
 
 /// The bon processes table, its header first: one row per kind of how its bon
 /// processes ended, All their sum. Expected is how many of those that pushed or
-/// blocked would have blocked, were each attempt to push at the push rate p:
-/// the sum over them of (1-p)^k, k its attempts.
+/// blocked would have blocked, were each attempt to push at the kind's success
+/// probability per attempt p: the sum over them of (1-p)^k, k its attempts.
 pub fn process_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
     if t.ended.is_empty() { return Vec::new(); }
     let running = t.ended.iter().any(|e| e.running > 0);
@@ -787,11 +1157,10 @@ pub fn reason_rows(t: &crate::projection::Totals) -> Vec<(String, Vec<String>)> 
 }
 
 /// What the outcome tables' words mean, for a key reference or a footnote.
-pub const OUTCOME_NOTES: [(&str, &str); 5] = [
+pub const OUTCOME_NOTES: [(&str, &str); 4] = [
     ("All", "Pushed + blocked + exited (+ landed, running)"),
-    ("Exited", "Its bon process stopped: no transition, no error"),
-    ("Push rate", "Pushed ÷ attempts that ended"),
-    ("Expected", "Σ (1 − push rate)^attempts, over processes"),
+    ("Exited", "Its bon process stopped: on the error it recorded, or, in older traces, with no transition"),
+    ("Expected", "Σ (1 − success probability per attempt)^attempts, over processes"),
     ("Inferred", "No word: the kernel's, or the sentence's"),
 ];
 
@@ -819,9 +1188,35 @@ pub fn outcome_lines(t: &crate::projection::Totals) -> Vec<String> {
     lines
 }
 
+/// The measures as aligned text: success probability, cost per verified
+/// candidate, the run-time distribution and utilization, then each formula.
+pub fn measure_lines(t: &crate::projection::Totals) -> Vec<String> {
+    let mut lines = Vec::new();
+    let (run, fits) = run_time_table(t);
+    for table in [success_table(t), per_verified_table(t), run] {
+        if table.is_empty() { continue; }
+        lines.extend(aligned(&table));
+        lines.push(String::new());
+    }
+    if !fits.is_empty() { lines.extend(fits); lines.push(String::new()); }
+    let u = utilization_table(t);
+    if !u.is_empty() { lines.extend(aligned(&u)); lines.push(String::new()); }
+    if lines.is_empty() { return lines; }
+    lines.extend(MEASURE_NOTES.iter().map(|(k, v)| format!("{k}: {v}")));
+    lines
+}
+
 fn outcomes(t: &Value) -> String {
-    let lines = serde_json::from_value::<crate::projection::Totals>(t.clone()).map(|t| outcome_lines(&t)).unwrap_or_default();
+    let lines = serde_json::from_value::<crate::projection::Totals>(t.clone()).map(|t| { let mut l = outcome_lines(&t);
+        let m = measure_lines(&t); if !m.is_empty() { l.push(String::new()); l.extend(m); } l }).unwrap_or_default();
     if lines.is_empty() { String::new() } else { lines.join("\n") + "\n\n" }
+}
+
+/// What a running search's agent processes are doing: `4 in flight, 2 in
+/// checks, 2 waiting`, each part left out at zero; empty when all returned.
+pub fn now_counts(in_flight: u64, in_checks: u64, waiting: u64) -> String {
+    [(in_flight, "in flight"), (in_checks, "in checks"), (waiting, "waiting")].iter().filter(|(n, _)| *n > 0)
+        .map(|(n, w)| format!("{n} {w}")).collect::<Vec<_>>().join(", ")
 }
 
 /// The projection as text, for `bon`.
@@ -831,9 +1226,10 @@ pub fn text(s: &Value) -> String {
     let r = &s["repo"];
     let t = &s["totals"];
     let opt = |v: &Value| v.as_f64().map_or("—".to_string(), money);
-    // Generation and time side by side, then the total.
-    out.push_str(&format!("{} · trunk {} {} · {} generation + {} time{} = {} · {} per verified candidate · {} per push\n\n",
-        r["name"].as_str().unwrap_or(""), r["trunk"].as_str().unwrap_or(""), &r["head"].as_str().unwrap_or("")[..7.min(r["head"].as_str().unwrap_or("").len())],
+    // Trunk as bon works on it, the remote's ref; then generation and time side by side, then the total.
+    let trunk_head = r["remote_head"].as_str().unwrap_or("");
+    out.push_str(&format!("{} · trunk {}/{} {} · {} generation + {} time{} = {} · {} per verified candidate · {} per push\n\n",
+        r["name"].as_str().unwrap_or(""), r["remote"].as_str().unwrap_or(""), r["trunk"].as_str().unwrap_or(""), &trunk_head[..7.min(trunk_head.len())],
         opt(&t["generation"]), opt(&t["time_cost"]), t["rate"].as_f64().map_or(String::new(), |r| format!(" at ${r:.0}/h")),
         opt(&t["cost"]), opt(&t["per_verified_candidate"]), opt(&t["per_push"])));
     out.push_str(&outcomes(t));
@@ -1068,16 +1464,16 @@ fn hunks(diff: &str) -> std::collections::HashMap<String, Vec<(usize, usize)>> {
 /// cite `spec::`; an implementation is an `impl <gate trait> for` anywhere; a driver
 /// is a function that fires a transition; entry points and targets are the
 /// `[sbom] trusted` files that reach a driver or a gate; trusted functions are the
-/// `external_body` ones a driver calls; emitted types are `[programs] from`'s
-/// declarations, and programs are the files that import a `[programs] types`
+/// `external_body` ones a driver calls; emitted types are `[types] from`'s
+/// declarations, and programs are the files that import a `[types] types`
 /// target. Read from the working tree; each item is marked where it differs from trunk.
 fn system(root: &Path, base: &str, manifest: &toml::Value) -> Value {
     let read = |f: &str| std::fs::read_to_string(root.join(f)).unwrap_or_default();
     let list = |v: Option<&toml::Value>| -> Vec<String> { v.and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect()).unwrap_or_default() };
     let checks = list(manifest.get("checks").and_then(|c| c.get("paths")));
     let trusted_files = list(manifest.get("sbom").and_then(|s| s.get("trusted")));
-    let from = list(manifest.get("programs").and_then(|p| p.get("from")));
-    let targets: Vec<String> = manifest.get("programs").and_then(|p| p.get("types")).and_then(|t| t.as_table())
+    let from = list(types_table(manifest).and_then(|p| p.get("from")));
+    let targets: Vec<String> = types_table(manifest).and_then(|p| p.get("types")).and_then(|t| t.as_table())
         .map(|t| t.values().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
     let tracked: Vec<String> = git(root, &["ls-files"]).lines().map(String::from).collect();
     let rust: Vec<&String> = tracked.iter().filter(|f| f.ends_with(".rs")).collect();
@@ -1167,7 +1563,7 @@ fn system(root: &Path, base: &str, manifest: &toml::Value) -> Value {
         }
     }
 
-    // ── the types emitted for programs: `[programs] from`'s declarations.
+    // ── the types emitted for programs: `[types] from`'s declarations.
     let mut type_names = Vec::new();
     for file in &from {
         let text = read(file);
@@ -1272,7 +1668,7 @@ fn system(root: &Path, base: &str, manifest: &toml::Value) -> Value {
         for g in to_gates { if kernel_names.contains(g) { edges.push(json!([id, format!("kernel:{g}"), "calls"])); } }
     }
 
-    // ── programs: the files that import a `[programs] types` target.
+    // ── programs: the files that import a `[types] types` target.
     for target in &targets {
         let module = stem(target);
         let dir = Path::new(target).parent().map_or(String::new(), |d| d.to_string_lossy().to_string());
@@ -1389,6 +1785,179 @@ mod tests {
     }
 
     #[test]
+    fn older_and_newer_trace_keys_read_by_presence() {
+        // program: the newer word; harness: an older trace's.
+        assert_eq!(program_of(&json!({ "program": "codex", "harness": "old" })), json!("codex"));
+        assert_eq!(program_of(&json!({ "harness": "claude" })), json!("claude"));
+        // added: a count in older traces; the added paths in newer ones, with lines_added and lines_removed.
+        assert_eq!(line_counts(&json!({ "added": 5, "removed": 9, "added_paths": [] })), (Some(5), Some(9)));
+        assert_eq!(line_counts(&json!({ "added": ["src/a.rs"], "lines_added": 3, "lines_removed": 1 })), (Some(3), Some(1)));
+        assert_eq!(line_counts(&json!({ "added": ["src/a.rs"] })), (None, None));
+        assert_eq!(exit_error("exited: git refused: no such ref"), Some("git refused: no such ref"));
+        assert_eq!(exit_error("blocked: undecided: …"), None);
+        assert_eq!(pool_sizes(&json!({ "agent_processes": 8 })), (None, None));
+        assert_eq!(pool_sizes(&json!({ "host": { "agent_processes": 16, "check_processes": 6 } })), (Some(16), Some(6)));
+        let m = |t: &str| -> toml::Value { toml::from_str(t).unwrap() };
+        assert!(types_table(&m("[types]\nfrom = [\"a\"]\n[programs]\nfrom = [\"b\"]")).unwrap().get("from").unwrap().as_array().unwrap()[0].as_str() == Some("a"));
+        assert!(types_table(&m("[programs]\nfrom = [\"b\"]")).unwrap().get("from").is_some());
+    }
+
+    /// A directory of its own for one test, removed when it is dropped.
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new(name: &str) -> Scratch {
+            let d = std::env::temp_dir().join(format!("best-of-n-view-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&d);
+            std::fs::create_dir_all(&d).unwrap();
+            Scratch(d)
+        }
+    }
+    impl Drop for Scratch { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+
+    #[test]
+    fn a_cached_check_holds_no_seconds_and_a_running_agent_process_has_a_stage() {
+        let d = Scratch::new("logs");
+        std::fs::write(d.0.join("test-0"), "exit: 0\nseconds: 9.5\n--- stdout\n").unwrap();
+        std::fs::write(d.0.join("test-1"), "cached: 33860f\nexit: 0\nseconds: 3.1\n").unwrap();
+        std::fs::write(d.0.join("program"), "exit: 0\nseconds: 40.0\n").unwrap();
+        assert_eq!(log_seconds(&d.0.join("test-0")), Some(9.5));
+        assert_eq!(log_seconds(&d.0.join("test-1")), None);
+        // The program's log is no check, by either name.
+        assert_eq!(check_seconds(&d.0, ["test-0", "test-1", "program"].into_iter()), Some(9.5));
+        assert_eq!(program_seconds(&d.0), Some(40.0));
+        // Waiting, in flight, in checks, returned: by what its directory holds so far.
+        let a = Scratch::new("stage");
+        assert_eq!(stage(&a.0), "waiting");
+        std::fs::write(a.0.join("argv"), "x").unwrap();
+        assert_eq!(stage(&a.0), "in_flight");
+        std::fs::write(a.0.join("harness"), "exit: 0\nseconds: 1.0\n").unwrap();
+        assert_eq!(stage(&a.0), "in_checks");
+        std::fs::write(a.0.join("facts.json"), "{}").unwrap();
+        assert_eq!(stage(&a.0), "returned");
+        assert_eq!(now_counts(4, 0, 2), "4 in flight, 2 waiting");
+        assert_eq!(now_counts(0, 0, 0), "");
+    }
+
+    #[test]
+    fn an_exit_the_trace_records_is_its_attempts_reason() {
+        let ends = attempt_ends(&[s("code", false)], &ls(&[&["grant", "exited: git push refused"]]), false, &none);
+        assert_eq!(ends[0].1, end("exited", Some("git push refused"), Some("recorded")));
+        // Read as written, not as a word.
+        assert_eq!(reason_count(&crate::projection::Reason { reason: "no such file: a_b".into(), count: 2, ..Default::default() }), "No such file: a_b (2)");
+    }
+
+    /// A candidate: verified or not, its out and its tree.
+    fn cand(verified: bool, out: u64, tree: Option<&str>) -> Value {
+        json!({ "verified": verified, "accepted": true, "proved": verified, "out": [out], "commit": "c", "tree": tree })
+    }
+
+    #[test]
+    fn agent_processes_per_behavior_and_distinct_trees_count_what_the_candidates_show() {
+        let cs = [cand(true, 7, Some("t1")), cand(true, 8, Some("t1")), cand(false, 9, Some("t2")), cand(true, 7, Some("t3"))];
+        // Two behaviors: 7 shown by two verified, 8 by one; the unverified one shows none.
+        assert_eq!(behaviors(&cs), vec![2, 1]);
+        assert_eq!(distinct_trees(&cs), Some(3));
+        // A tree git does not know leaves the count unknown; a candidate with no commit wrote none.
+        assert_eq!(distinct_trees(&[cand(true, 1, None)]), None);
+        assert_eq!(distinct_trees(&[json!({ "verified": false })]), Some(0));
+    }
+
+    /// A reported search of a bon process, as the measures read it.
+    fn search(kind: &str, width: u64, verified: u64, end: Option<&str>) -> Value {
+        json!({ "kind": kind, "width": width, "verified": verified, "end": end, "time": 1, "candidates": [] })
+    }
+
+    #[test]
+    fn success_probability_counts_agent_processes_and_attempts_by_kind_and_attempt() {
+        let foil = json!({ "kind": "foil", "width": 3, "time": 1, "candidates": [
+            { "accepted": true, "proved": false }, { "accepted": true, "proved": true }, { "accepted": false } ] });
+        let ps = [json!({ "searches": [search("code", 8, 6, Some("blocked")), foil, search("counterexample", 2, 1, None),
+                                       search("code", 12, 12, Some("pushed")), search("counterexample", 2, 2, None)] }),
+                  // An attempt its bon process exited in ended no way; a search that did not report counts no agent processes.
+                  json!({ "searches": [json!({ "kind": "code", "width": 8, "verified": 3, "end": "exited", "time": null })] })];
+        let rows = success(&ps);
+        let row = |kind: &str, at: Option<u64>| rows.iter().find(|r| r["kind"] == kind && r["attempt"] == json!(at)).cloned().unwrap();
+        // Code: 18 of 20 agent processes verified; 1 of the 2 attempts that ended pushed.
+        assert_eq!((row("code", None)["agent_processes"].as_u64(), row("code", None)["successes"].as_u64(), row("code", None)["ended"].as_u64(), row("code", None)["pushed"].as_u64()), (Some(20), Some(18), Some(2), Some(1)));
+        assert_eq!((row("code", Some(1))["ended"].as_u64(), row("code", Some(1))["pushed"].as_u64(), row("code", Some(2))["pushed"].as_u64()), (Some(1), Some(0), Some(1)));
+        // A foil search's successes are its foils: accepted, not proved.
+        assert_eq!(row("foil", Some(1))["successes"].as_u64(), Some(1));
+        assert_eq!(row("counterexample", Some(2))["successes"].as_u64(), Some(2));
+        let t: crate::projection::Totals = serde_json::from_value(json!({ "success": rows })).unwrap();
+        let table = success_table(&t);
+        assert_eq!(table[1], ["Code", "90% (18 of 20)", "50% (1 of 2)"]);
+        assert_eq!(table[2], ["  Attempt 1", "75% (6 of 8)", "0% (0 of 1)"]);
+        assert!(table.iter().any(|r| r[0] == "Counterexample" && r[2] == "—"));
+    }
+
+    #[test]
+    fn cost_per_verified_candidate_shares_a_searchs_time_by_its_agent_processes() {
+        let c = |program: &str, verified: bool, g: f64| json!({ "program": program, "model": "m", "verified": verified, "generation": g });
+        let ps = [json!({ "searches": [{ "kind": "code", "time_cost": 30.0, "candidates": [c("a", true, 1.0), c("a", true, 1.0), c("b", false, 4.0)] }] })];
+        let rows = per_verified(&ps);
+        // a: 2 of the 3 agent processes, so 20 of the 30 time; b: 10.
+        assert_eq!((rows[0]["program"].as_str(), rows[0]["generation"].as_f64(), rows[0]["time_cost"].as_f64(), rows[0]["verified"].as_u64()), (Some("a"), Some(2.0), Some(20.0), Some(2)));
+        assert_eq!(rows[1]["time_cost"].as_f64(), Some(10.0));
+        let t: crate::projection::Totals = serde_json::from_value(json!({ "per_verified": rows })).unwrap();
+        let table = per_verified_table(&t);
+        assert_eq!(table[1][..3], ["Code · a · m", "$11.00", "2"]);
+        // None verified: no cost per verified candidate.
+        assert_eq!(table[2][1], "—");
+    }
+
+    #[test]
+    fn utilization_is_held_slot_seconds_over_size_times_the_union_of_wall_times() {
+        assert_eq!(union_length(vec![(0.0, 10.0), (5.0, 15.0), (20.0, 25.0), (21.0, 22.0)]), 20.0);
+        let sr = |started: f64, seconds: f64, size: Option<u64>| json!({ "time": 1, "started": started, "seconds": seconds,
+            "pools": { "agent_processes": size, "check_processes": null },
+            "candidates": [{ "program_seconds": 30.0, "check_seconds": 4.0 }, { "program_seconds": 10.0 }] });
+        let u = utilization(&[json!({ "searches": [sr(0.0, 20.0, Some(4)), sr(10.0, 20.0, Some(4)), json!({ "time": null, "started": 100.0, "seconds": 50.0 })] })]);
+        // Wall 30 (0 to 30); 80 agent slot-seconds; 8 check slot-seconds; size 4 recorded by both, check size by none.
+        assert_eq!((u["wall"].as_f64(), u["agent_processes"]["held"].as_f64(), u["check_processes"]["held"].as_f64()), (Some(30.0), Some(80.0), Some(8.0)));
+        assert_eq!((u["agent_processes"]["size"].as_u64(), u["check_processes"]["size"].as_u64()), (Some(4), None));
+        let t: crate::projection::Totals = serde_json::from_value(json!({ "utilization": u })).unwrap();
+        let table = utilization_table(&t);
+        assert_eq!(table[1], ["agent_processes", "1m20s", "30s", "2.67", "4", "67%"]);
+        assert_eq!(table[2], ["check_processes", "8s", "30s", "0.27", "—", "—"]);
+        // Sizes that differ between searches are no one size.
+        let v = utilization(&[json!({ "searches": [sr(0.0, 20.0, Some(4)), sr(10.0, 20.0, Some(8))] })]);
+        assert!(v["agent_processes"]["size"].is_null());
+    }
+
+    #[test]
+    fn the_run_time_distribution_fits_a_fixed_part_and_a_part_per_distinct_tree() {
+        assert_eq!(median(&[3.0, 1.0, 2.0]), Some(2.0));
+        assert_eq!(median(&[4.0, 1.0, 2.0, 3.0]), Some(2.5));
+        assert_eq!(median(&[]), None);
+        // Nearest rank: the ⌈0.9 n⌉-th smallest.
+        assert_eq!(p90(&(1..=10).map(f64::from).collect::<Vec<_>>()), Some(9.0));
+        assert_eq!(p90(&[5.0]), Some(5.0));
+        // y = 60 + 5x, exactly.
+        let (a, b) = fit(&[(1.0, 65.0), (4.0, 80.0), (8.0, 100.0)]).unwrap();
+        assert!((a - 60.0).abs() < 1e-9 && (b - 5.0).abs() < 1e-9);
+        // Too few points, or one tree count for all: no split.
+        assert!(fit(&[(1.0, 65.0), (4.0, 80.0)]).is_none());
+        assert!(fit(&[(8.0, 1.0), (8.0, 2.0), (8.0, 3.0)]).is_none());
+        let rs = |trees: u64, seconds: f64| json!({ "kind": "code", "time": 1, "trees": trees, "seconds": seconds, "cost": seconds / 10.0 });
+        let ps = [json!({ "searches": [rs(1, 65.0), rs(4, 80.0), rs(8, 100.0), json!({ "kind": "code", "time": 1, "trees": null, "seconds": 9.0, "cost": 1.0 })] })];
+        let groups = [json!({ "kind": "code", "outcome": "pushed", "push": { "seconds": 600.0, "cost": 30.0 } }),
+                      json!({ "kind": "code", "outcome": "pushed", "push": { "seconds": 100.0, "cost": 10.0 } }),
+                      json!({ "kind": "code", "outcome": "blocked", "push": null })];
+        let r = &run_time(&ps, &groups)[0];
+        assert_eq!((r["pushes"].as_u64(), r["time"]["median"].as_f64(), r["time"]["p90"].as_f64(), r["cost"]["median"].as_f64()), (Some(2), Some(350.0), Some(600.0), Some(20.0)));
+        // The search whose trees are unknown is left out of the fit.
+        assert_eq!(r["searches"].as_u64(), Some(3));
+        assert!((r["fit"]["time"]["per_tree"].as_f64().unwrap() - 5.0).abs() < 1e-9 && (r["fit"]["cost"]["fixed"].as_f64().unwrap() - 6.0).abs() < 1e-9);
+        let t: crate::projection::Totals = serde_json::from_value(json!({ "run_time": [r] })).unwrap();
+        let (rows, fits) = run_time_table(&t);
+        assert_eq!(rows[1], ["Code time to a push", "2", "5m50s", "10m00s"]);
+        assert_eq!(fits[0], "Code per search (inferred, 3 searches): time 1m00s + 5s per distinct tree · cost $6.00 + $0.50 per distinct tree");
+        let few: crate::projection::Totals = serde_json::from_value(json!({ "run_time": [{ "kind": "foil", "searches": 2 }] })).unwrap();
+        assert!(run_time_table(&few).0.is_empty());
+        assert_eq!(run_time_table(&few).1[0], "Foil per search: too few to fit (2 searches, 3 needed, with more than one count of distinct trees)");
+    }
+
+    #[test]
     fn the_outcome_tables_add_up() {
         let ps = [
             process("code", "pushed", &[("blocked", Some("too_few_tests"), Some("sentence")), ("pushed", None, None)]),
@@ -1399,9 +1968,9 @@ mod tests {
         let t: crate::projection::Totals = serde_json::from_value(json!({ "attempts": attempts(&ps), "ended": ended(&ps),
             "reasons": reasons(&ps, "blocked"), "exits": reasons(&ps, "exited") })).unwrap();
         let a = attempt_table(&t);
-        assert_eq!(a[0], ["Attempts", "All", "Pushed", "Blocked", "Exited", "Push rate"]);
-        // 6 attempts: 2 pushed, 3 blocked, 1 exited; 2 of the 5 that ended pushed.
-        assert_eq!(a[1], ["Code", "6", "2", "3", "1", "40%"]);
+        assert_eq!(a[0], ["Attempts", "All", "Pushed", "Blocked", "Exited"]);
+        // 6 attempts: 2 pushed, 3 blocked, 1 exited.
+        assert_eq!(a[1], ["Code", "6", "2", "3", "1"]);
         // The reasons sum to Blocked, the exits to Exited; an inferred reason says so.
         let r = reason_rows(&t);
         assert_eq!(r[0], ("Code blocked by".to_string(), vec!["Too few tests (1, 1 inferred)".to_string(), "Too few verified (1)".into(), "Unrecorded (1)".into()]));

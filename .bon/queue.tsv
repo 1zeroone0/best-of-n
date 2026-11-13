@@ -13,7 +13,6 @@ id	intent
 58	Each bon process writes itself to a process list in the user layer's state, by pid and start time, and takes itself off when it ends; the view and time cost read it, and the cleanup key is gone.
 59	Engineer's time is charged once per wall-clock interval in which a search he waits on runs, split equally among the searches running in it, across bon processes and repositories; background searches are charged nothing.
 60	The view (bon in a terminal) shows the host: what waits on engineer and what that waiting costs, the agent processes and checks running against agent_processes and check_processes, memory, each bon process with those of identical tree together, and a journal; run in a repository it shows only that one, and its tabs stay inside it.
-61	Each colour in the view means one thing: the cursor is reverse video, and a file that differs from trunk is marked, not coloured.
 62	Each check slot runs as its own POSIX user, so a check writes only its own working and build directories and nothing one candidate does reaches how another is judged.
 63	agent owns none of the dependency sources the checks compile.
 64	The verdict key covers what the checks see (the tree, the command, the toolchain and the dependency sources they compile) and not the host file.
