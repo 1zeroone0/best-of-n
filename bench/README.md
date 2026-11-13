@@ -30,8 +30,9 @@ beside the command's stdout, stderr and traces.
 
 ## The stub
 
-`bench/stub.sh` is the harness (`name = "stub"`, `command = ["/bin/sh",
-".bon/stub.sh"]`: a stub costs nothing and needs no login or price). It reads
+`bench/stub.sh` is the program both roles run (`program = ["/bin/sh",
+".bon/stub.sh"]`, with no client and no model: a stub costs nothing and needs
+no login or price). It reads
 the prompt on stdin, sleeps `SLEEP` seconds (the model), then by the prompt's
 kind:
 
@@ -56,13 +57,13 @@ times, as an agent iterating does.
 ## bon itself
 
 `PROJECT=bon` makes the sandbox bon's own source at HEAD instead: its
-`.bon/` replaced by the benchmark's (the stub harness, the local bare origin,
+`.bon/` replaced by the benchmark's (the stub program, the local bare origin,
 no `traces` key), `bench/` left out (it says how trunk is broken), and on its
 trunk `exec::eq` broken to say a strict prefix equals the longer text: bon's
 tests miss it, Verus does not. A code stub copies the right file back from
 `.bon/fix/` (variant v > 0 appends `// variant v`, so `VARIANTS` sets how
 many distinct trees), which is in the tree only when stubs write the code (a
-real harness would read the answer there); a foil undoes the diff its prompt
+real program would read the answer there); a foil undoes the diff its prompt
 shows it; a counterexample tests
 `best_of_n::exec::eq` on a prefix. The checks are `cargo test -q`,
 `cargo verus verify` and the kernel example: a real check's cost and memory.
@@ -88,16 +89,20 @@ small, so a warm check is seconds.
 | `CX_MODE` | `blind` | kernel: counterexample stubs' tests: `blind` (max only), `split` (pick 1 2 = 2; variant 0 that alone), `few` (only index 0's builds) |
 | `ATTEMPTS` | 1 | attempts `bon code` may make, each WIDTH wide |
 | `TIME` | 1800 | each agent process's time limit |
+| `CHECK_TIME` | 1800 | each check's cutoff (`[checks] time`) |
+| `PROGRAM`, `CX_PROGRAM` | the stub | what the code (and compaction, queue) role and the counterexample (and foil) role run: a host role's keys |
 | `PROJECT` | `kernel` | `kernel` (bench/sandbox) or `bon` (bon's own source) |
 | `BON` | `target/debug/bon` | the binary (built first when unset) |
 
-| `GENERATION`, `CHECKS`, `CHECK_THREADS`, `CORES`, `MEMORY_GB` | unset | the host file's pool keys for this run |
+| `AGENT_PROCESSES`, `CHECK_PROCESSES`, `CHECK_THREADS` | unset | the host file's pool sizes for this run |
 
-bon reads a host file of the run's own (`BON_HOST`, in the sandbox):
-`/etc/bon/host.toml` with the run's verdict cache, `cleanup = "own"`, and
-those keys, so a run can size the pools as another machine's (`CORES=12
-MEMORY_GB=16`: a 24 GB, 12-core laptop with 16 GB free). The rows below that
-name `BON_*` variables are from before, when bon read them from its environment.
+bon reads a host file the run writes (`BON_HOST`, in the sandbox): the
+installed host file's `path`, toolchain homes and `[prices]`, the two roles
+(`code`, `test`), the run's verdict cache, `cleanup = "own"`, and those
+sizes, so a run sizes the pools as another machine's directly
+(`CHECK_PROCESSES=6`: a 24 GB, 12-core laptop with 16 GB free). The rows
+below that name `BON_*` variables, `CORES` or `MEMORY_GB` are from before,
+when bon computed the pool from them.
 
 ## Results
 
@@ -261,3 +266,23 @@ Before that, the sandbox carried the right file (`.bon/fix/src/exec.rs`, for
 the code stub) and bon-sample showed it to the model: 4 of 16 and 39 of 64
 samples were proved, and the search pushed. Those runs measured the bench's
 leak, not the samples.
+
+## Results: programs and roles, the push re-checked (bench4)
+
+Same host, 2026-11-12, after queue 51-55, 64-66, 74-76 and 86, stubs. A push
+now runs what decided its candidate again from an empty build directory, never
+the verdict cache (`recheck-*` in the trace, counted in checks run): its test,
+verify, agree and rank checks, at once through the check pool.
+
+| config | width | K | wall s | CPU s | peak RSS MB | checks run / cached | the push's re-check, wall s |
+|---|---|---|---|---|---|---|---|
+| kernel | 8 | 0 | 174 | 155 | 2215 | 42 / 104 | 32 (verify cold; test 9, agree 9) |
+| kernel | 32 | 0 | 174 | 167 | 2202 | 42 / 392 | 32 |
+| bon | 8 | 1 | 360 | 1208 | 6785 | 42 / 104 | 57 (verify cold; test 36, agree 28) |
+
+Against the rows above (kernel 32 K=0 merged: 155 s; bon 8 K=1 lazy: 337 s,
+1047 CPU-s, 4.3 GB), the re-check adds its own wall time to each push, a
+cold build of the candidate's checks: about 30 s and 50 CPU-s on the kernel
+sandbox, about 60 s and 160 CPU-s and 2.5 GB more peak memory on bon's own
+source. `bon counterexample` on the pushed trunk: 72 s (kernel) and 116 s
+(bon), its landing never reached (nothing found), so nothing re-checked.
