@@ -572,11 +572,15 @@ fn check_directory(root: &std::path::Path, commit: &str, dir: &std::path::Path) 
     Ok(())
 }
 
-/// Trunk's build, made once per bon process as agent, then copied to one of
-/// engineer's that no agent process can write. Every build directory (an agent
-/// process's own, and its judge's) starts as a copy-on-write clone of that copy, so cargo rebuilds only what
+/// Trunk's build: made as agent by trunk's checks, then copied to one of
+/// engineer's that no agent process can write, kept for later bon processes
+/// (see `kept`). Every build directory (an agent process's own, and its
+/// judge's) starts as a clone of it (see CLONE), so cargo rebuilds only what
 /// the candidate changed; cargo's own change detection (TCB) keeps it correct.
-static WARM: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+/// None until trunk's build is ready, or when there is none (every build starts cold).
+static WARM: std::sync::Mutex<Option<PathBuf>> = std::sync::Mutex::new(None);
+/// This bon process's first trunk build is done (made, kept, or failed).
+static WARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// Whether Verus verified trunk's head: a counterexample or queue candidate
 /// changes nothing Verus reads, so it is proved exactly when trunk is.
 static TRUNK_PROVED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -684,31 +688,44 @@ fn append_line(file: &std::path::Path, line: &str) {
 /// index in the kernel (from 0 at initialize) plus it names its trace directory.
 static FIRST_RUN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Run trunk's checks, as agent, building trunk in the process: (every test
-/// accepts trunk, Verus verifies it). Each candidate's build starts from it, so
-/// the first run in a bon process runs; a later one (the next attempt) may be
-/// answered by the verdict cache. It runs alone, so it takes every core.
+/// Run trunk's checks, as agent: (every test accepts trunk, Verus verifies it).
+/// Each candidate's build starts from trunk's, so they build it, unless a bon
+/// process before kept one for the same key (`trunk_key`): then the verdict
+/// cache answers them, or they run in a clone of it. Trunk's checks run alone,
+/// so they take every core.
 fn warm(m: &Manifest, head: &str) -> (bool, bool) {
     WARMING.store(true, std::sync::atomic::Ordering::SeqCst);
     let (config, root) = (&m.config, &m.root);
+    let tree = tree_of(root, head);
+    let key = trunk_key(config, &tree);
+    let kept_build = key.as_deref().and_then(reuse);
     let mut result = (false, false);
     let dir = scratch(&format!("trunk/{}", repository_name(root)));
-    let built = (|| -> Option<PathBuf> {
+    let made = (|| -> Option<PathBuf> {
         check_directory(root, head, &dir).ok()?;
         let build = scratch("trunk.build/build");
-        writable_dir(&build).ok()?;
         let log = trace_dir(root);
         traced(&log, std::fs::create_dir_all(&log));
-        let on = On { tree: tree_of(root, head), test: None, read: WARM.get().is_some() };
+        // A kept build is the one the checks clone, made by the first that must run.
+        match &kept_build {
+            Some(k) => *WARM.lock().unwrap_or_else(|e| e.into_inner()) = Some(k.clone()),
+            None => writable_dir(&build).ok()?,
+        }
+        let on = On { tree: tree.clone(), test: None, read: kept_build.is_some() };
         let run = |v: &String, name: String| run_check_with(config, &on, cores(), &dir, &build, v, &log.join(name)).0;
         let tests = config.checks.test.iter().enumerate().all(|(k, v)| run(v, format!("trunk-test-{k}")));
         let proved = config.checks.verify.iter().enumerate().all(|(k, v)| run(v, format!("trunk-verify-{k}")));
         result = (tests, proved);
+        if kept_build.is_some() { remove_build(config, &build); return kept_build.clone(); }
         // agent wrote that build, and every agent process runs as agent: what
         // every build clones is engineer's copy of it, which none can change.
-        // Made once: a later run (the next attempt) leaves the first copy alone.
-        let snapshot = scratch("trunk.snapshot/build");
-        if WARM.get().is_some() || snapshot.exists() { remove_build(config, &build); return None; }
+        let staging = scratch("trunk.snapshot");
+        if std::fs::read_dir(&staging).is_ok_and(|mut e| e.next().is_some()) {
+            let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&staging).status();
+            let _ = std::fs::remove_dir_all(&staging);
+            scratch("trunk.snapshot");
+        }
+        let snapshot = staging.join("build");
         // agent's files there that only agent may read (rustc's incremental session
         // locks are 0600) are made readable first, or the copy fails. (The directory
         // itself is engineer's, so agent's chmod reports failure on it: the copy decides.)
@@ -716,7 +733,6 @@ fn warm(m: &Manifest, head: &str) -> (bool, bool) {
             .stderr(Stdio::null()).status();
         let copy = Command::new("cp").arg("-cR").arg(format!("{}/", build.display())).arg(&snapshot).output();
         let copied = copy.as_ref().is_ok_and(|o| o.status.success());
-        if copied { write_links(&snapshot, &dir); }
         remove_build(config, &build);
         if !copied {
             // Every build then starts cold: say so where the run's traces are.
@@ -724,14 +740,132 @@ fn warm(m: &Manifest, head: &str) -> (bool, bool) {
             write_trace(&log.join("trunk-build"), format!("trunk's build was not copied, so every build starts cold: {why}"));
             let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&snapshot).stderr(Stdio::null()).status();
             let _ = std::fs::remove_dir_all(&snapshot);
+            return None;
         }
-        copied.then_some(snapshot)
+        // Writable by engineer alone, whatever bon's umask.
+        let _ = Command::new("chmod").args(["-R", "go-w"]).arg(&staging).status();
+        write_links(&snapshot, &dir);
+        // No tree, no key: this process's alone, removed with its directories.
+        let Some(key) = key else { return Some(snapshot) };
+        Some(keep(&staging, &key).unwrap_or(snapshot))
     })();
     let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
     let _ = std::fs::remove_dir_all(&dir);
     TRUNK_PROVED.store(result.1, std::sync::atomic::Ordering::SeqCst);
-    let _ = WARM.set(built);
+    // A later attempt's trunk build replaces the earlier; one that failed leaves it.
+    if let Some(b) = made { *WARM.lock().unwrap_or_else(|e| e.into_inner()) = Some(b); }
+    WARMED.store(true, std::sync::atomic::Ordering::SeqCst);
     result
+}
+
+/// Trunk's build, if there is one.
+fn warm_build() -> Option<PathBuf> { WARM.lock().unwrap_or_else(|e| e.into_inner()).clone() }
+
+/// Trunk's build, waited for (at most an agent process's time limit) once it is under way.
+fn wait_warm(config: &Config) -> Option<PathBuf> {
+    if WARMING.load(std::sync::atomic::Ordering::SeqCst) {
+        let start = Instant::now();
+        while !WARMED.load(std::sync::atomic::Ordering::SeqCst) && start.elapsed() < Duration::from_secs(config.agent_process.time) {
+            std::thread::sleep(Duration::from_millis(500));
+        }
+    }
+    warm_build()
+}
+
+// ── trunk's builds, kept ────────────────────────────────
+
+/// How many trunk builds the host keeps (each one trunk commit, checks and
+/// toolchain): trunk's head, the one before it (a bon process still on it,
+/// or a counterexample after a push), and one more. bench/sandbox's is 0.2 GB.
+const TRUNK_BUILDS: usize = 3;
+
+/// What trunk's build is a function of: trunk's tree, the commands that build
+/// it (the test and verify checks), and the checks' toolchain and environment
+/// (`identity`, as the verdict cache keys them). None when git names no tree.
+fn trunk_key(config: &Config, tree: &str) -> Option<String> {
+    if tree.is_empty() || is_agent() { return None; }
+    let mut h = Sha256::new();
+    let id = identity(config);
+    let parts = [id.as_str(), tree, "test"].into_iter().chain(config.checks.test.iter().map(String::as_str))
+        .chain(["verify"]).chain(config.checks.verify.iter().map(String::as_str));
+    for part in parts { h.update(part.as_bytes()); h.update([0u8]); }
+    Some(h.finalize().iter().take(16).map(|b| format!("{b:02x}")).collect())
+}
+
+/// A kept trunk build's directory: `trunk-<key>` under the working
+/// directories, engineer's (group bon, 2750: agent reads, never writes). It
+/// holds `build`, `links`, and `done`, written last: a directory without it
+/// is not one. bon's `cleanup` leaves it (its name is no pid's); `keep` bounds them.
+fn kept(key: &str) -> PathBuf { PathBuf::from(WORKING_DIRECTORIES).join(format!("trunk-{key}")) }
+
+/// The kept builds this process clones from: each one's `done`, held under a
+/// shared lock until the process ends, so no other process prunes it meanwhile.
+static IN_USE: std::sync::Mutex<Vec<std::fs::File>> = std::sync::Mutex::new(Vec::new());
+
+/// The kept build for `key`, if one is complete and every file in it is
+/// engineer's and writable by no one else (so no agent process wrote it);
+/// it is then held in use and marked the most recent.
+fn reuse(key: &str) -> Option<PathBuf> {
+    let d = kept(key);
+    let done = std::fs::OpenOptions::new().read(true).write(true).open(d.join("done")).ok()?;
+    done.lock_shared().ok()?;
+    // Pruned while this process waited for the lock: gone.
+    if !d.join("done").exists() || !engineers_alone(&d) { return None; }
+    let _ = done.set_modified(std::time::SystemTime::now());
+    IN_USE.lock().unwrap_or_else(|e| e.into_inner()).push(done);
+    Some(d.join("build"))
+}
+
+/// Every file and directory under `d` (links not followed) is owned by whoever
+/// owns the working directories, and none is writable by a group or others.
+fn engineers_alone(d: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(owner) = std::fs::metadata(WORKING_DIRECTORIES).map(|m| m.uid()) else { return false };
+    let mut stack = vec![d.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        let Ok(m) = std::fs::symlink_metadata(&p) else { return false };
+        if m.uid() != owner || (!m.file_type().is_symlink() && m.mode() & 0o022 != 0) { return false; }
+        if m.is_dir() {
+            let Ok(entries) = std::fs::read_dir(&p) else { return false };
+            stack.extend(entries.flatten().map(|e| e.path()));
+        }
+    }
+    true
+}
+
+/// Keep `staging` (this process's `build` and `links`) as `key`'s trunk build:
+/// `done` written, the directory renamed into place, then the kept builds past
+/// the TRUNK_BUILDS most recent that no process holds removed. Another process
+/// that kept the same key first wins, and its build is used. The kept build.
+fn keep(staging: &std::path::Path, key: &str) -> Option<PathBuf> {
+    let done = staging.join("done");
+    std::fs::write(&done, "").ok()?;
+    let _ = std::fs::set_permissions(&done, std::os::unix::fs::PermissionsExt::from_mode(0o644));
+    if std::fs::rename(staging, kept(key)).is_err() {
+        let _ = Command::new("chmod").args(["-R", "u+w"]).arg(staging).status();
+        let _ = std::fs::remove_dir_all(staging);
+    }
+    let kept_build = reuse(key);
+    prune_kept(TRUNK_BUILDS);
+    kept_build
+}
+
+/// Remove the kept trunk builds past the `keep` most recently used, each only
+/// if no process holds it (an exclusive lock on its `done`, not waited for).
+fn prune_kept(keep: usize) {
+    let mut all: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(WORKING_DIRECTORIES).into_iter().flatten().flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("trunk-"))
+        .filter_map(|e| Some((std::fs::metadata(e.path().join("done")).ok()?.modified().ok()?, e.path()))).collect();
+    all.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, d) in all.into_iter().skip(keep) {
+        let Ok(done) = std::fs::File::open(d.join("done")) else { continue };
+        if done.try_lock().is_err() { continue; }
+        // Its `done` first, so no process takes it up while it goes.
+        let _ = std::fs::remove_file(d.join("done"));
+        drop(done);
+        let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&d).stderr(Stdio::null()).status();
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }
 
 /// How a build directory is made from trunk's (as agent: `sh -c CLONE from to`):
@@ -809,28 +943,16 @@ fn shared_in(snapshot: &std::path::Path, deps: &std::path::Path, checkout: &std:
 /// an agent process's own, or a fresh one for its judge.
 fn build_directory(config: &Config, name: &str) -> Result<PathBuf, String> {
     // Once trunk's build is under way, wait for it and start from a clone of it.
-    let warm = if WARMING.load(std::sync::atomic::Ordering::SeqCst) {
-        let start = Instant::now();
-        while WARM.get().is_none() && start.elapsed() < Duration::from_secs(config.agent_process.time) {
-            std::thread::sleep(Duration::from_millis(500));
-        }
-        WARM.get().cloned().flatten()
-    } else { None };
-    clone_build(config, warm.as_deref(), name)
+    clone_build(config, wait_warm(config).as_deref(), name)
 }
 
 /// A session's build directory, empty, and trunk's build for bon's cargo to
 /// clone into it at the session's first cargo (once trunk's build is ready).
 fn session_build(config: &Config, name: &str) -> Result<(PathBuf, Option<PathBuf>), String> {
-    if WARMING.load(std::sync::atomic::Ordering::SeqCst) {
-        let start = Instant::now();
-        while WARM.get().is_none() && start.elapsed() < Duration::from_secs(config.agent_process.time) {
-            std::thread::sleep(Duration::from_millis(500));
-        }
-    }
+    let warm = wait_warm(config);
     let d = scratch(name);
     writable_dir(&d)?;
-    Ok((d, WARM.get().cloned().flatten()))
+    Ok((d, warm))
 }
 
 /// A build directory named `name`: empty, or a copy-on-write clone of `from`.
@@ -854,7 +976,7 @@ fn ensure_build(config: &Config, d: &std::path::Path) -> bool {
     let one = flight(&format!("build\0{}", d.display()));
     let _one = one.lock().unwrap_or_else(|e| e.into_inner());
     if d.exists() { return true; }
-    let warm = WARM.get().cloned().flatten();
+    let warm = warm_build();
     let made = writable_dir(d).is_ok() && warm.is_none_or(|w| clone_into(config, &w, d));
     if !made { remove_build(config, d); let _ = std::fs::remove_dir(d); }
     made
@@ -2452,7 +2574,7 @@ fn verdicts(m: &Manifest, tasks: &[(String, PathBuf)], test: &[u8], name: &str) 
                     let make = || {
                         // From trunk's build, whose shared files it links (a judge's
                         // build's copy of them would be new files again).
-                        let warm = WARM.get().cloned().flatten();
+                        let warm = warm_build();
                         let d = clone_build(config, warm.as_deref(), &format!("{name}.verdict.{i}/build")).ok()?;
                         *made.lock().unwrap() = Some(d.clone());
                         Some(d)
@@ -2610,6 +2732,33 @@ mod tests {
         assert_eq!(Pools::of(&host("jobs = 7\nchecks = 5\ncheck_threads = 3")), Pools { generation: 7, checks: 5, threads: 3 });
         assert_eq!(check_pool(14, 40.0, 2), 14);
         assert_eq!(check_pool(14, 40.0, 1), 26);
+    }
+
+    #[test]
+    fn a_kept_trunk_build_is_reused_only_while_no_one_else_can_write_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("bon-kept-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("build/debug")).unwrap();
+        std::fs::write(d.join("build/debug/libm.dylib"), "").unwrap();
+        for p in [d.clone(), d.join("build"), d.join("build/debug")] { std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o750)).unwrap(); }
+        std::fs::set_permissions(d.join("build/debug/libm.dylib"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mine = std::fs::metadata(WORKING_DIRECTORIES).is_ok_and(|m| std::os::unix::fs::MetadataExt::uid(&m) == std::os::unix::fs::MetadataExt::uid(&std::fs::metadata(&d).unwrap()));
+        if mine {
+            assert!(engineers_alone(&d));
+            // One file a group may write: not reused.
+            std::fs::set_permissions(d.join("build/debug/libm.dylib"), std::fs::Permissions::from_mode(0o775)).unwrap();
+            assert!(!engineers_alone(&d));
+        }
+        // The key is trunk's tree, its checks and the toolchain's identity.
+        let c = config();
+        assert_eq!(trunk_key(&c, "abc"), trunk_key(&c, "abc"));
+        assert_ne!(trunk_key(&c, "abc"), trunk_key(&c, "abd"));
+        let mut other = config();
+        other.checks.verify = vec!["cargo verus verify -- --rlimit 9".into()];
+        assert_ne!(trunk_key(&c, "abc"), trunk_key(&other, "abc"));
+        assert_eq!(trunk_key(&c, ""), None);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
