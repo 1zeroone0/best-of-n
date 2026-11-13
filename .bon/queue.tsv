@@ -3,11 +3,6 @@ id	intent
 20	A skill ships with the CLI for the model engineer talks to: how to work at the spec level and when to run bon, read from the bon.toml, queue and spec of the repo it runs in; agent processes never see it.
 27	Background work, compaction and counterexample searches on trunk, runs only on spare capacity, stalest first, staleness being trunk commits since that kind last ran.
 28	Programs may run the kernel's gates compiled in, in any language, with no trusted code beyond their entry points.
-51	What an agent process runs is called its program in the manifest, the host file, the traces (whose harness keys become program keys), the view and the docs; harness is gone, and older traces keep their word.
-52	The manifest's [programs] table is called [types], so program keeps its one meaning: what an agent process runs.
-53	The manifest names, for each search kind (the foil apart from the counterexample), a role and its width list; the host file maps each role to a program, its client, model and context budget; a kind's model never changes with the attempt.
-54	The host file says agent_processes and check_processes for how many agent processes and checks run at once across every bon process on the host; jobs, cores and memory_gb are gone, and BON_HOST still names another host file.
-55	bon-sample reads its key file and the API's address from the host file, its tests choose its clients by PATH, and its header and prompt describe it as a program that makes one model call.
 56	Between the host and the repository is the user layer, whose root one host key names (engineer's is ~/rr): bon's state that outlives a bon process, starting with the verdict cache, lives in <root>/.bon as Object::State, on which agent has no rights, so isolated decides it, and the verdicts key is gone.
 57	Trunk's kept builds, which every build directory starts as a clone of, are Object::Builds in the policy: agent reads and executes them and never writes them, so isolated decides them.
 58	Each bon process writes itself to a process list in the user layer's state, by pid and start time, and takes itself off when it ends; the view and time cost read it, and the cleanup key is gone.
@@ -15,9 +10,6 @@ id	intent
 60	The view (bon in a terminal) shows the host: what waits on engineer and what that waiting costs, the agent processes and checks running against agent_processes and check_processes, memory, each bon process with those of identical tree together, and a journal; run in a repository it shows only that one, and its tabs stay inside it.
 62	Each check slot runs as its own POSIX user, so a check writes only its own working and build directories and nothing one candidate does reaches how another is judged.
 63	agent owns none of the dependency sources the checks compile.
-64	The verdict key covers what the checks see (the tree, the command, the toolchain and the dependency sources they compile) and not the host file.
-65	What decides a push is checked again from a clean build, never answered by the verdict cache; a clean result that differs from the cached one for the same key stops bon with the check marked suspect.
-66	Every check stops at its own cutoff, [checks] time, apart from an agent process's time.
 67	Every line a search may write is proven, or program code with declared checks.
 68	No check lives in a file a search may write.
 69	Nothing a candidate writes changes how it is judged: bon check fails on a local crate with a build script, a proc macro, a unit test in an editable file, or plain Rust outside verus! in the kernel.
@@ -25,9 +17,6 @@ id	intent
 71	Compaction ranks a candidate by its suite's check seconds as well as its lines.
 72	A test fails when a surface name (a spec item, a gate contract, a kernel public item, an emitted type, a trace word, a manifest or host key) is undefined or names two things; a candidate's new identifiers may be scored, fewer ranking higher.
 73	A search may carry earlier searches' verdicts on its goal in its context (Search.context); a counterexample's or a foil's context never holds check output from a member.
-74	A one-shot program's context carries the failing check's output and the files that output names, so its agent process knows which check fails and why.
-75	In facts.json, added is the paths the diff added, as in the spec, and the line counts are lines_added and lines_removed; older traces still read.
-76	A bon process that ends on an error records exited and the error in its transitions.
 77	Every trace has one shape: program, context, output, verdict and behavior.
 78	What only engineer can answer reaches him as an interrupt, derived from the traces in the view's code and pending until the action that answers it, with when it was raised and resolved: a queue proposal, an attempt blocked with its width list or limit spent, or a transcript the host file routes nowhere, never a counterexample that landed; bon pending lists them, each with what happened, the choices and what each costs.
 79	When an interrupt resolves, bon records, in the one trace shape, the item and the context it showed, the commit that answered it, a pointer to the session's transcript with its hash, and later what came of it.
@@ -37,4 +26,3 @@ id	intent
 83	For an accepted intent, a spec search's agent processes each propose a spec change; the verified ones are grouped by behavior, nothing is pushed, and it ends in a proposal reviewed as new words, decisions, reach and scenarios, the splits between them being the decisions.
 84	bon new <name> sets up a project deterministically: a spec with the core nouns, its gates, an empty implementation, the manifest and the queue.
 85	bon keeps one account of what is true of the code: every file, tool, dependency and claimed control is proven, trusted, configured or tested (tested being program code's alone), declared in one manifest table, generated as one document (OSCAL, with an SBOM view), and checked by one command that fails when any of it is stale.
-86	bon's own tests leave nothing in /tmp/bon.

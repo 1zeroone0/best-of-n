@@ -17,14 +17,18 @@ test = ["cargo test -q", "cargo run -q -- sbom --check", "cargo run -q -- types 
 verify = ["cargo verus verify"]
 agree = ["cargo run -q --example kernel"]
 rank = { code = "echo 0", compaction = "echo $((0 - $(cat src/*.rs tests/*.rs 2>/dev/null | wc -l)))" }
+# Seconds a check may run before it is stopped.
+time = 1800
 
-[[harness]]
-name = "codex"
-model = "gpt-6.1-sol"
-n = [8, 12]
+# Each search kind's role and its width list; the host file says what each role runs.
+[searches]
+code = { role = "wide", n = [8, 12] }
+compaction = { role = "wide", n = [8, 12] }
+queue = { role = "wide", n = [8, 12] }
+counterexample = { role = "deep", n = [2] }
+foil = { role = "deep", n = [2] }
 
 [counterexample]
-harness = [{ name = "claude", model = "claude-opus-5-5", n = [2] }]
 # Where an agent process writes its test, and how it builds and runs.
 path = "tests/counterexample.rs"
 build = "cargo test -q --no-run --test counterexample"
@@ -38,8 +42,10 @@ visible = ["Cargo.toml", "Cargo.lock"]
 name = "best-of-n"
 trusted = ["src/trusted.rs", "src/main.rs", "src/view.rs", "src/types.rs", "src/projection.rs", "src/tui.rs"]
 tools = { rustc = "rustc --version", verus = "verus --version", git = "git --version", sudo = "printf 'macOS '; sw_vers -buildVersion", tar = "tar --version", perl = "perl -e 'print $^V'", claude = "claude --version", codex = "codex --version" }
+# The network services the programs call.
+services = { "Anthropic API" = "https://api.anthropic.com", "OpenAI API" = "https://api.openai.com" }
 
-[programs]
+[types]
 # The types programs are built on: bon types emits them from these files, and checks them.
 from = ["src/gates.rs", "src/projection.rs"]
 types = { typescript = "examples/typescript/kernel.ts", go = "examples/go/kernel/kernel.go", python = "examples/python/kernel.py" }

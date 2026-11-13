@@ -1,9 +1,9 @@
 //! `bon types`: the types programs are built on, emitted from the kernel's
-//! declarations. Trusted code. It reads the files the manifest's `[programs]`
+//! declarations. Trusted code. It reads the files the manifest's `[types]`
 //! names in `from` and writes each target in `types`:
 //!
 //! ```toml
-//! [programs]
+//! [types]
 //! from = ["src/gates.rs"]
 //! types = { typescript = "programs/kernel.ts", go = "programs/kernel/kernel.go", python = "programs/kernel.py" }
 //! ```
@@ -289,8 +289,8 @@ fn python(items: &[Declared], from: &str) -> String {
 
 /// Each declared target and its text.
 fn targets(root: &Path, manifest: &toml::Value) -> Result<Vec<(String, String)>, String> {
-    let Some(p) = manifest.get("programs") else { return Ok(Vec::new()) };
-    let from: Vec<String> = p.get("from").and_then(|v| v.as_array()).ok_or("[programs] needs from = [the files holding the kernel's types]")?
+    let Some(p) = manifest.get("types") else { return Ok(Vec::new()) };
+    let from: Vec<String> = p.get("from").and_then(|v| v.as_array()).ok_or("[types] needs from = [the files holding the kernel's types]")?
         .iter().filter_map(|v| v.as_str().map(String::from)).collect();
     let mut items = Vec::new();
     for f in &from {
@@ -299,7 +299,7 @@ fn targets(root: &Path, manifest: &toml::Value) -> Result<Vec<(String, String)>,
     let names = from.join(", ");
     let mut out = Vec::new();
     for (lang, path) in p.get("types").and_then(|v| v.as_table()).into_iter().flatten() {
-        let path = path.as_str().ok_or("[programs] types: each target is a path")?.to_string();
+        let path = path.as_str().ok_or("[types] types: each target is a path")?.to_string();
         let text = match lang.as_str() {
             "typescript" => typescript(&items, &names),
             "go" => {
@@ -307,7 +307,7 @@ fn targets(root: &Path, manifest: &toml::Value) -> Result<Vec<(String, String)>,
                 golang(&items, &names, &package)
             }
             "python" => python(&items, &names),
-            other => return Err(format!("[programs] types: no emitter for {other}; typescript, go and python are")),
+            other => return Err(format!("[types] types: no emitter for {other}; typescript, go and python are")),
         };
         out.push((path, text));
     }
@@ -320,7 +320,7 @@ pub fn run(root: &str, check: bool) -> Result<(), String> {
     let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(r.join(".bon/bon.toml")).map_err(|e| format!(".bon/bon.toml: {e}"))?)
         .map_err(|e| format!(".bon/bon.toml: {e}"))?;
     let targets = targets(r, &manifest)?;
-    if targets.is_empty() { println!("no [programs] types in .bon/bon.toml"); return Ok(()); }
+    if targets.is_empty() { println!("no [types] in .bon/bon.toml"); return Ok(()); }
     for (path, text) in targets {
         let file = r.join(&path);
         if check {

@@ -52,26 +52,24 @@ fn main() {
             eprintln!("bon: this bon was built from another kernel than trunk's ({}); reinstall: cargo install --path . --locked", differ.join(", "));
         }
     }
-    // Before a search: every harness it may run is logged in as agent, or the command that fixes it.
-    if SEARCHES.contains(&command) {
-        let checked = best_of_n::trusted::head(&root).and_then(|h| best_of_n::trusted::manifest(&root, &h)).and_then(|m| best_of_n::trusted::harnesses_logged_in(&m));
-        if let Err(e) = checked { fail(&e) }
+    if !SEARCHES.contains(&command) {
+        if let Err(e) = dispatch(&root, &args) { fail(&e) }
+        return;
     }
+    // Before a search: the client of every role it may run reaches its model as agent, or the command that fixes it.
+    let checked = best_of_n::trusted::head(&root).and_then(|h| best_of_n::trusted::manifest(&root, &h)).and_then(|m| best_of_n::trusted::programs_logged_in(&m));
     // Trunk is the remote's: what the last fetch or push left in its ref.
     let trunk = || best_of_n::trusted::head(&root).map(|h| h.iter().collect::<String>()).unwrap_or_default();
-    let before = if SEARCHES.contains(&command) { trunk() } else { String::new() };
-    let result = dispatch(&root, &args);
+    let before = trunk();
+    let result = checked.and_then(|_| dispatch(&root, &args));
     // A push or a landed test moved trunk: the cost file follows it, as its own commit.
-    if SEARCHES.contains(&command) && result.is_ok() && trunk() != before {
+    if result.is_ok() && trunk() != before {
         if let Err(e) = record_cost(Path::new(&root)) { eprintln!("bon: .bon/cost.toml not updated: {e}"); }
     }
     // Only commands that grant capabilities make directories under /tmp/bon, so
-    // only they clean up; bon run inside a check (help, sbom) never touches it.
-    if SEARCHES.contains(&command) {
-        best_of_n::trusted::cleanup(&["/usr/bin".into(), "/bin".into()]);
-        if let Err(e) = persist(Path::new(&root)) { eprintln!("bon: traces not persisted: {e}"); }
-    }
-    if let Err(e) = result { fail(&e) }
+    // only they clean up and record how they ended; bon run inside a check
+    // (help, sbom) never touches it.
+    best_of_n::trusted::end(Path::new(&root), result)
 }
 
 fn dispatch(root: &str, args: &[String]) -> Result<(), String> {
@@ -122,33 +120,6 @@ fn dispatch(root: &str, args: &[String]) -> Result<(), String> {
         Some(a) if a.starts_with("--") => status(&root, args),
         Some(other) => Err(format!("unknown command {other}\n{USAGE}")),
     }
-}
-
-/// The traces are their own git repository, apart from this one's (they hold
-/// prompts, arguments and outputs): commit what this command added, and push to
-/// the private remote the manifest names in `traces`, if it names one.
-fn persist(root: &Path) -> Result<(), String> {
-    let d = root.join(".bon/traces");
-    if !d.is_dir() { return Ok(()); }
-    let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(root.join(".bon/bon.toml")).map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
-    let remote = manifest.get("traces").and_then(|v| v.as_str());
-    if remote.is_some_and(|r| git(root, &["remote", "get-url", "origin"]).is_ok_and(|o| o == r)) {
-        return Err("traces names this repository's own remote; it must be a private one of its own".into());
-    }
-    if !d.join(".git").exists() {
-        git(&d, &["init", "-q", "-b", "main"])?;
-        std::fs::write(d.join(".gitignore"), "running\n").map_err(|e| e.to_string())?;
-    }
-    if let Some(r) = remote {
-        if git(&d, &["remote", "get-url", "origin"]).is_ok() { git(&d, &["remote", "set-url", "origin", r])?; }
-        else { git(&d, &["remote", "add", "origin", r])?; }
-    }
-    git(&d, &["add", "-A"])?;
-    if git(&d, &["diff", "--cached", "--quiet"]).is_ok() { return Ok(()); }
-    git(&d, &["-c", "user.name=bon", "-c", "user.email=bon@localhost", "commit", "-q", "-m", &format!("bon process {}", std::process::id())])?;
-    if remote.is_some() { git(&d, &["push", "-q", "origin", "main"])?; }
-    Ok(())
 }
 
 /// The working tree as a commit object, untracked files included and nothing
@@ -322,19 +293,17 @@ fn counterexample(root: &str) -> Result<(), String> {
 /// only on spare capacity. Staleness is trunk commits since that kind last ran.
 fn background(root: &str) -> Result<(), String> {
     let r = Path::new(root);
-    // Spare capacity: no bon command running here, and load below the host's jobs.
+    // Spare capacity: no bon command running here, and load below half the cores.
     // A bon process is running while its pid, which names its traces, is alive.
     let traces = r.join(".bon/traces");
     let busy = std::fs::read_dir(&traces).into_iter().flatten().flatten()
         .any(|e| best_of_n::trusted::trace_running(&traces, &e.file_name().to_string_lossy()));
     if busy { println!("busy: a bon command is running here"); return Ok(()); }
-    let jobs = best_of_n::trusted::host_file().ok().and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|d| d.lines().find_map(|l| l.strip_prefix("jobs").and_then(|v| v.trim_start_matches([' ', '=']).trim().parse::<f64>().ok())))
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1.0, |n| (n.get() / 2).max(1) as f64));
+    let half = std::thread::available_parallelism().map_or(1.0, |n| (n.get() / 2).max(1) as f64);
     let load: f64 = Command::new("sysctl").args(["-n", "vm.loadavg"]).output().ok()
         .and_then(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().nth(1)?.parse().ok())
         .unwrap_or(0.0);
-    if load >= jobs { println!("busy: load {load:.1} is at or above jobs {jobs}"); return Ok(()); }
+    if load >= half { println!("busy: load {load:.1} is at or above half the cores, {half}"); return Ok(()); }
     // When each kind last ran, from the traces; never is staler than any.
     let last = |kind: &str, goal: Option<&str>| -> Option<u64> {
         std::fs::read_dir(r.join(".bon/traces")).ok()?.flatten()
@@ -454,15 +423,20 @@ verify = ["false"]
 # Commands whose output must agree, and commands printing an integer for ranking.
 agree = []
 rank = {}
+# Seconds a check may run before it is stopped.
+time = 1800
 
-[[harness]]
-# Replace with a harness (codex or claude), a canonical model id and counts per attempt.
-name = "codex"
-model = "REPLACE_ME"
-n = [1]
+# Each search kind's role, and its width list: attempt a runs n[a] agent
+# processes. The host file's [roles] say what each role runs (its program,
+# client and model). Replace with the roles your host file names.
+[searches]
+code = { role = "REPLACE_ME", n = [1] }
+compaction = { role = "REPLACE_ME", n = [1] }
+queue = { role = "REPLACE_ME", n = [1] }
+counterexample = { role = "REPLACE_ME", n = [1] }
+foil = { role = "REPLACE_ME", n = [1] }
 
 [counterexample]
-harness = [{ name = "codex", model = "REPLACE_ME", n = [1] }]
 # Replace with the test path, build/run commands and test paths on trunk.
 path = "tests/counterexample.rs"
 build = "false"
@@ -694,32 +668,32 @@ fn setup(dry_run: bool, user: Option<String>) -> Result<(), String> {
         println!("as {me}, confirm with: sudo -n -u agent true && echo ok");
     }
     println!("done. Group membership takes effect in a new login session.");
-    println!("Then log the harnesses in as agent: sudo -u agent -i claude, and sudo -u agent -i codex login");
+    println!("Then log the clients your roles name in as agent: sudo -u agent -i claude, and sudo -u agent -i codex login");
     Ok(())
 }
 
-/// The host file `bon setup` writes: where agent's tools live, and the prices
-/// of the models in use. Traces record the prices they were costed at.
+/// The host file `bon setup` writes: where agent's tools live, what each role
+/// runs, and the prices of the models in use. Traces record the prices they
+/// were costed at.
 const HOST_TEMPLATE: &str = r#"# bon's host file: facts about this host, not about any repository.
 # Owned by root; edit with sudo. Every trace records the prices it was costed at.
 
 # Two pools, each shared by every bon process on this host; width per search
-# stays what each repository's bon.toml says. generation: model sessions at
-# once (default 64; a session waits on the model). checks: commands at once,
-# the judge's checks and every cargo an agent process runs. A check slot is a
-# share of memory: by default as many checks run as free memory holds at
-# 1.5 GB each, and no more than 2 threads per core among them, since a check
-# computes only part of its time (it also starts processes, links, writes
-# files, and on macOS waits while the system scans each new binary); the
-# cores are shared among the checks that compute, not divided. check_threads:
-# threads one check may use (default 2). cores and memory_gb: what the default
-# check pool is sized from, this machine's cores and free memory when absent.
+# stays what each repository's bon.toml says. agent_processes: agent
+# processes at once (default 64; one mostly waits on its model).
+# check_processes: commands at once, the judge's checks and every cargo an
+# agent process runs. A check slot is a share of memory: by default as many
+# checks run as free memory holds at 1.5 GB each, and no more than 2 threads
+# per core among them, since a check computes only part of its time (it also
+# starts processes, links, writes files, and on macOS waits while the system
+# scans each new binary); the cores are shared among the checks that compute,
+# not divided. check_threads: threads one check may use (default 2).
 # verdicts: the verdict cache's directory (default /tmp/bon/verdicts). cleanup:
 # "own" removes only a bon process's own working directories when it ends.
 # Another host file (a benchmark's, sized as another machine) is named by
 # BON_HOST: it must be writable by its owner alone, root or the user bon runs as.
-# generation = 64
-# checks = 14
+# agent_processes = 64
+# check_processes = 14
 # check_threads = 2
 
 # PATH for agent processes and checks. Nothing else is inherited. Checks drop
@@ -730,24 +704,61 @@ path = ["/opt/bon/cargo/bin", "/opt/bon/verus", "/opt/homebrew/bin", "/usr/bin",
 rustup_home = "/opt/bon/rustup"
 cargo_home = "/opt/bon/cargo-home"
 
+# What each role a repository's [searches] names runs. program: the argv, run
+# as agent in the working directory with the prompt on its stdin; bon appends
+# `--model <model>`. client: how it reaches its model: claude or codex (that
+# CLI, logged in as agent: sudo -u agent -i claude, sudo -u agent -i codex
+# login), or api (the Messages API, [api] below). model: the canonical id,
+# which keys [prices]. context: the largest prompt, in tokens, the program
+# may send: a one-shot program (bon-sample) assembles no more context than
+# that (the files the task names first, the rest dropped to fit); bon gives
+# it as BON_CONTEXT. Of the agentic CLIs, claude offers a compaction
+# threshold (--autocompact, 100k-1M tokens) in its argv; codex exec offers
+# none. A role with no client and no model reaches none: a stub, which costs
+# nothing.
+[roles.wide]
+program = ["codex", "exec", "--json", "--ephemeral", "--ignore-rules", "--skip-git-repo-check", "--sandbox", "workspace-write", "--add-dir", "/tmp/bon", "--color", "never"]
+client = "codex"
+model = "gpt-6.1-sol"
+
+[roles.deep]
+program = ["claude", "-p", "--output-format", "stream-json", "--verbose", "--setting-sources", "", "--strict-mcp-config", "--no-session-persistence", "--permission-mode", "bypassPermissions", "--max-budget-usd", "5"]
+client = "claude"
+model = "claude-opus-5-5"
+
+# A one-shot program: bon-sample makes one model call, through its client.
+# [roles.one-shot]
+# program = ["/Users/agent/.local/bin/bon-sample"]
+# client = "api"
+# model = "claude-haiku-5-5"
+# context = 80000
+
+# The Messages API, for a role whose client is api: where it is, and the file
+# holding its key, which agent reads.
+# [api]
+# address = "https://api.anthropic.com"
+# key_file = "/Users/agent/.config/bon/anthropic.key"
+
 # Dollars per million tokens, API list prices, by canonical model id. Keep only
 # the models in use. cache_write is the shorter TTL (Claude 5m, OpenAI 30m),
 # cache_write_long the longer (Claude 1h, OpenAI 12h). As of 2026-11-03.
 #
-# A model whose provider bills a large request at a higher rate takes a tier:
+# A model whose provider bills a large prompt at a higher rate takes a tier,
+# which is per prompt, each request on its own:
 #   tier = { above = <prompt tokens>, multiplier = <x>, output_multiplier = <x> }
 # A request whose prompt (input, cache reads and cache writes together) is over
 # `above` tokens is billed `multiplier` times every input-side price and
-# `output_multiplier` (default 1) times output. Copy both from the provider's
+# `output_multiplier` (default 1) times output. Each agent process's trace
+# records how many of its requests were over (`requests_over_tier`). Copy both from the provider's
 # price list; without a tier, every request is billed at the one rate. bon
-# applies it per request where the harness says what each request was (Claude's
+# applies it per request where the program says what each request was (Claude's
 # events, bon-sample); codex's running total cannot say, so it never applies there.
 [prices]
-"claude-haiku-5-5" = { input = 0.10, cached_input = 0.01, output = 0.50, cache_write = 0.125, cache_write_long = 0.20 }
+"claude-haiku-5-5" = { input = 0.10, cached_input = 0.01, output = 0.50, cache_write = 0.125, cache_write_long = 0.20, tier = { above = 100000, multiplier = 5, output_multiplier = 5 } }
+"claude-opus-5-5" = { input = 4.00, cached_input = 0.20, output = 20.00, cache_write = 5.00, cache_write_long = 8.00 }
 "gpt-6.1-sol" = { input = 2.00, cached_input = 0.10, output = 10.00, cache_write = 2.50, cache_write_long = 5.00 }
 "#;
 
-/// The repository's dependencies, trusted code, tools and harness services.
 /// Each place a Rust file outside `declared` (the trusted files and the checks)
 /// skips a proof: `#[verifier::external…]`, `assume(` or `admit(`, as path:line.
 fn holes(root: &Path, declared: &[String]) -> Vec<String> {
@@ -961,12 +972,11 @@ fn sbom(root: &str, check: bool) -> Result<(), String> {
     if !found.is_empty() {
         return Err(format!("a proof is skipped outside trusted code and the checks: {}; prove it, or declare the file trusted in [sbom]", found.join(", ")));
     }
-    let harnesses: Vec<&str> = manifest.get("harness").and_then(|v| v.as_array()).into_iter().flatten()
-        .chain(manifest.get("counterexample").and_then(|v| v.get("harness")).and_then(|v| v.as_array()).into_iter().flatten())
-        .filter_map(|v| v.get("name").and_then(|v| v.as_str())).collect();
+    // The network services the programs call, as [sbom] declares them: name = endpoint.
     let mut services = Vec::new();
-    for (harness, name, endpoint) in [("claude", "Anthropic API", "https://api.anthropic.com"), ("codex", "OpenAI API", "https://api.openai.com")] {
-        if harnesses.contains(&harness) { services.push(serde_json::json!({ "name": name, "endpoints": [endpoint], "group": "harness" })); }
+    for (name, endpoint) in config.and_then(|v| v.get("services")).and_then(|v| v.as_table()).into_iter().flatten() {
+        let endpoint = endpoint.as_str().ok_or_else(|| format!("sbom.services.{name} must be an endpoint string"))?;
+        services.push(serde_json::json!({ "name": name, "endpoints": [endpoint], "group": "program" }));
     }
     let doc = serde_json::json!({
         "bomFormat": "CycloneDX", "specVersion": "1.5", "version": 1,
@@ -1025,6 +1035,17 @@ mod tests {
         assert!(std::fs::read_to_string(work.join(".bon/bon.toml")).unwrap().contains("# editing"));
         assert!(!work.join(".bon/cost.toml").exists());
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn bon_setup_writes_a_host_file_bon_reads() {
+        // queue 53, 54: the template is the new shape, its roles those bon's own manifest names.
+        assert_eq!(best_of_n::trusted::host_shape(HOST_TEMPLATE), Ok(()));
+        let host: toml::Value = toml::from_str(HOST_TEMPLATE).unwrap();
+        assert!(host["roles"].get("wide").is_some() && host["roles"].get("deep").is_some());
+        assert_eq!(host["prices"]["claude-haiku-5-5"]["tier"]["above"].as_integer(), Some(100_000));
+        // The old shape is refused, naming what replaced it.
+        assert!(best_of_n::trusted::host_shape("generation = 8\npath = []").unwrap_err().contains("agent_processes"));
     }
 
     #[test]
@@ -1092,15 +1113,15 @@ mod tests {
         std::fs::write(work.join(".bon/traces/running"), "123").unwrap();
         // Naming the code's own remote is refused, and nothing is committed.
         std::fs::write(work.join(".bon/bon.toml"), format!("traces = {:?}\n", public.to_str().unwrap())).unwrap();
-        assert!(persist(&work).unwrap_err().contains("private"));
+        assert!(best_of_n::trusted::persist(&work).unwrap_err().contains("private"));
         assert!(!work.join(".bon/traces/.git").exists());
         // A private remote of its own gets the traces, and not the running marker.
         std::fs::write(work.join(".bon/bon.toml"), format!("traces = {:?}\n", private.to_str().unwrap())).unwrap();
-        persist(&work).unwrap();
+        best_of_n::trusted::persist(&work).unwrap();
         let files = git(&private, &["ls-tree", "-r", "--name-only", "main"]).unwrap();
         assert_eq!(files, ".gitignore\n123/transitions");
         // Nothing new: no commit.
-        persist(&work).unwrap();
+        best_of_n::trusted::persist(&work).unwrap();
         assert_eq!(git(&private, &["rev-list", "--count", "main"]).unwrap(), "1");
         let _ = std::fs::remove_dir_all(&d);
     }

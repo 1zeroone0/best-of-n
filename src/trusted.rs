@@ -1,6 +1,6 @@
 //! Trusted code. Every function the verified code calls from here is
 //! `#[verifier::external_body]`: Verus does not check it. The TCB is this file,
-//! the entry points (main.rs, view.rs), plus what they run: git, sudo, tar, chmod, the harnesses (`claude`, `codex`),
+//! the entry points (main.rs, view.rs), plus what they run: git, sudo, tar, chmod, the programs the host file's roles name (`claude`, `codex`),
 //! perl (bon's cargo, `CARGO`) and the checks the manifest declares.
 //!
 //! It observes and reports facts; it decides nothing. Every decision is a gate.
@@ -59,24 +59,63 @@ pub struct Config {
     pub path: Vec<String>,
     pub agent_process: AgentProcessConfig,
     pub checks: Checks,
-    pub harness: Vec<Harness>,
+    /// Each search kind's role and width list.
+    pub searches: Searches,
     pub counterexample: Counterexample,
     /// What `bon sbom` lists beyond the lockfiles; its `trusted` list is also every search's trusted code.
     #[serde(default)]
     pub sbom: Option<toml::Value>,
     /// What `bon types` emits for programs: read by it alone.
     #[serde(default)]
-    pub programs: Option<toml::Value>,
+    pub types: Option<toml::Value>,
     /// Prices by canonical model, from the host file.
     #[serde(skip)]
     pub prices: HashMap<String, Price>,
-    /// How many model sessions and how many checks run at once, from the host
-    /// file and bon's environment.
+    /// How many agent processes and how many checks run at once, from the host file.
     #[serde(skip)]
     pub pools: Pools,
     /// RUSTUP_HOME and CARGO_HOME for agent processes and checks, from the host file.
     #[serde(skip)]
     pub toolchain: Vec<(String, String)>,
+    /// What each role runs, from the host file.
+    #[serde(skip)]
+    pub roles: HashMap<String, Role>,
+    /// The Messages API, from the host file: for a role whose client is `api`.
+    #[serde(skip)]
+    pub api: Option<Api>,
+    /// The host file these facts were read from: every program is told it (BON_HOST).
+    #[serde(skip)]
+    pub host: PathBuf,
+    /// The repository: where a tree's lockfile is read (`dependencies`).
+    #[serde(skip)]
+    pub root: PathBuf,
+}
+
+/// Keys bon no longer reads, each with what says it now: a manifest or host
+/// file that still has one is refused with that, not a bare unknown field.
+const RENAMED: [(&str, &str); 8] = [
+    ("harness", "[searches]: each search kind's role and width list n; the host file's [roles] say what each role runs (queue 53)"),
+    ("counterexample.harness", "[searches] counterexample and foil: each a role and its width list n (queue 53)"),
+    ("programs", "[types] (queue 52)"),
+    ("generation", "agent_processes (queue 54)"),
+    ("jobs", "agent_processes (queue 54)"),
+    ("checks", "check_processes (queue 54)"),
+    ("cores", "nothing: set check_processes (queue 54)"),
+    ("memory_gb", "nothing: set check_processes (queue 54)"),
+];
+
+/// The first key of `text` that RENAMED names, as an error naming what replaced it.
+/// `host`: the host file's top level, where `checks` is the old pool's name
+/// (in the manifest, `[checks]` is the checks' table).
+fn renamed(text: &str, host: bool) -> Result<(), String> {
+    let v: toml::Value = toml::from_str(text).map_err(|e| e.to_string())?;
+    for (old, now) in RENAMED {
+        let manifest_key = matches!(old, "harness" | "counterexample.harness" | "programs");
+        if manifest_key == host { continue; }
+        let at = old.split('.').try_fold(&v, |t, part| t.get(part));
+        if at.is_some() { return Err(format!("`{old}` is gone; it is {now}")); }
+    }
+    Ok(())
 }
 
 /// Cargo reads a config.toml from every ancestor of the directory it builds in.
@@ -125,27 +164,18 @@ static CLEANUP_OWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 struct Host {
     path: Vec<String>,
     prices: HashMap<String, Price>,
-    /// How many model sessions run at once, host-wide; width stays what
-    /// bon.toml says. Default 64 (a session waits on the model).
+    /// How many agent processes run at once, host-wide; width stays what
+    /// bon.toml says. Default 64 (an agent process mostly waits on its model).
     #[serde(default)]
-    generation: Option<usize>,
-    /// The generation pool's earlier name, read when `generation` is absent.
-    #[serde(default)]
-    jobs: Option<usize>,
+    agent_processes: Option<usize>,
     /// How many checks run at once, host-wide: the judge's and every cargo an
     /// agent process runs. Default: free memory / 1.5 GB, never more than
     /// 2 * cores / check_threads (see `check_pool`).
     #[serde(default)]
-    checks: Option<usize>,
+    check_processes: Option<usize>,
     /// Threads one check may use (CARGO_BUILD_JOBS, Verus --num-threads). Default 2.
     #[serde(default)]
     check_threads: Option<usize>,
-    /// The cores and free memory (GB) the default check pool is sized from:
-    /// this machine's when absent. Set, the pools are sized as another machine's.
-    #[serde(default)]
-    cores: Option<usize>,
-    #[serde(default)]
-    memory_gb: Option<f64>,
     /// The verdict cache's directory, engineer's alone. Default /tmp/bon/verdicts.
     #[serde(default)]
     verdicts: Option<String>,
@@ -159,6 +189,94 @@ struct Host {
     /// root is root's, only its caches agent's. Required.
     rustup_home: String,
     cargo_home: String,
+    /// What each role a manifest names runs.
+    #[serde(default)]
+    roles: HashMap<String, Role>,
+    /// The Messages API, for a role whose client is `api`.
+    #[serde(default)]
+    api: Option<Api>,
+}
+
+/// What a role runs: its program, the client through which it reaches a
+/// model, the model, and how much of the repository a one-shot program shows
+/// it. A role with no client and no model reaches none: a stub, which costs
+/// nothing and needs no price or login.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Role {
+    /// The argv, run as agent in the working directory with the prompt on its
+    /// stdin; bon appends `--model <model>`.
+    pub program: Vec<String>,
+    /// How the program reaches its model: `claude` or `codex` (that CLI,
+    /// logged in as agent), or `api` (the Messages API, the host's [api]).
+    #[serde(default)]
+    pub client: Option<String>,
+    /// The canonical model id (claude-opus-5-5, gpt-6.1-sol), never an alias:
+    /// passed to the program, it keys the price table and the trace.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The largest prompt, in tokens, the program may send: a one-shot
+    /// program (bon-sample) assembles no more context than that. Given to the
+    /// program as BON_CONTEXT.
+    #[serde(default)]
+    pub context: Option<u64>,
+}
+
+/// The clients a role may name.
+const CLIENTS: [&str; 3] = ["claude", "codex", "api"];
+
+/// The Messages API: where it is, and the file holding its key, which agent reads.
+#[derive(Deserialize, Clone, Debug, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Api {
+    pub address: String,
+    pub key_file: String,
+}
+
+/// Whether `text` is a host file bon reads (`bon setup`'s template is one).
+pub fn host_shape(text: &str) -> Result<(), String> {
+    renamed(text, true)?;
+    toml::from_str::<Host>(text).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// The host file at `file`, read: refused with what replaced a key it still has.
+fn read_host(file: &std::path::Path) -> Result<Host, String> {
+    let shown = file.display().to_string();
+    let text = std::fs::read_to_string(file).map_err(|_| format!("no {shown}; run bon setup"))?;
+    renamed(&text, true).map_err(|e| format!("{shown}: {e}"))?;
+    toml::from_str(&text).map_err(|e| format!("{shown}: {e}; run bon setup"))
+}
+
+/// A manifest's settings with the host file's facts: its pools, PATH, prices,
+/// toolchain, roles and API, and its verdict cache and cleanup. Each role the
+/// manifest names must be the host's, and each model priced.
+fn with_host(mut config: Config, host: Host, file: &std::path::Path) -> Result<Config, String> {
+    let shown = file.display().to_string();
+    config.pools = Pools::of(&host);
+    let _ = VERDICTS.set(host.verdicts.as_ref().map(PathBuf::from));
+    CLEANUP_OWN.store(host.cleanup.as_deref() == Some("own"), std::sync::atomic::Ordering::SeqCst);
+    config.path = host.path;
+    config.prices = host.prices;
+    config.toolchain = vec![("RUSTUP_HOME".to_string(), host.rustup_home), ("CARGO_HOME".to_string(), host.cargo_home)];
+    config.roles = host.roles;
+    config.api = host.api;
+    config.host = file.to_path_buf();
+    for (kind, e) in config.searches.all() {
+        let Some(r) = config.roles.get(&e.role) else {
+            return Err(format!("{shown}: no role {}; bon.toml's [searches] {kind} names it", e.role));
+        };
+        match (&r.client, &r.model) {
+            (None, None) => {}
+            (Some(c), Some(model)) => {
+                if !CLIENTS.contains(&c.as_str()) { return Err(format!("{shown}: role {}: client {c}: one of {}", e.role, CLIENTS.join(", "))); }
+                if c == "api" && config.api.is_none() { return Err(format!("{shown}: role {} reaches the API: [api] needs address and key_file", e.role)); }
+                if !config.prices.contains_key(model) { return Err(format!("{shown}: no price for {model}; a role names canonical model ids")); }
+            }
+            _ => return Err(format!("{shown}: role {}: a client and a model, or neither (a stub)", e.role)),
+        }
+        if r.program.is_empty() { return Err(format!("{shown}: role {}: program is an argv", e.role)); }
+    }
+    Ok(config)
 }
 
 fn trunk_default() -> String { "main".into() }
@@ -188,30 +306,73 @@ pub struct Checks {
     /// Per kind ("code", "compaction"): prints an integer.
     #[serde(default)]
     pub rank: HashMap<String, String>,
+    /// Seconds a check may run before it is stopped: its own cutoff, apart
+    /// from an agent process's time.
+    pub time: u64,
 }
 
+/// Each search kind's entry: the foil's apart from the counterexample's.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
-pub struct Harness {
-    /// "claude", "codex", or "stub" (a program that costs nothing: see `command`).
-    pub name: String,
-    /// The canonical model id (e.g. claude-haiku-5-5, gpt-6.1-sol), never an alias:
-    /// it is passed to the harness and keys the price table. A stub's needs no price.
-    pub model: String,
-    /// The program to run instead of the built-in one: an argv, run as agent in
-    /// the working directory, the prompt on its stdin. Its cost is parsed by
-    /// `name`; a stub's is zero.
-    #[serde(default)]
-    pub command: Option<Vec<String>>,
-    /// Agent processes per attempt: attempt a runs n[a]; a shorter list repeats
-    /// its last value. The longest list sets how many attempts a command makes.
+pub struct Searches {
+    pub code: PerKind,
+    pub compaction: PerKind,
+    pub queue: PerKind,
+    pub counterexample: PerKind,
+    pub foil: PerKind,
+}
+
+impl Searches {
+    /// Every kind's entry, by the kind's name.
+    fn all(&self) -> [(&'static str, &PerKind); 5] {
+        [("code", &self.code), ("compaction", &self.compaction), ("queue", &self.queue),
+         ("counterexample", &self.counterexample), ("foil", &self.foil)]
+    }
+
+    /// The entry of a search of this kind.
+    fn of(&self, kind: &Kind) -> &PerKind {
+        match kind {
+            Kind::Code { .. } => &self.code,
+            Kind::Compaction { .. } => &self.compaction,
+            Kind::Queue { .. } => &self.queue,
+            Kind::Counterexample { .. } => &self.counterexample,
+            Kind::Foil { .. } => &self.foil,
+        }
+    }
+}
+
+/// A search kind's role, which the host file maps to what runs, and its width
+/// list: attempt a runs n[a] agent processes; a shorter list repeats its last
+/// value. The longest list sets how many attempts a command makes. A kind's
+/// role, so its model, is the same on every attempt.
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct PerKind {
+    pub role: String,
     pub n: Vec<usize>,
+}
+
+/// What one agent process runs: its kind's role, as the host file maps it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Program { pub role: String, pub run: Role }
+
+impl Program {
+    /// Its name: the file name of the argv's first word (`codex`, `claude`, `bon-sample`).
+    fn name(&self) -> String {
+        self.run.program.first().map(|p| p.rsplit('/').next().unwrap_or(p).to_string()).unwrap_or_default()
+    }
+
+    /// The argv: the role's program, then `--model <model>` when it reaches one.
+    fn argv(&self) -> Vec<String> {
+        let mut argv = self.run.program.clone();
+        if let Some(m) = &self.run.model { argv.extend(["--model".to_string(), m.clone()]); }
+        argv
+    }
 }
 
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Counterexample {
-    pub harness: Vec<Harness>,
     /// Where an agent process writes its test; under one of `tests`.
     pub path: String,
     /// The command that builds its test: a test that does not build is rejected.
@@ -301,7 +462,7 @@ fn git(root: &std::path::Path, args: &[&str]) -> Result<String, String> { sh(roo
 const AGENT_HOME: &str = "/Users/agent";
 
 /// The PATH checks run with: the host file's, without any directory under
-/// agent's home, so every tool a check runs is the toolchain's. Harness
+/// agent's home, so every tool a check runs is the toolchain's. Agent
 /// processes keep the host file's whole PATH.
 fn checks_path(config: &Config) -> Vec<String> {
     config.path.iter().filter(|d| !std::path::Path::new(d).starts_with(AGENT_HOME)).cloned().collect()
@@ -732,7 +893,7 @@ fn warm(m: &Manifest, head: &str) -> (bool, bool) {
             Some(k) => *WARM.lock().unwrap_or_else(|e| e.into_inner()) = Some(k.clone()),
             None => writable_dir(&build).ok()?,
         }
-        let on = On { tree: tree.clone(), test: None, read: kept_build.is_some() };
+        let on = On { tree: tree.clone(), test: None, cache: if kept_build.is_some() { Cache::Use } else { Cache::Refresh } };
         let run = |v: &String, name: String| run_check_with(config, &on, cores(), &dir, &build, v, &log.join(name)).0;
         let tests = config.checks.test.iter().enumerate().all(|(k, v)| run(v, format!("trunk-test-{k}")));
         let proved = config.checks.verify.iter().enumerate().all(|(k, v)| run(v, format!("trunk-verify-{k}")));
@@ -801,14 +962,14 @@ fn wait_warm(config: &Config) -> Option<PathBuf> {
 const TRUNK_BUILDS: usize = 3;
 
 /// What trunk's build is a function of: trunk's tree, the commands that build
-/// it (the test and verify checks), and the checks' toolchain: their PATH and
-/// homes, the tools' versions and bon's cargo (`toolchain_identity`). None
-/// when git names no tree.
+/// it (the test and verify checks), the checks' toolchain (their PATH and
+/// homes, the tools' versions and bon's cargo: `toolchain_identity`), and the
+/// dependency sources they compile (`dependencies`). None when git names no tree.
 fn trunk_key(config: &Config, tree: &str) -> Option<String> {
     if tree.is_empty() { return None; }
     let mut h = Sha256::new();
-    let id = toolchain_identity(config).1;
-    let parts = [id.as_str(), tree, "test"].into_iter().chain(config.checks.test.iter().map(String::as_str))
+    let (id, dependencies) = (toolchain_identity(config), dependencies(config, tree, true));
+    let parts = [id.as_str(), dependencies.as_str(), tree, "test"].into_iter().chain(config.checks.test.iter().map(String::as_str))
         .chain(["verify"]).chain(config.checks.verify.iter().map(String::as_str));
     for part in parts { h.update(part.as_bytes()); h.update([0u8]); }
     Some(h.finalize().iter().take(16).map(|b| format!("{b:02x}")).collect())
@@ -1066,25 +1227,23 @@ const CHECK_GB: f64 = 1.5;
 const THREADS_PER_CORE: usize = 2;
 
 /// The host's two pools, each shared by every bon process on the host.
-/// Generation: model sessions at once; a session waits on the model, so it is
-/// wide. Checks: commands at once, the judge's checks and every cargo an agent
-/// process runs alike, each given `threads` threads.
+/// agent_processes: agent processes at once; one mostly waits on its model,
+/// so it is wide. check_processes: commands at once, the judge's checks and
+/// every cargo an agent process runs alike, each given `threads` threads.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Pools { pub generation: usize, pub checks: usize, pub threads: usize }
+pub struct Pools { pub agent_processes: usize, pub check_processes: usize, pub threads: usize }
 
-impl Default for Pools { fn default() -> Self { Pools { generation: 1, checks: 1, threads: 1 } } }
+impl Default for Pools { fn default() -> Self { Pools { agent_processes: 1, check_processes: 1, threads: 1 } } }
 
 impl Pools {
-    /// From the host file, then this machine: generation (default 64, or the
-    /// older `jobs`), check_threads (default 2), checks (default `check_pool` of
-    /// the host file's cores and memory_gb, else this machine's).
+    /// From the host file, then this machine: agent_processes (default 64),
+    /// check_threads (default 2), check_processes (default `check_pool` of
+    /// this machine's cores and free memory).
     fn of(host: &Host) -> Pools {
-        let cores = host.cores.filter(|c| *c >= 1).unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |c| c.get()));
+        let cores = std::thread::available_parallelism().map_or(1, |c| c.get());
         let threads = host.check_threads.unwrap_or(2).max(1);
-        let memory = || host.memory_gb.unwrap_or_else(free_memory_gb);
-        let checks = host.checks.unwrap_or_else(|| check_pool(cores, memory(), threads)).max(1);
-        let generation = host.generation.or(host.jobs).unwrap_or(64).max(1);
-        Pools { generation, checks, threads }
+        let check_processes = host.check_processes.unwrap_or_else(|| check_pool(cores, free_memory_gb(), threads)).max(1);
+        Pools { agent_processes: host.agent_processes.unwrap_or(64).max(1), check_processes, threads }
     }
 }
 
@@ -1124,7 +1283,7 @@ fn slots_dir() -> PathBuf {
     DIR.get_or_init(|| {
         let d = base().join("checks");
         if let Err(e) = writable_dir(&d) { eprintln!("bon: {}: {e}", d.display()); }
-        // Made here, so agent opens them read-only (a sandboxed harness may not create files).
+        // Made here, so agent opens them read-only (a sandboxed program may not create files).
         for p in (0..256).map(|k| d.join(format!("check.{k}"))).chain((0..CLONES).map(|k| d.join(format!("clone.{k}")))) {
             if !p.exists() && std::fs::write(&p, "").is_ok() {
                 let _ = std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o644));
@@ -1160,7 +1319,7 @@ struct Held { _slot: Slot, _gate: Ticket }
 /// In-process admission to a pool: how many of this process's threads hold or
 /// seek one of its slots.
 struct Gate { taken: std::sync::Mutex<usize>, freed: std::sync::Condvar }
-static GENERATION_GATE: Gate = Gate { taken: std::sync::Mutex::new(0), freed: std::sync::Condvar::new() };
+static AGENT_PROCESS_GATE: Gate = Gate { taken: std::sync::Mutex::new(0), freed: std::sync::Condvar::new() };
 static CHECK_GATE: Gate = Gate { taken: std::sync::Mutex::new(0), freed: std::sync::Condvar::new() };
 
 struct Ticket(&'static Gate);
@@ -1182,16 +1341,16 @@ impl Drop for Ticket {
 }
 
 impl Slot {
-    /// A model session's slot: generation.<k> in the working directories.
-    fn generation(config: &Config) -> Held {
-        let gate = GENERATION_GATE.enter(config.pools.generation);
-        Held { _slot: Slot::take_in(&base(), "generation", config.pools.generation), _gate: gate }
+    /// An agent process's slot: agent_process.<k> in the working directories.
+    fn agent_process(config: &Config) -> Held {
+        let gate = AGENT_PROCESS_GATE.enter(config.pools.agent_processes);
+        Held { _slot: Slot::take_in(&base(), "agent_process", config.pools.agent_processes), _gate: gate }
     }
 
     /// A check's slot: check.<k> in the slots directory.
     fn check(config: &Config) -> Held {
-        let gate = CHECK_GATE.enter(config.pools.checks);
-        Held { _slot: Slot::take_in(&slots_dir(), "check", config.pools.checks), _gate: gate }
+        let gate = CHECK_GATE.enter(config.pools.check_processes);
+        Held { _slot: Slot::take_in(&slots_dir(), "check", config.pools.check_processes), _gate: gate }
     }
 
     fn take_in(dir: &std::path::Path, name: &str, n: usize) -> Slot {
@@ -1285,7 +1444,7 @@ fn wrapper(config: &Config) -> Option<PathBuf> {
     DIR.get_or_init(|| {
         if is_agent() { return None; }
         let d = scratch("bin");
-        let text = cargo_text().replace("@SLOTS@", &slots_dir().to_string_lossy()).replace("@N@", &config.pools.checks.to_string())
+        let text = cargo_text().replace("@SLOTS@", &slots_dir().to_string_lossy()).replace("@N@", &config.pools.check_processes.to_string())
             .replace("@THREADS@", &config.pools.threads.to_string()).replace("@SELF@", &d.to_string_lossy());
         let p = d.join("cargo");
         let r = std::fs::write(&p, text).and_then(|_| std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)));
@@ -1300,15 +1459,27 @@ fn with_wrapper(config: &Config, path: Vec<String>) -> Vec<String> {
 
 // ── the verdict cache ───────────────────────────────────
 
-/// What a check's result is a function of besides its command and the
-/// toolchain: the tree it runs on and the test written into it (path, bytes).
-/// `read`: whether a cached result may answer; trunk's first run in a bon
-/// process always runs, since candidates' builds start from the build it leaves.
-struct On<'a> { tree: String, test: Option<(&'a str, &'a [u8])>, read: bool }
+/// What a check's result is a function of besides its command, the toolchain
+/// and the dependency sources: the tree it runs on and the test written into
+/// it (path, bytes), and how the cache serves it.
+struct On<'a> { tree: String, test: Option<(&'a str, &'a [u8])>, cache: Cache }
+
+/// How the verdict cache serves a check.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Cache {
+    /// A cached result answers it; a result is kept.
+    Use,
+    /// It runs, and its result is kept: trunk's first run in a bon process,
+    /// whose build every candidate's starts from.
+    Refresh,
+    /// It runs, and nothing is read or kept: what decides a push or a landing,
+    /// checked again from a clean build.
+    Off,
+}
 
 impl On<'_> {
     /// A commit's tree, nothing written into it.
-    fn commit(root: &std::path::Path, commit: &str) -> On<'static> { On { tree: tree_of(root, commit), test: None, read: true } }
+    fn commit(root: &std::path::Path, commit: &str) -> On<'static> { On { tree: tree_of(root, commit), test: None, cache: Cache::Use } }
 }
 
 /// A commit's tree id; empty (never cached) if git cannot say.
@@ -1332,15 +1503,12 @@ fn cache_dir() -> Option<PathBuf> {
     }).clone()
 }
 
-/// The toolchain as the checks see it: the host file, their PATH and homes, the
-/// versions of rustc, cargo and Verus, and bon's cargo. Computed once per PATH.
-fn identity(config: &Config) -> String { toolchain_identity(config).0 }
-
-/// (identity, the same without the host file): what a build is a function of
-/// besides its sources is the second; the host file's other facts (prices,
-/// pools, the verdict cache's place) change no build.
-fn toolchain_identity(config: &Config) -> (String, String) {
-    static MEMO: std::sync::Mutex<Option<HashMap<String, (String, String)>>> = std::sync::Mutex::new(None);
+/// The toolchain as the checks see it: their PATH and homes, the versions of
+/// rustc, cargo and Verus, and bon's cargo. Computed once per PATH. Not the
+/// host file: its other facts (prices, pools, roles, the verdict cache's
+/// place) change no check's result.
+fn toolchain_identity(config: &Config) -> String {
+    static MEMO: std::sync::Mutex<Option<HashMap<String, String>>> = std::sync::Mutex::new(None);
     let path = checks_path(config).join(":");
     let id = format!("{path}\0{:?}", config.toolchain);
     let mut memo = MEMO.lock().unwrap_or_else(|e| e.into_inner());
@@ -1348,19 +1516,110 @@ fn toolchain_identity(config: &Config) -> (String, String) {
         let version = |tool: &str| Command::new(tool).arg("--version").env_clear().env("PATH", &path)
             .envs(config.toolchain.iter().map(|(k, v)| (k.as_str(), v.as_str()))).stdin(Stdio::null()).output()
             .map_or_else(|e| e.to_string(), |o| String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr));
-        let host = host_file().ok().and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
         let (rustc, cargo, verus) = (version("rustc"), version("cargo"), version("verus"));
-        (format!("{id}\0{}\0{rustc}\0{cargo}\0{verus}\0{}", String::from_utf8_lossy(&host), cargo_text()),
-         format!("{id}\0{rustc}\0{cargo}\0{verus}\0{}", cargo_text()))
+        format!("{id}\0{rustc}\0{cargo}\0{verus}\0{}", cargo_text())
     }).clone()
 }
 
+/// The directories holding the dependency sources a lockfile names, under
+/// the checks' cargo home: each registry package as unpacked
+/// (`registry/src/<index>/<name>-<version>`), each git package as checked out
+/// (`git/checkouts/<name>-<hash>/<rev>`). A path dependency is the tree's,
+/// or the toolchain's. Sorted; a package not unpacked yet is its path alone.
+fn dependency_dirs(config: &Config, lockfile: &str) -> Vec<PathBuf> {
+    let Some(home) = config.toolchain.iter().find(|(k, _)| k == "CARGO_HOME").map(|(_, v)| PathBuf::from(v)) else { return Vec::new() };
+    let lock: toml::Value = toml::from_str(lockfile).unwrap_or(toml::Value::Table(Default::default()));
+    let indexes: Vec<PathBuf> = std::fs::read_dir(home.join("registry/src")).into_iter().flatten().flatten().map(|e| e.path()).collect();
+    let checkouts: Vec<PathBuf> = std::fs::read_dir(home.join("git/checkouts")).into_iter().flatten().flatten().map(|e| e.path()).collect();
+    let mut dirs = Vec::new();
+    for p in lock.get("package").and_then(|v| v.as_array()).into_iter().flatten() {
+        let (Some(name), Some(version), Some(source)) = (p.get("name").and_then(|v| v.as_str()), p.get("version").and_then(|v| v.as_str()),
+                                                         p.get("source").and_then(|v| v.as_str())) else { continue };
+        if source.starts_with("registry+") || source.starts_with("sparse+") {
+            dirs.extend(indexes.iter().map(|i| i.join(format!("{name}-{version}"))));
+        } else if let Some((_, rev)) = source.split_once('#') {
+            dirs.extend(checkouts.iter().filter(|c| c.file_name().is_some_and(|n| n.to_string_lossy().starts_with(&format!("{name}-"))))
+                .map(|c| c.join(&rev[..rev.len().min(7)])));
+        }
+    }
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
+/// Every file and link under `dirs`, sorted, with what `f` makes of it.
+fn walk_files(dirs: &[PathBuf], f: &mut dyn FnMut(&std::path::Path, &std::fs::Metadata)) {
+    for d in dirs {
+        let mut stack = vec![d.clone()];
+        let mut files = Vec::new();
+        while let Some(p) = stack.pop() {
+            let Ok(m) = std::fs::symlink_metadata(&p) else { continue };
+            if m.is_dir() { stack.extend(std::fs::read_dir(&p).into_iter().flatten().flatten().map(|e| e.path())); }
+            else { files.push((p, m)); }
+        }
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        for (p, m) in files { f(&p, &m); }
+    }
+}
+
+/// What the checks compile besides the tree and the toolchain: the
+/// dependency sources the tree's Cargo.lock names (`dependency_dirs`), as a
+/// digest of every file's path and bytes (a link's target). The bytes are
+/// read again only when a stat of the files (path, size, inode, change time,
+/// which the kernel sets on every write and no user can set back) differs
+/// from the last one: `fresh` takes that stat now, as a check that runs does
+/// before and after; otherwise the last digest this process took stands. A
+/// tree with no Cargo.lock compiles none: empty.
+fn dependencies(config: &Config, tree: &str, fresh: bool) -> String {
+    use std::os::unix::fs::MetadataExt;
+    type Memo = HashMap<String, (String, String)>;
+    static LOCKFILES: std::sync::Mutex<Option<HashMap<String, Option<String>>>> = std::sync::Mutex::new(None);
+    static DIGESTS: std::sync::Mutex<Option<Memo>> = std::sync::Mutex::new(None);
+    if tree.is_empty() { return String::new(); }
+    // The tree's lockfile, once per tree: its blob, and its text.
+    let blob = LOCKFILES.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).entry(tree.to_string())
+        .or_insert_with(|| git(&config.root, &["rev-parse", "--verify", "-q", &format!("{tree}:Cargo.lock")]).ok()).clone();
+    let Some(blob) = blob else { return String::new() };
+    if !fresh {
+        if let Some((_, d)) = DIGESTS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&blob)) { return d.clone(); }
+    }
+    let dirs = dependency_dirs(config, &git(&config.root, &["cat-file", "blob", &blob]).unwrap_or_default());
+    let mut stat = Sha256::new();
+    for d in &dirs { stat.update(d.as_os_str().as_encoded_bytes()); stat.update([u8::from(d.exists())]); }
+    walk_files(&dirs, &mut |p, m| {
+        stat.update(p.as_os_str().as_encoded_bytes());
+        stat.update(format!("\0{} {} {} {}\0", m.len(), m.ino(), m.ctime(), m.ctime_nsec()).as_bytes());
+    });
+    let stat: String = stat.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    if let Some((s, d)) = DIGESTS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&blob)) {
+        if *s == stat { return d.clone(); }
+    }
+    let mut content = Sha256::new();
+    for d in &dirs { content.update(d.as_os_str().as_encoded_bytes()); content.update([u8::from(d.exists())]); }
+    walk_files(&dirs, &mut |p, m| {
+        content.update(p.as_os_str().as_encoded_bytes());
+        content.update([0u8]);
+        let bytes = if m.file_type().is_symlink() { std::fs::read_link(p).map(|t| t.as_os_str().as_encoded_bytes().to_vec()) } else { std::fs::read(p) };
+        content.update(bytes.unwrap_or_else(|e| e.to_string().into_bytes()));
+        content.update([0u8]);
+    });
+    let digest: String = content.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    DIGESTS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(blob, (stat, digest.clone()));
+    digest
+}
+
 /// The cache key of a command on `on`, or None when it may not be cached: no
-/// tree, or bon running as agent (which may not keep engineer's cache).
+/// tree, or bon running as agent (which may not keep engineer's cache). What
+/// the check sees: the toolchain, the dependency sources, the tree, the test
+/// written into it, and the command.
 fn verdict_key(config: &Config, on: &On, command: &str) -> Option<String> {
+    verdict_key_with(config, on, command, &dependencies(config, &on.tree, false))
+}
+
+fn verdict_key_with(config: &Config, on: &On, command: &str, dependencies: &str) -> Option<String> {
     if on.tree.is_empty() || is_agent() { return None; }
     let mut h = Sha256::new();
-    for part in [identity(config).as_bytes(), on.tree.as_bytes(), command.as_bytes()] { h.update(part); h.update([0u8]); }
+    for part in [toolchain_identity(config).as_bytes(), dependencies.as_bytes(), on.tree.as_bytes(), command.as_bytes()] { h.update(part); h.update([0u8]); }
     if let Some((path, bytes)) = on.test { h.update(path.as_bytes()); h.update([0u8]); h.update(bytes); }
     Some(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
@@ -1382,10 +1641,11 @@ fn store(key: &str, ok: bool, stdout: &str, log: &str) {
 /// Answer from the cache, writing the trace's log as `cached: <key>` and the
 /// log the run wrote. (exit 0, stdout)
 fn answer(config: &Config, on: &On, command: &str, log: &std::path::Path) -> Option<(bool, String)> {
-    if !on.read { return None; }
+    if on.cache != Cache::Use { return None; }
     let key = verdict_key(config, on, command)?;
     let (ok, stdout, text) = cached(&key)?;
     write_trace(log, format!("cached: {key}\n{text}"));
+    decided(on, command, ok, &stdout, log);
     Some((ok, stdout))
 }
 
@@ -1399,8 +1659,9 @@ fn flight(key: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
 
 /// Run a check as agent in a read-only checkout, holding a check slot, with the
 /// pool's threads; or answer it from the cache. A check's exit (0 or not), its
-/// output, and whether its time limit stopped it. Only a run that exited with
-/// a code of its own is cached: never one killed, signalled or not started.
+/// output, and whether its cutoff (`[checks] time`) stopped it. Only a run that
+/// exited with a code of its own is cached: never one killed, signalled or not
+/// started, nor one during which the dependency sources changed.
 fn run_check(config: &Config, on: &On, dir: &std::path::Path, target: &std::path::Path, command: &str, log: &std::path::Path) -> (bool, String, bool) {
     run_check_with(config, on, config.pools.threads, dir, target, command, log)
 }
@@ -1413,6 +1674,10 @@ fn run_check_with(config: &Config, on: &On, threads: usize, dir: &std::path::Pat
     let one = key.as_deref().map(flight);
     let _one = one.as_ref().map(|f| f.lock().unwrap_or_else(|e| e.into_inner()));
     if let Some((ok, out)) = answer(config, on, command, log) { return (ok, out, false); }
+    // The dependency sources as they are now: a run is kept under them.
+    let before = dependencies(config, &on.tree, true);
+    let key = verdict_key_with(config, on, command, &before);
+    if let Some((ok, out)) = key.as_deref().and_then(|_| answer(config, on, command, log)) { return (ok, out, false); }
     // A judge's build is made now, when a check must run in it.
     if !ensure_build(config, target) {
         write_trace(log, format!("no build directory: {} could not be made", target.display()));
@@ -1427,10 +1692,133 @@ fn run_check_with(config: &Config, on: &On, threads: usize, dir: &std::path::Pat
         Some(held) => { if held.is_none() { *held = Some(Slot::check(config)); } None }
         None => Some(Slot::check(config)),
     });
-    let r = supervised(c, None, Duration::from_secs(config.agent_process.time), log, None);
-    if let (Some(k), true) = (&key, r.exited) { store(k, r.ok, &r.stdout, &r.log); }
+    let r = supervised(c, None, Duration::from_secs(config.checks.time), log, None);
+    if r.exited && on.cache != Cache::Off {
+        if let Some(k) = &key { if dependencies(config, &on.tree, true) == before { store(k, r.ok, &r.stdout, &r.log); } }
+        decided(on, command, r.ok, &r.stdout, log);
+    }
     (r.ok && !r.killed, r.stdout, r.killed)
 }
+
+// ── what decided a candidate ────────────────────────────
+
+/// A check's result as it judged a candidate: what it ran on (a tree, and a
+/// test written into it), its command, and what it said (exit 0, stdout).
+#[derive(Clone, Debug, PartialEq)]
+struct Decided { tree: String, test: Option<(String, Vec<u8>)>, command: String, ok: bool, stdout: String }
+
+/// What decided each candidate this bon process judged, by its commit: every
+/// check that ran or was answered while it was judged.
+static DECIDED: std::sync::Mutex<Option<HashMap<String, Vec<Decided>>>> = std::sync::Mutex::new(None);
+
+type Deciding = std::sync::Arc<std::sync::Mutex<Vec<Decided>>>;
+
+thread_local! {
+    /// While a candidate is judged on this thread: where its checks' results go.
+    static DECIDING: std::cell::RefCell<Option<Deciding>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A check's result, kept for the candidate being judged on this thread.
+fn decided(on: &On, command: &str, ok: bool, stdout: &str, _log: &std::path::Path) {
+    DECIDING.with(|d| if let Some(d) = &*d.borrow() {
+        d.lock().unwrap_or_else(|e| e.into_inner()).push(Decided {
+            tree: on.tree.clone(), test: on.test.map(|(p, b)| (p.to_string(), b.to_vec())), command: command.to_string(), ok, stdout: stdout.to_string() });
+    });
+}
+
+/// Run `f` with the checks it runs on this thread, and on the threads it
+/// hands `within`, kept for one candidate; then what they decided.
+fn deciding<T>(f: impl FnOnce() -> T) -> (T, Vec<Decided>) {
+    let d: Deciding = Default::default();
+    let outer = DECIDING.with(|x| x.replace(Some(d.clone())));
+    let r = f();
+    DECIDING.with(|x| x.replace(outer));
+    let out = d.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    (r, out)
+}
+
+/// This thread's collector, for a thread that judges on its behalf.
+fn deciding_here() -> Option<Deciding> { DECIDING.with(|d| d.borrow().clone()) }
+
+/// Run `f` on this thread with `d` as its collector.
+fn within<T>(d: &Option<Deciding>, f: impl FnOnce() -> T) -> T {
+    let outer = DECIDING.with(|x| x.replace(d.clone()));
+    let r = f();
+    DECIDING.with(|x| x.replace(outer));
+    r
+}
+
+/// Keep what decided `commit`.
+fn keep_decided(commit: &str, d: Vec<Decided>) {
+    DECIDED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(commit.to_string(), d);
+}
+
+/// Check again, from a clean build and never from the cache, what decided
+/// `commit` (`DECIDED`): each distinct check once, at once through the check
+/// pool, each in a checkout of its tree (the test written in) and a build
+/// directory that starts empty. Ok when each says what it said when it
+/// decided: the same exit, and for an agree or rank check the same output.
+/// Err names the first that differs: a suspect check. Each run's log is
+/// `recheck-<commit>-<k>` in the trace.
+fn recheck(m: &Manifest, commit: &str) -> Result<(), String> {
+    let config = &m.config;
+    let short = &commit[..commit.len().min(12)];
+    let all = DECIDED.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|d| d.get(commit)).cloned()
+        .ok_or_else(|| format!("nothing this bon process judged decided {short}: it is not checked again, and not pushed"))?;
+    let mut checks: Vec<Decided> = Vec::new();
+    for d in all { if !checks.iter().any(|c| c.tree == d.tree && c.test == d.test && c.command == d.command) { checks.push(d); } }
+    let log = trace_dir(&m.root);
+    let n = RECHECKS.fetch_add(checks.len(), std::sync::atomic::Ordering::SeqCst);
+    let results: Vec<std::sync::Mutex<Option<Result<(bool, String), String>>>> = checks.iter().map(|_| std::sync::Mutex::new(None)).collect();
+    std::thread::scope(|scope| {
+        for (k, d) in checks.iter().enumerate() {
+            let (results, log) = (&results, &log);
+            scope.spawn(move || {
+                let name = format!("recheck.{}", n + k);
+                let dir = scratch(&format!("{name}/{}", repository_name(&m.root)));
+                let build = scratch(&format!("{name}.build/build"));
+                let made = materialize(&m.root, &d.tree, &dir).and_then(|_| {
+                    if let Some((p, bytes)) = &d.test {
+                        let p = dir.join(p);
+                        std::fs::create_dir_all(p.parent().unwrap_or(&dir)).map_err(|e| e.to_string())?;
+                        std::fs::write(&p, bytes).map_err(|e| e.to_string())?;
+                    }
+                    sh(&dir, "chmod", &["-R", "a-w,g+rX", "."])?;
+                    writable_dir(&build)
+                });
+                let on = On { tree: d.tree.clone(), test: d.test.as_ref().map(|(p, b)| (p.as_str(), b.as_slice())), cache: Cache::Off };
+                let r = match made {
+                    Ok(()) => { let (ok, out, _) = run_check(config, &on, &dir, &build, &d.command, &log.join(format!("recheck-{short}-{k}"))); Ok((ok, out)) }
+                    Err(e) => Err(format!("`{}` on tree {} could not be checked again: {e}; nothing was pushed", d.command, d.tree)),
+                };
+                *results[k].lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+                remove_build(config, &build);
+                for p in [dir.parent(), build.parent()].into_iter().flatten() {
+                    let _ = Command::new("chmod").args(["-R", "u+w"]).arg(p).stderr(Stdio::null()).status();
+                    let _ = std::fs::remove_dir_all(p);
+                }
+            });
+        }
+    });
+    let output_matters = |c: &str| config.checks.agree.iter().any(|a| a == c) || config.checks.rank.values().any(|r| r == c);
+    for (k, (d, r)) in checks.iter().zip(results).enumerate() {
+        let Some(r) = r.into_inner().unwrap_or_else(|e| e.into_inner()) else { continue };
+        let (ok, out) = r?;
+        let said = |ok: bool| if ok { "exit 0" } else { "a failure" };
+        if ok != d.ok {
+            return Err(format!("suspect check: `{}` on tree {}: it decided {short} with {}, and from a clean build it says {}; nothing was pushed (log: {})",
+                               d.command, d.tree, said(d.ok), said(ok), log.join(format!("recheck-{short}-{k}")).display()));
+        }
+        if output_matters(&d.command) && out.trim_end() != d.stdout.trim_end() {
+            return Err(format!("suspect check: `{}` on tree {}: from a clean build it prints other than what decided {short}; nothing was pushed (log: {})",
+                               d.command, d.tree, log.join(format!("recheck-{short}-{k}")).display()));
+        }
+    }
+    Ok(())
+}
+
+/// How many re-checks this bon process has run: names their directories.
+static RECHECKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 thread_local! {
     /// While `holding`: Some, and the check slot this thread took at its first
@@ -1452,59 +1840,31 @@ fn holding<T>(f: impl FnOnce() -> T) -> T {
 /// Every core: for the checks something waits on alone.
 fn cores() -> usize { std::thread::available_parallelism().map_or(1, |c| c.get()) }
 
-// ── harnesses ───────────────────────────────────────────
+// ── programs ────────────────────────────────────────────
 
-/// A harness that runs no model: its cost is zero, it needs no price and no login.
-fn is_stub(h: &Harness) -> bool { h.name == STUB }
-const STUB: &str = "stub";
-
-/// The harness's argv. `writable`: directories besides the working directory
-/// the session writes (its build, the check slots), for a harness that
-/// sandboxes its commands to the working directory (codex).
-fn harness_argv(h: &Harness, config: &Config, dir: &std::path::Path, writable: &[PathBuf]) -> Vec<String> {
-    if let Some(c) = &h.command { return c.clone(); }
-    match h.name.as_str() {
-        "claude" => vec![
-            "claude", "-p", "--output-format", "stream-json", "--verbose",
-            "--setting-sources", "", "--strict-mcp-config", "--no-session-persistence",
-            "--permission-mode", "bypassPermissions", "--model", &h.model,
-            "--max-budget-usd", &format!("{}", config.agent_process.limit),
-        ].into_iter().map(String::from).collect(),
-        _ => {
-            let mut argv: Vec<String> = vec![
-                "codex", "exec", "--json", "--ephemeral", "--ignore-rules", "--skip-git-repo-check",
-                "--sandbox", "workspace-write", "--color", "never", "-m", &h.model,
-                "-C", &dir.to_string_lossy(),
-            ].into_iter().map(String::from).collect();
-            for w in writable { argv.push("--add-dir".into()); argv.push(w.to_string_lossy().into()); }
-            argv.push("-".into());
-            argv
-        }
-    }
-}
-
-/// API-equivalent cost in microdollars, from the harness's token counts and the
-/// manifest's price table: (bon's figure, the harness's own figure if it reports
-/// one: a figure of 0, or none, is not reported). Claude: the final `result`
-/// event's `modelUsage`, per model, with 5-minute and 1-hour cache writes apart.
-/// Codex: the last `turn.completed`, whose usage is a running total; cached and
-/// cache-write tokens are part of `input_tokens`.
+/// API-equivalent cost in microdollars, from the program's token counts and the
+/// host's price table: (bon's figure, the program's own figure if it reports
+/// one: a figure of 0, or none, is not reported). Read from what it printed,
+/// whatever its client: a final `result` event (the claude CLI's, and
+/// bon-sample's for every client) carries `modelUsage`, per model, with
+/// 5-minute and 1-hour cache writes apart; else the last `turn.completed`
+/// (the codex CLI's), whose usage is a running total, cached and cache-write
+/// tokens part of `input_tokens`. A program that reaches no model costs nothing.
 ///
 /// A price's tier is per request, so it applies where the output says what each
 /// request's prompt was: a `result` with `"requests": 1` (bon-sample's) is one
 /// request per model; otherwise each of Claude's `assistant` events carries its
 /// request's usage, and a request over the threshold is charged the difference.
 /// Codex's running total says nothing per request: no tier.
-fn generation(h: &Harness, config: &Config, stdout: &str) -> Result<(u64, Option<u64>, HashMap<String, Price>), String> {
+fn generation(p: &Program, config: &Config, stdout: &str) -> Result<(u64, Option<u64>, HashMap<String, Price>), String> {
     let price = |model: &str| config.prices.get(model).ok_or(format!("no price for model {model}"));
     let rate = |p: &Price, input: f64, cached: f64, output: f64, write: f64, write_long: f64| {
         (input * p.input + cached * p.cached_input + output * p.output + write * p.cache_write + write_long * p.cache_write_long) / 1_000_000.0
     };
-    if is_stub(h) { return Ok((0, Some(0), HashMap::new())); }
+    let Some(model) = &p.run.model else { return Ok((0, Some(0), HashMap::new())) };
     let reported = |theirs: f64| Some(micro(theirs)).filter(|c| *c > 0);
-    let mut events = stdout.lines().rev().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok());
-    if h.name == "claude" {
-        let Some(r) = events.find(|v| v["type"] == "result") else { return Err("no result event".into()) };
+    let events: Vec<serde_json::Value> = stdout.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).collect();
+    if let Some(r) = events.iter().rev().find(|v| v["type"] == "result") {
         let one_request = r["requests"].as_u64() == Some(1);
         let mut ours = 0.0;
         let mut theirs = 0.0;
@@ -1522,7 +1882,7 @@ fn generation(h: &Harness, config: &Config, stdout: &str) -> Result<(u64, Option
         if !one_request {
             // Each request once, by message id: a message's blocks repeat its usage.
             let mut requests: HashMap<String, (String, serde_json::Value)> = HashMap::new();
-            for v in stdout.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).filter(|v| v["type"] == "assistant") {
+            for v in events.iter().filter(|v| v["type"] == "assistant") {
                 let m = &v["message"];
                 if let (Some(id), Some(model)) = (m["id"].as_str(), m["model"].as_str()) { requests.insert(id.into(), (model.into(), m["usage"].clone())); }
             }
@@ -1536,15 +1896,93 @@ fn generation(h: &Harness, config: &Config, stdout: &str) -> Result<(u64, Option
                 ours += rate(&p.at(input + cached + w5 + w1), input, cached, output, w5, w1) - rate(p, input, cached, output, w5, w1);
             }
         }
-        Ok((micro(ours), reported(theirs), used))
-    } else {
-        let Some(t) = events.find(|v| v["type"] == "turn.completed") else { return Err("no turn.completed event".into()) };
-        let n = |k: &str| t["usage"][k].as_f64().unwrap_or(0.0);
-        let (cached, write) = (n("cached_input_tokens"), n("cache_write_input_tokens"));
-        let input = (n("input_tokens") - cached - write).max(0.0);
-        let p = price(&h.model)?;
-        Ok((micro(rate(p, input, cached, n("output_tokens"), write, 0.0)), None, HashMap::from([(h.model.clone(), p.clone())])))
+        return Ok((micro(ours), reported(theirs), used));
     }
+    let Some(t) = events.iter().rev().find(|v| v["type"] == "turn.completed") else { return Err("no result or turn.completed event".into()) };
+    let n = |k: &str| t["usage"][k].as_f64().unwrap_or(0.0);
+    let (cached, write) = (n("cached_input_tokens"), n("cache_write_input_tokens"));
+    let input = (n("input_tokens") - cached - write).max(0.0);
+    let p = price(model)?;
+    Ok((micro(rate(p, input, cached, n("output_tokens"), write, 0.0)), None, HashMap::from([(model.clone(), p.clone())])))
+}
+
+/// How many of the program's requests sent a prompt over its model's tier
+/// threshold (`Tier::above`), read as `generation` reads them: a `result`
+/// with `"requests": 1` is one request per model, else each `assistant`
+/// event is one. A model with no tier has no threshold to pass. None where
+/// the output says nothing per request (codex's running total).
+fn over_tier(p: &Program, config: &Config, stdout: &str) -> Option<u64> {
+    if p.run.model.is_none() { return Some(0); }
+    let events: Vec<serde_json::Value> = stdout.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).collect();
+    let above = |model: &str| config.prices.get(model).and_then(|p| p.tier.as_ref()).map(|t| t.above as f64);
+    let r = events.iter().rev().find(|v| v["type"] == "result")?;
+    if r["requests"].as_u64() == Some(1) {
+        return Some(r["modelUsage"].as_object().into_iter().flatten().filter(|(model, u)| {
+            let n = |k: &str| u[k].as_f64().unwrap_or(0.0);
+            let w = n("cacheCreationEphemeral5mInputTokens") + n("cacheCreationEphemeral1hInputTokens");
+            let w = if w == 0.0 { n("cacheCreationInputTokens") } else { w };
+            above(model).is_some_and(|a| n("inputTokens") + n("cacheReadInputTokens") + w > a)
+        }).count() as u64);
+    }
+    let mut requests: HashMap<String, (String, serde_json::Value)> = HashMap::new();
+    for v in events.iter().filter(|v| v["type"] == "assistant") {
+        let m = &v["message"];
+        if let (Some(id), Some(model)) = (m["id"].as_str(), m["model"].as_str()) { requests.insert(id.into(), (model.into(), m["usage"].clone())); }
+    }
+    Some(requests.values().filter(|(model, u)| {
+        let n = |k: &str| u[k].as_f64().unwrap_or(0.0);
+        above(model).is_some_and(|a| n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens") > a)
+    }).count() as u64)
+}
+
+/// How many lines and bytes of a failing check's output a prompt carries.
+const FAILING_LINES: usize = 150;
+const FAILING_BYTES: usize = 12_000;
+
+/// The informative part of a check's log (`supervised`'s: an exit line, then
+/// its stdout and stderr): each error and each failed test first (a block from
+/// a line starting `error` or `---- ` to the next blank line), then, if there
+/// is none, the output's last lines; bounded by FAILING_LINES and FAILING_BYTES.
+fn informative(log: &str) -> String {
+    let log = log.strip_prefix("cached: ").map_or(log, |t| t.split_once('\n').map_or("", |(_, r)| r));
+    let exit = log.lines().next().unwrap_or("").to_string();
+    let output: Vec<&str> = log.lines().filter(|l| !l.starts_with("seconds: ") && !l.starts_with("exit: ") && !l.starts_with("--- std")).collect();
+    let mut errors: Vec<&str> = Vec::new();
+    let mut inside = false;
+    for l in &output {
+        let t = l.trim_start();
+        if t.starts_with("error") || t.starts_with("---- ") { inside = true; }
+        if inside { errors.push(l); }
+        if l.trim().is_empty() { inside = false; }
+    }
+    let lines: Vec<&str> = if errors.is_empty() { output[output.len().saturating_sub(FAILING_LINES)..].to_vec() } else { errors };
+    let mut out = format!("{exit}\n");
+    for (k, l) in lines.iter().enumerate() {
+        if k >= FAILING_LINES || out.len() + l.len() > FAILING_BYTES {
+            out.push_str(&format!("[… {} more lines]\n", lines.len() - k));
+            break;
+        }
+        out.push_str(l);
+        out.push('\n');
+    }
+    out
+}
+
+/// Trunk's checks that reject it, from their logs in this bon process's trace
+/// (`trunk-test-K`, `trunk-verify-K`): each one's command and the informative
+/// part of its output. Empty when none failed or none was logged.
+fn failing(m: &Manifest) -> String {
+    let d = trace_dir(&m.root);
+    let mut out = String::new();
+    for (kind, list) in [("test", &m.config.checks.test), ("verify", &m.config.checks.verify)] {
+        for (k, command) in list.iter().enumerate() {
+            let Ok(log) = std::fs::read_to_string(d.join(format!("trunk-{kind}-{k}"))) else { continue };
+            let text = informative(&log);
+            if text.starts_with("exit: 0\n") { continue; }
+            out.push_str(&format!("This check fails on trunk: {command}\n{text}"));
+        }
+    }
+    out
 }
 
 /// What a push changes, for the agent processes that test it: the spec's diff
@@ -1573,8 +2011,22 @@ fn aim(m: &Manifest, kind: &Kind, target: Option<&Search>, start: &str) -> Strin
             }
             None => String::new(),
         },
+        // Which check rejects trunk and why: its command and its errors, so
+        // the agent process knows what fails before it reads a file.
+        Kind::Code { .. } => failing(m),
         _ => String::new(),
     }
+}
+
+/// What a search of this kind may not change besides the checks: the build
+/// configuration, bon's directory (but for a queue search, which writes the
+/// queue there), the trusted code, and for code and foils the counterexamples' tests.
+fn fixed(kind: &Kind, config: &Config) -> Vec<String> {
+    let trusted = config.sbom.as_ref().and_then(|s| s.get("trusted")).and_then(|t| t.as_array()).into_iter().flatten()
+        .filter_map(|p| p.as_str().map(String::from));
+    let bon = (!matches!(kind, Kind::Queue { .. })).then(|| format!("{BON}/"));
+    let tests = if matches!(kind, Kind::Code { .. } | Kind::Foil { .. }) { config.counterexample.tests.clone() } else { Vec::new() };
+    BUILD.iter().map(|p| p.to_string()).chain(bon).chain(trusted).chain(tests).collect()
 }
 
 fn prompt(kind: &Kind, config: &Config, aim: &str) -> String {
@@ -1607,9 +2059,10 @@ fn prompt(kind: &Kind, config: &Config, aim: &str) -> String {
     format!(
         "You are working in a copy of a repository, with no git. {goal}{aim}\n\
          The checks are {paths:?}: read and run them, never change them; you cannot.\n\
+         Never change {fixed:?} either: a change to any of them is refused or rejected.\n\
          The tests run with: {test:?}. Verus runs with: {verify:?}.\n\
          {scope} Reply with one line saying what you changed.",
-        paths = config.checks.paths, test = config.checks.test, verify = config.checks.verify,
+        paths = config.checks.paths, test = config.checks.test, verify = config.checks.verify, fixed = fixed(kind, config),
         // Smallest change is right for every kind but compaction, whose goal is to remove.
         scope = if matches!(kind, Kind::Compaction { .. }) { "" } else { "Make the smallest change that does this." })
 }
@@ -1627,23 +2080,12 @@ pub fn manifest(root: &str, commit: &Commit) -> (r: Result<Manifest, String>) {
     let root = PathBuf::from(root);
     let c: String = commit.iter().collect();
     let text = git(&root, &["show", &format!("{c}:{MANIFEST}")]).map_err(|_| format!("no {MANIFEST} at trunk's head; commit one"))?;
+    renamed(&text, false).map_err(|e| format!("{MANIFEST}: {e}"))?;
     let mut config: Config = toml::from_str(&text).map_err(|e| format!("{MANIFEST}: {e}"))?;
+    config.root = root.clone();
     let file = host_file()?;
-    let shown = file.display().to_string();
-    let host: Host = toml::from_str(&std::fs::read_to_string(&file).map_err(|_| format!("no {shown}; run bon setup"))?)
-        .map_err(|e| format!("{shown}: {e}; run bon setup"))?;
-    config.pools = Pools::of(&host);
-    let _ = VERDICTS.set(host.verdicts.as_ref().map(PathBuf::from));
-    CLEANUP_OWN.store(host.cleanup.as_deref() == Some("own"), std::sync::atomic::Ordering::SeqCst);
-    config.path = host.path;
-    config.prices = host.prices;
-    config.toolchain = vec![("RUSTUP_HOME".to_string(), host.rustup_home), ("CARGO_HOME".to_string(), host.cargo_home)];
+    let config = with_host(config, read_host(&file)?, &file)?;
     cargo_config_guard(&root)?;
-    for h in config.harness.iter().chain(config.counterexample.harness.iter()) {
-        if !is_stub(h) && !config.prices.contains_key(&h.model) {
-            return Err(format!("{shown}: no price for {}; bon.toml must name canonical model ids", h.model));
-        }
-    }
     Ok(Manifest { config, root })
 }
 
@@ -1672,44 +2114,54 @@ pub fn trusted(m: &Manifest) -> Vec<Path> {
         .map(|a| a.iter().filter_map(|p| p.as_str()).map(|p| p.chars().collect()).collect()).unwrap_or_default()
 }
 
-/// The harnesses a search of this kind draws from.
+/// What a search of this kind runs: its role, as the host file maps it.
 #[verifier::external]
-fn harnesses(config: &Config, kind: &Kind) -> Vec<Harness> {
-    match kind {
-        Kind::Counterexample { .. } | Kind::Foil { .. } => config.counterexample.harness.clone(),
-        _ => config.harness.clone(),
-    }
+fn program(config: &Config, kind: &Kind) -> Program {
+    let role = config.searches.of(kind).role.clone();
+    let run = config.roles.get(&role).cloned().unwrap_or(Role { program: Vec::new(), client: None, model: None, context: None });
+    Program { role, run }
 }
 
-/// How many agent processes one harness runs on attempt `a`.
+/// How many agent processes a width list runs on attempt `a`.
 #[verifier::external]
-fn at(h: &Harness, a: usize) -> usize { h.n.get(a).or(h.n.last()).copied().unwrap_or(0) }
+fn at(n: &[usize], a: usize) -> usize { n.get(a).or(n.last()).copied().unwrap_or(0) }
 
-/// Whether a harness's own status command says it is logged in, from its exit and output.
+/// Whether a client's own status command says it is logged in, from its exit and output.
 #[verifier::external]
-fn logged_in(harness: &str, ok: bool, out: &str) -> bool {
-    match harness {
+fn logged_in(client: &str, ok: bool, out: &str) -> bool {
+    match client {
         "claude" => out.contains("\"loggedIn\": true") || out.contains("\"loggedIn\":true"),
         _ => ok && out.contains("Logged in"),
     }
 }
 
-/// Before a search: each harness bon.toml names is logged in as agent, checked
-/// the way bon runs it. If one is not, the command that fixes it. (queue 32)
+/// Before a search: the client of each role bon.toml names can reach its
+/// model as agent, checked the way bon runs it: the claude and codex CLIs are
+/// logged in, and agent can read the API's key file. If one cannot, the
+/// command that fixes it. (queue 32)
 #[verifier::external_body]
-pub fn harnesses_logged_in(m: &Manifest) -> (r: Result<(), String>) {
-    let mut names: Vec<&str> = m.config.harness.iter().chain(m.config.counterexample.harness.iter())
-        .filter(|h| !is_stub(h)).map(|h| h.name.as_str()).collect();
-    names.sort(); names.dedup();
-    for name in names {
-        let argv: Vec<String> = match name { "claude" => vec!["claude".into(), "auth".into(), "status".into()], _ => vec!["codex".into(), "login".into(), "status".into()] };
+pub fn programs_logged_in(m: &Manifest) -> (r: Result<(), String>) {
+    let mut clients: Vec<String> = m.config.searches.all().iter()
+        .filter_map(|(_, e)| m.config.roles.get(&e.role).and_then(|r| r.client.clone())).collect();
+    clients.sort(); clients.dedup();
+    for client in clients {
+        let argv: Vec<String> = match client.as_str() {
+            "claude" => vec!["claude".into(), "auth".into(), "status".into()],
+            "codex" => vec!["codex".into(), "login".into(), "status".into()],
+            _ => {
+                let key = m.config.api.as_ref().map(|a| a.key_file.clone()).unwrap_or_default();
+                let readable = as_agent(&m.config, std::path::Path::new("/tmp"), &[], &["test".into(), "-s".into(), key.clone()]).status().is_ok_and(|s| s.success());
+                if !readable { return Err(format!("agent cannot read the API's key file {key}; write the key there, readable by agent")); }
+                continue;
+            }
+        };
         let (ok, out) = match as_agent(&m.config, std::path::Path::new("/tmp"), &[], &argv).output() {
             Ok(o) => (o.status.success(), String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr)),
             Err(e) => (false, e.to_string()),
         };
-        if !logged_in(name, ok, &out) {
-            let fix = match name { "claude" => "sudo -u agent -i claude", _ => "sudo -u agent -i codex login" };
-            return Err(format!("{name} is not logged in as agent; run: {fix}"));
+        if !logged_in(&client, ok, &out) {
+            let fix = match client.as_str() { "claude" => "sudo -u agent -i claude", _ => "sudo -u agent -i codex login" };
+            return Err(format!("{client} is not logged in as agent; run: {fix}"));
         }
     }
     Ok(())
@@ -1718,13 +2170,13 @@ pub fn harnesses_logged_in(m: &Manifest) -> (r: Result<(), String>) {
 /// How many agent processes a search of this kind runs on attempt `a`.
 #[verifier::external_body]
 pub fn width(m: &Manifest, kind: &Kind, a: usize) -> usize {
-    harnesses(&m.config, kind).iter().map(|h| at(h, a)).sum()
+    at(&m.config.searches.of(kind).n, a)
 }
 
 /// How many attempts a command makes: the longest width list.
 #[verifier::external_body]
 pub fn attempts(m: &Manifest) -> usize {
-    m.config.harness.iter().chain(m.config.counterexample.harness.iter()).map(|h| h.n.len()).max().unwrap_or(1)
+    m.config.searches.all().iter().map(|(_, e)| e.n.len()).max().unwrap_or(1)
 }
 
 /// A candidate commit kept in its trace as a git bundle, so it outlives git's
@@ -1773,6 +2225,9 @@ pub fn land(m: &Manifest, x: &Search, i: usize, t: Option<&Search>) -> (r: Resul
             }
         }
     }
+    // The verdicts that make it land, checked again from a clean build; a
+    // differing one stops the bon process, landing nothing.
+    if let Err(e) = recheck(m, &commit) { stop(&m.root, &e) }
     let (r, tr) = (&m.config.remote, &m.config.trunk);
     git(&m.root, &["push", "--quiet", r, &format!("{commit}:refs/heads/{tr}")])
         .map_err(|e| format!("blocked: {r}/{tr} moved during the search, so the test could not land; run it again ({e})"))?;
@@ -1933,15 +2388,15 @@ pub fn run(m: &Manifest, kind: &Kind, a: usize, start: &Commit, target: Option<&
     if let Ok(mut l) = LATEST.lock() { *l = label(kind); }
     let start: String = start.iter().collect();
     if !WARMING.load(std::sync::atomic::Ordering::SeqCst) { warm(m, &start); }
-    let hs = harnesses(&m.config, kind);
-    let slots: Vec<Harness> = hs.iter().flat_map(|h| std::iter::repeat(h.clone()).take(at(h, a))).collect();
+    let p = program(&m.config, kind);
+    let slots: Vec<Program> = std::iter::repeat(p).take(width(m, kind, a)).collect();
     let traces = trace_dir(&m.root).join(search.to_string());
     traced(&traces, std::fs::create_dir_all(&traces));
-    // Every agent process at once: the generation pool bounds the model
-    // sessions, the check pool their checks and the judge's. The first leads:
-    // the rest start once it has written its first output (or ended), so a
-    // harness whose sessions open alike (the same prompt, the same files)
-    // has its prefix cached by the first, and the rest read it.
+    // Every agent process at once: the agent_processes pool bounds them, the
+    // check pool their checks and the judge's. The first leads: the rest
+    // start once it has written its first output (or ended), so a program
+    // whose sessions open alike (the same prompt, the same files) has its
+    // prefix cached by the first, and the rest read it.
     let out: Vec<std::sync::Mutex<(Option<Candidate>, u64)>> = slots.iter().map(|_| std::sync::Mutex::new((None, 0))).collect();
     let spoke = std::sync::Arc::new(Signal::default());
     std::thread::scope(|scope| {
@@ -1961,12 +2416,17 @@ pub fn run(m: &Manifest, kind: &Kind, a: usize, start: &Commit, target: Option<&
     out.into_iter().map(|c| c.into_inner().unwrap_or((None, 0))).collect()
 }
 
-/// The selected candidate is pushed to the remote's trunk. The push is
-/// fast-forward only: if the remote's trunk moved, it is refused and nothing
-/// changes. The engineer's branch is left alone: pull to follow. (TCB: git, the remote)
+/// The selected candidate is pushed to the remote's trunk. What decided it
+/// (its test and verify checks, and its agree and rank checks) is checked
+/// again first, from a clean build and never from the verdict cache: a result
+/// that differs stops the bon process with that check named suspect, and
+/// nothing is pushed. The push is fast-forward only: if the remote's trunk
+/// moved, it is refused and nothing changes. The engineer's branch is left
+/// alone: pull to follow. (TCB: git, the remote)
 #[verifier::external_body]
 pub fn push(m: &Manifest, commit: &Commit) -> (r: Result<(), String>) {
     let c: String = commit.iter().collect();
+    if let Err(e) = recheck(m, &c) { stop(&m.root, &e) }
     let (r, t) = (&m.config.remote, &m.config.trunk);
     git(&m.root, &["push", "--quiet", r, &format!("{c}:refs/heads/{t}")])
         .map_err(|e| format!("blocked: {r}/{t} moved during the search, so the push was refused; run it again ({e})"))?;
@@ -2034,6 +2494,8 @@ pub fn report(m: &Manifest, s: &Search, verified: usize, generation: u64, starte
         "agent_processes": n, "limit": s.limit as f64 / 1_000_000.0, "verified": verified, "generation_dollars": generation,
         "seconds": hours * 3600.0, "rate": rate, "background": background, "time_dollars": time,
         "cost_per_verified_candidate": per,
+        // The host's semaphores in force for this search.
+        "host": { "agent_processes": m.config.pools.agent_processes, "check_processes": m.config.pools.check_processes },
     });
     append(&d.join("searches.jsonl"), &summary);
     // The search as the gates saw it, in the kernel's words (little-endian),
@@ -2194,6 +2656,64 @@ pub fn agree_outputs(m: &Manifest, commit: &Commit) -> (r: Result<Vec<Hash>, Str
 
 /// bon's directory in a repository, and what it tracks there.
 pub const BON: &str = ".bon";
+
+// ── how a bon process that searches ends ────────────────
+
+/// A bon process that searches ends here: on an error it records `exited:
+/// <error>` in its transitions (unless its last line, a block, already says
+/// why it ended), removes its working directories, commits its traces (and
+/// pushes them to the manifest's `traces` remote), and exits 1 with the error;
+/// otherwise 0.
+pub fn end(root: &std::path::Path, result: Result<(), String>) -> ! {
+    if let Err(e) = &result { record_exited(root, e); }
+    cleanup(&["/usr/bin".into(), "/bin".into()]);
+    if let Err(e) = persist(root) { eprintln!("bon: traces not persisted: {e}"); }
+    let _ = std::io::stdout().flush();
+    match result {
+        Ok(()) => std::process::exit(0),
+        Err(e) => { eprintln!("bon: {e}"); std::process::exit(1) }
+    }
+}
+
+/// Stop the bon process on an error found where nothing may go on (a suspect
+/// check before a push): as `end` does.
+pub fn stop(root: &std::path::Path, error: &str) -> ! { end(root, Err(error.to_string())) }
+
+/// `exited: <error>`, on one line, appended to this bon process's transitions,
+/// unless their last line is a block, which already says why it ended.
+pub fn record_exited(root: &std::path::Path, error: &str) {
+    let file = trace_dir(root).join("transitions");
+    let last = std::fs::read_to_string(&file).unwrap_or_default().lines().last().unwrap_or("").to_string();
+    if last.starts_with("blocked") { return; }
+    append_line(&file, &format!("exited: {}", error.split_whitespace().collect::<Vec<_>>().join(" ")));
+}
+
+/// The traces are their own git repository, apart from this one's (they hold
+/// prompts, arguments and outputs): commit what this command added, and push to
+/// the private remote the manifest names in `traces`, if it names one.
+pub fn persist(root: &std::path::Path) -> Result<(), String> {
+    let d = root.join(".bon/traces");
+    if !d.is_dir() { return Ok(()); }
+    let manifest: toml::Value = toml::from_str(&std::fs::read_to_string(root.join(".bon/bon.toml")).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let remote = manifest.get("traces").and_then(|v| v.as_str());
+    if remote.is_some_and(|r| git(root, &["remote", "get-url", "origin"]).is_ok_and(|o| o == r)) {
+        return Err("traces names this repository's own remote; it must be a private one of its own".into());
+    }
+    if !d.join(".git").exists() {
+        git(&d, &["init", "-q", "-b", "main"])?;
+        std::fs::write(d.join(".gitignore"), "running\n").map_err(|e| e.to_string())?;
+    }
+    if let Some(r) = remote {
+        if git(&d, &["remote", "get-url", "origin"]).is_ok() { git(&d, &["remote", "set-url", "origin", r])?; }
+        else { git(&d, &["remote", "add", "origin", r])?; }
+    }
+    git(&d, &["add", "-A"])?;
+    if git(&d, &["diff", "--cached", "--quiet"]).is_ok() { return Ok(()); }
+    git(&d, &["-c", "user.name=bon", "-c", "user.email=bon@localhost", "commit", "-q", "-m", &format!("bon process {}", std::process::id())])?;
+    if remote.is_some() { git(&d, &["push", "-q", "origin", "main"])?; }
+    Ok(())
+}
 pub const MANIFEST: &str = ".bon/bon.toml";
 pub const QUEUE: &str = ".bon/queue.tsv";
 pub const SBOM: &str = ".bon/sbom.json";
@@ -2202,15 +2722,15 @@ pub const SBOM: &str = ".bon/sbom.json";
 pub const BUILD: [&str; 2] = [".cargo/", "build.rs"];
 
 /// One agent process: generate, capture, observe. Its log goes under `trace`.
-/// `spoke`: the leader's signal, set at its harness's first output.
+/// `spoke`: the leader's signal, set at its program's first output.
 #[allow(clippy::too_many_arguments)]
-fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Harness, start: &str,
+fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, p: &Program, start: &str,
                  target: Option<&Search>, foils: Option<&Search>, trace: &std::path::Path, spoke: Option<std::sync::Arc<Signal>>) -> (Option<Candidate>, u64) {
     traced(trace, std::fs::create_dir_all(trace));
     let config = &m.config;
-    // A generation slot for the session and its setup alone: never held while
-    // its candidate is judged.
-    let session = Slot::generation(config);
+    // An agent process's slot for its program and its setup alone: never
+    // held while its candidate is judged.
+    let session = Slot::agent_process(config);
     let dir = scratch(&format!("{search}.{index}/{}", repository_name(&m.root)));
     // What each kind may not write, made structural: code, the counterexamples' tests.
     let (writable, more) = match kind {
@@ -2243,45 +2763,57 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
         Ok(b) => b,
         Err(e) => { write_trace(&trace.join("error"), e); return (None, 0); }
     };
-    let argv = harness_argv(h, config, &dir, &[build.clone(), slots_dir()]);
+    let argv = p.argv();
     write_trace(&trace.join("argv"), argv.join(" "));
     let text = prompt(kind, config, &aim(m, kind, target, start));
     write_trace(&trace.join("prompt"), &text);
     let b = build.to_string_lossy().to_string();
     let mut env = vec![("CARGO_TARGET_DIR", b.clone()), ("BON_BUILD", b), ("CARGO_BUILD_JOBS", config.pools.threads.to_string())];
     if let Some(w) = warm { env.push(("BON_WARM", w.to_string_lossy().to_string())); }
+    // What the role says beyond its argv, for a program that reaches its model
+    // itself (bon-sample): its client, its context budget, and the host file
+    // that holds its client's facts.
+    env.push(("BON_HOST", config.host.to_string_lossy().to_string()));
+    if let Some(c) = &p.run.client { env.push(("BON_CLIENT", c.clone())); }
+    if let Some(c) = p.run.context { env.push(("BON_CONTEXT", c.to_string())); }
     let c = as_agent_on(config, &with_wrapper(config, config.path.clone()), &dir, &env, &argv);
-    let run = supervised(c, Some(text), Duration::from_secs(config.agent_process.time), &trace.join("harness"), spoke);
+    let run = supervised(c, Some(text), Duration::from_secs(config.agent_process.time), &trace.join("program"), spoke);
     let (stdout, killed) = (run.stdout, run.killed);
     drop(session);
     remove_build(config, &build);
     // Without token counts there is no measured cost: charge the whole limit.
-    let (spent, harness_cost, prices) = generation(h, config, &stdout).unwrap_or((micro(config.agent_process.limit), None, HashMap::new()));
+    let (spent, program_cost, prices) = generation(p, config, &stdout).unwrap_or((micro(config.agent_process.limit), None, HashMap::new()));
     if killed { write_trace(&trace.join("killed"), "time limit"); }
     // The judge's build: a fresh clone of trunk's, which no agent process wrote,
     // made only if a check must run (the verdict cache may answer them all).
     let judge = judge_build(&format!("{search}.{index}.judge/build"));
-    let candidate = capture(m, kind, search, index, start, &dir, &judge, target, foils, trace)
-        .map_err(|e| { write_trace(&trace.join("error"), &e); }).ok();
+    // What its checks said is kept with it, for a push or landing to check again.
+    let (captured, decided) = deciding(|| capture(m, kind, search, index, start, &dir, &judge, target, foils, trace));
+    if let Ok(c) = &captured { keep_decided(&c.commit.iter().collect::<String>(), decided); }
+    let candidate = captured.map_err(|e| { write_trace(&trace.join("error"), &e); }).ok();
     remove_build(config, &judge);
     let _ = Command::new("chmod").args(["-R", "-N"]).arg(&dir).stderr(Stdio::null()).status();
     let _ = std::fs::remove_dir_all(&dir);
     let text = |v: &[char]| v.iter().collect::<String>();
     // Lines added and removed, apart: the kernel's diff is their sum.
-    let (added, removed) = candidate.as_ref().map_or((0, 0), |c| added_removed(&m.root, &text(&c.base), &text(&c.commit)));
+    let (lines_added, lines_removed) = candidate.as_ref().map_or((0, 0), |c| added_removed(&m.root, &text(&c.base), &text(&c.commit)));
     let facts = serde_json::json!({
-        "harness": h.name, "model": h.model, "generation_microdollars": spent, "killed": killed,
-        "harness_generation_microdollars": harness_cost,
+        // The program by its name (its argv is the trace's `argv`), its role and its client.
+        "program": p.name(), "role": p.role, "client": p.run.client, "model": p.run.model,
+        "generation_microdollars": spent, "killed": killed,
+        "program_generation_microdollars": program_cost,
+        // Its requests over its model's tier threshold, where the output says each request's prompt.
+        "requests_over_tier": over_tier(p, config, &stdout),
         // The prices this cost was computed at, so the trace stays true when the host's prices change.
         "prices": prices,
-        // The harness's own figure differs from bon's by more than 5%: the price table or the harness is stale.
-        "price_mismatch": harness_cost.is_some_and(|c| (c as f64 - spent as f64).abs() > 0.05 * (c.max(spent).max(1) as f64)),
+        // The program's own figure differs from bon's by more than 5%: the price table or the program is stale.
+        "price_mismatch": program_cost.is_some_and(|c| (c as f64 - spent as f64).abs() > 0.05 * (c.max(spent).max(1) as f64)),
         "over_limit": spent > micro(config.agent_process.limit),
         "candidate": candidate.as_ref().map(|c| serde_json::json!({
             "commit": text(&c.commit), "base": text(&c.base), "accepted": c.accepted, "proved": c.proved,
-            "changed": c.changed.iter().map(|p| text(p)).collect::<Vec<_>>(), "diff": c.diff, "added": added, "removed": removed, "rank": c.rank,
-            "out": c.out.iter().map(|h| h.0).collect::<Vec<u64>>(), "accepts": c.accepts, "accepts_foils": c.accepts_foils, "rejects_counterexamples": c.rejects_counterexamples,
-            "measured": c.measured, "added_paths": c.added.iter().map(|p| text(p)).collect::<Vec<_>>(),
+            "changed": c.changed.iter().map(|p| text(p)).collect::<Vec<_>>(), "diff": c.diff, "lines_added": lines_added, "lines_removed": lines_removed,
+            "rank": c.rank, "out": c.out.iter().map(|h| h.0).collect::<Vec<u64>>(), "accepts": c.accepts, "accepts_foils": c.accepts_foils,
+            "rejects_counterexamples": c.rejects_counterexamples, "measured": c.measured, "added": c.added.iter().map(|p| text(p)).collect::<Vec<_>>(),
             "intents": c.intents.iter().map(|(q, i)| (q, text(i))).collect::<Vec<_>>(),
         })),
     });
@@ -2341,7 +2873,7 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
     let cdir = scratch(&format!("{search}.{index}.check/{}", repository_name(root)));
     check_directory(root, &commit, &cdir)?;
     // Keyed by the candidate's tree: a byte-identical sibling's checks run once.
-    let on = On { tree: tree.clone(), test: None, read: true };
+    let on = On { tree: tree.clone(), test: None, cache: Cache::Use };
     let trunk_proved = TRUNK_PROVED.load(std::sync::atomic::Ordering::SeqCst);
     let mut accepted = true;
     let mut proved = true;
@@ -2562,7 +3094,7 @@ fn verdict(m: &Manifest, commit: &str, test: &[u8], build: &std::path::Path, log
 fn verdict_in(m: &Manifest, commit: &str, test: &[u8], build: &dyn Fn() -> Option<PathBuf>, log: &std::path::Path) -> Option<bool> {
     let config = &m.config;
     let (make, run) = (&config.counterexample.build, &config.counterexample.run);
-    let on = On { tree: tree_of(&m.root, commit), test: Some((config.counterexample.path.as_str(), test)), read: true };
+    let on = On { tree: tree_of(&m.root, commit), test: Some((config.counterexample.path.as_str(), test)), cache: Cache::Use };
     match answer(config, &on, make, &log.with_extension("build")) {
         Some((false, _)) => return None,
         Some((true, _)) => if let Some((ok, _)) = answer(config, &on, run, log) { return Some(ok) },
@@ -2583,7 +3115,8 @@ fn verdict_in(m: &Manifest, commit: &str, test: &[u8], build: &dyn Fn() -> Optio
         (!killed).then_some(ok)
     });
     let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
-    let _ = std::fs::remove_dir_all(&dir);
+    // Its owner's directory too: `test.<hash>` is this verdict's alone.
+    if let Some(d) = dir.parent() { let _ = std::fs::remove_dir_all(d); }
     result
 }
 
@@ -2604,9 +3137,11 @@ fn verdicts(m: &Manifest, tasks: &[(String, PathBuf)], test: &[u8], name: &str) 
     }
     let out: Vec<std::sync::Mutex<Option<bool>>> = tasks.iter().map(|_| std::sync::Mutex::new(None)).collect();
     let next = std::sync::atomic::AtomicUsize::new(0);
+    // These verdicts decide the candidate whose test this is, like its own thread's.
+    let deciding = deciding_here();
     std::thread::scope(|scope| {
-        for _ in 0..config.pools.checks.max(1).min(groups.len()) {
-            scope.spawn(|| loop {
+        for _ in 0..config.pools.check_processes.max(1).min(groups.len()) {
+            scope.spawn(|| within(&deciding, || loop {
                 let g = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let Some((_, group)) = groups.get(g) else { break };
                 for &i in group {
@@ -2623,7 +3158,7 @@ fn verdicts(m: &Manifest, tasks: &[(String, PathBuf)], test: &[u8], name: &str) 
                     *out[i].lock().unwrap() = verdict_in(m, commit, test, &make, log);
                     if let Some(d) = made.into_inner().unwrap() { remove_build(config, &d); }
                 }
-            });
+            }));
         }
     });
     out.into_iter().map(|r| r.into_inner().unwrap_or(None)).collect()
@@ -2647,9 +3182,9 @@ fn tested_tree(kind: &Kind, target: Option<&Search>, start: &str) -> String {
 fn test_on(m: &Manifest, commit: &str, test: &[u8], build: &std::path::Path, command: &str, log: &std::path::Path) -> bool {
     let config = &m.config;
     let (path, run) = (&config.counterexample.path, command);
-    let dir = scratch(&format!("test.{}/{}", hash(&format!("{commit}{log:?}")), repository_name(&m.root)));
-    let on = On { tree: tree_of(&m.root, commit), test: Some((path.as_str(), test)), read: true };
+    let on = On { tree: tree_of(&m.root, commit), test: Some((path.as_str(), test)), cache: Cache::Use };
     if let Some((ok, _)) = answer(config, &on, run, log) { return ok; }
+    let dir = scratch(&format!("test.{}/{}", hash(&format!("{commit}{log:?}")), repository_name(&m.root)));
     let accepts = match materialize(&m.root, commit, &dir) {
         Ok(()) => {
             let p = dir.join(path);
@@ -2661,7 +3196,7 @@ fn test_on(m: &Manifest, commit: &str, test: &[u8], build: &std::path::Path, com
         Err(_) => false,
     };
     let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
-    let _ = std::fs::remove_dir_all(&dir);
+    if let Some(d) = dir.parent() { let _ = std::fs::remove_dir_all(d); }
     accepts
 }
 
@@ -2760,19 +3295,40 @@ mod tests {
     fn the_pools_are_sized_from_the_host_file() {
         let host = |keys: &str| -> Host { toml::from_str(&format!("{keys}\npath = []\nrustup_home = \"\"\ncargo_home = \"\"\n[prices]\n")).unwrap() };
         // queue 26: width stays what bon.toml says; the pools bound what runs at once.
-        // A host file sized as a 24 GB, 12-core laptop with 16 GB free: memory holds 10 checks of 2 threads; 64 sessions.
-        assert_eq!(Pools::of(&host("cores = 12\nmemory_gb = 16")), Pools { generation: 64, checks: 10, threads: 2 });
-        // Memory binds before cores: 7 GB free holds 4 checks.
-        assert_eq!(Pools::of(&host("cores = 14\nmemory_gb = 7")).checks, 4);
-        // Threads bind before memory: 14 cores take 28 threads, 14 checks of 2.
-        assert_eq!(Pools::of(&host("cores = 14\nmemory_gb = 45")).checks, 14);
-        // Every knob; at least one of each.
-        assert_eq!(Pools::of(&host("generation = 500\nchecks = 3\ncheck_threads = 4")), Pools { generation: 500, checks: 3, threads: 4 });
-        assert_eq!(Pools::of(&host("cores = 1\nmemory_gb = 0.5\ncheck_threads = 0")).checks, 1);
-        // The older `jobs` is the generation pool.
-        assert_eq!(Pools::of(&host("jobs = 7\nchecks = 5\ncheck_threads = 3")), Pools { generation: 7, checks: 5, threads: 3 });
-        assert_eq!(check_pool(14, 40.0, 2), 14);
+        // queue 54: the host file sets both pools directly.
+        assert_eq!(Pools::of(&host("agent_processes = 500\ncheck_processes = 3\ncheck_threads = 4")), Pools { agent_processes: 500, check_processes: 3, threads: 4 });
+        // At least one of each.
+        assert_eq!(Pools::of(&host("agent_processes = 0\ncheck_processes = 0\ncheck_threads = 0")), Pools { agent_processes: 1, check_processes: 1, threads: 1 });
+        // Unset: 64 agent processes, and as many checks as this machine's free memory and cores hold.
+        let unset = Pools::of(&host(""));
+        assert_eq!((unset.agent_processes, unset.threads), (64, 2));
+        assert!(unset.check_processes >= 1);
+        // The default pool: a 24 GB, 12-core laptop with 16 GB free holds 10 checks of 2 threads;
+        // memory binds before cores (7 GB holds 4); threads before memory (14 cores take 14 of 2).
+        assert_eq!((check_pool(12, 16.0, 2), check_pool(14, 7.0, 2), check_pool(14, 45.0, 2)), (10, 4, 14));
         assert_eq!(check_pool(14, 40.0, 1), 26);
+        assert_eq!(check_pool(1, 0.5, 1), 1);
+    }
+
+    #[test]
+    fn a_host_file_or_manifest_with_a_key_bon_no_longer_reads_names_what_replaced_it() {
+        // queue 54: the pools' old names and the sizes they were computed from.
+        for (old, now) in [("generation = 8", "agent_processes"), ("jobs = 8", "agent_processes"), ("checks = 8", "check_processes"),
+                           ("cores = 8", "check_processes"), ("memory_gb = 8.0", "check_processes")] {
+            let e = renamed(&format!("{old}\npath = []"), true).unwrap_err();
+            assert!(e.contains(&format!("`{}` is gone", old.split(' ').next().unwrap())) && e.contains(now), "{e}");
+        }
+        // queue 52, 53: a manifest of harnesses, or of [programs].
+        let e = renamed("[[harness]]\nname = \"codex\"\nmodel = \"m\"\nn = [1]\n", false).unwrap_err();
+        assert!(e.contains("`harness` is gone") && e.contains("[searches]"), "{e}");
+        let e = renamed("[counterexample]\nharness = [{ name = \"claude\", model = \"m\", n = [2] }]\n", false).unwrap_err();
+        assert!(e.contains("`counterexample.harness` is gone") && e.contains("[searches]"), "{e}");
+        assert!(renamed("[programs]\nfrom = []\n", false).unwrap_err().contains("[types]"));
+        // A manifest's [checks] table is no host key.
+        assert!(renamed("[checks]\npaths = []\n", false).is_ok());
+        // bon's own manifest is in the new shape.
+        assert!(renamed(include_str!("../.bon/bon.toml"), false).is_ok());
+        assert!(toml::from_str::<Config>(include_str!("../.bon/bon.toml")).is_ok());
     }
 
     #[test]
@@ -2879,19 +3435,19 @@ mod tests {
     #[test]
     fn a_check_is_cached_by_tree_command_and_test_and_never_when_killed() {
         let mut c = config();
-        c.agent_process.time = 2;
+        c.checks.time = 2;
         let tree = format!("test-tree-{}-{:?}", std::process::id(), Instant::now());
-        let on = On { tree: tree.clone(), test: None, read: true };
+        let on = On { tree: tree.clone(), test: None, cache: Cache::Use };
         // Run as agent (bon's judge runs bon's own tests so), bon keeps no cache at all.
         if is_agent() { assert_eq!(verdict_key(&c, &on, "echo hi"), None); return; }
         let key = verdict_key(&c, &on, "echo hi").unwrap();
         // Each part of the key changes it; no tree, no key.
         assert_ne!(Some(key.clone()), verdict_key(&c, &on, "echo ho"));
-        assert_ne!(Some(key.clone()), verdict_key(&c, &On { tree: tree.clone() + "x", test: None, read: true }, "echo hi"));
-        assert_ne!(Some(key.clone()), verdict_key(&c, &On { tree: tree.clone(), test: Some(("t.rs", b"a")), read: true }, "echo hi"));
-        assert_ne!(verdict_key(&c, &On { tree: tree.clone(), test: Some(("t.rs", b"a")), read: true }, "echo hi"),
-                   verdict_key(&c, &On { tree: tree.clone(), test: Some(("t.rs", b"b")), read: true }, "echo hi"));
-        assert_eq!(verdict_key(&c, &On { tree: String::new(), test: None, read: true }, "echo hi"), None);
+        assert_ne!(Some(key.clone()), verdict_key(&c, &On { tree: tree.clone() + "x", test: None, cache: Cache::Use }, "echo hi"));
+        assert_ne!(Some(key.clone()), verdict_key(&c, &On { tree: tree.clone(), test: Some(("t.rs", b"a")), cache: Cache::Use }, "echo hi"));
+        assert_ne!(verdict_key(&c, &On { tree: tree.clone(), test: Some(("t.rs", b"a")), cache: Cache::Use }, "echo hi"),
+                   verdict_key(&c, &On { tree: tree.clone(), test: Some(("t.rs", b"b")), cache: Cache::Use }, "echo hi"));
+        assert_eq!(verdict_key(&c, &On { tree: String::new(), test: None, cache: Cache::Use }, "echo hi"), None);
         let d = std::env::temp_dir().join(format!("bon-cache-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
@@ -2908,7 +3464,7 @@ mod tests {
         assert!(!ok && killed);
         assert!(cached(&verdict_key(&c, &on, "/bin/sleep 30").unwrap()).is_none());
         // Not read where reading is off: it runs again.
-        let off = On { tree: tree.clone(), test: None, read: false };
+        let off = On { tree: tree.clone(), test: None, cache: Cache::Refresh };
         let _ = run_check(&c, &off, here, here, "echo hi", &d.join("third"));
         assert!(std::fs::read_to_string(d.join("third")).unwrap().starts_with("exit: 0"));
         for k in ["echo hi", "exit 3"] { let _ = std::fs::remove_file(cache_dir().unwrap().join(verdict_key(&c, &on, k).unwrap())); }
@@ -3062,33 +3618,90 @@ mod tests {
         assert_eq!(c, vec!["checks/", ".cargo/", "build.rs"]);
     }
 
-    fn config() -> Config {
-        let mut c: Config = toml::from_str(r#"
-            limit = 5.0
-            rate = 150
-            agent_process = { limit = 0.5, time = 60 }
-            checks = { paths = ["checks/"], test = ["true"], verify = ["true"] }
-            harness = [{ name = "claude", model = "claude-haiku-5-5", n = [2, 4] }]
-            counterexample = { harness = [{ name = "codex", model = "gpt-6.1-sol", n = [1] }], path = "tests/c.sh", build = "true", run = "sh tests/c.sh", tests = ["tests/"] }
-        "#).unwrap();
-        let d: Host = toml::from_str(r#"
-            path = ["/usr/bin"]
+    /// The tests' host file: no prices beyond these, a verdict cache of their own (never /tmp/bon's).
+    const TEST_HOST: &str = r#"
+            path = ["/usr/bin", "/bin"]
             rustup_home = "/opt/bon/rustup"
             cargo_home = "/opt/bon/cargo-home"
+            [roles.wide]
+            program = ["claude", "-p"]
+            client = "claude"
+            model = "claude-haiku-5-5"
+            [roles.deep]
+            program = ["codex", "exec"]
+            client = "codex"
+            model = "gpt-6.1-sol"
+            [roles.stub]
+            program = ["/bin/sh", ".bon/stub.sh"]
             [prices]
             "claude-haiku-5-5" = { input = 0.10, cached_input = 0.01, output = 0.50, cache_write = 0.125, cache_write_long = 0.20 }
             "gpt-6.1-sol" = { input = 2.00, cached_input = 0.10, output = 10.00, cache_write = 2.50, cache_write_long = 5.00 }
-        "#).unwrap();
-        c.path = d.path;
-        c.prices = d.prices;
-        c
+        "#;
+
+    const TEST_MANIFEST: &str = r#"
+            limit = 5.0
+            rate = 150
+            agent_process = { limit = 0.5, time = 60 }
+            checks = { paths = ["checks/"], test = ["true"], verify = ["true"], time = 60 }
+            counterexample = { path = "tests/c.sh", build = "true", run = "sh tests/c.sh", tests = ["tests/"] }
+            [searches]
+            code = { role = "wide", n = [2, 4] }
+            compaction = { role = "wide", n = [2] }
+            queue = { role = "stub", n = [1] }
+            counterexample = { role = "deep", n = [1] }
+            foil = { role = "deep", n = [3] }
+        "#;
+
+    /// The tests' verdict cache: under the system's temporary directory, so
+    /// bon's tests leave nothing in /tmp/bon (queue 86).
+    fn test_verdicts() -> PathBuf { std::env::temp_dir().join(format!("bon-test-verdicts-{}", std::process::id())) }
+
+    fn config() -> Config {
+        let host: Host = toml::from_str(&format!("verdicts = {:?}\n{TEST_HOST}", test_verdicts().to_string_lossy())).unwrap();
+        with_host(toml::from_str(TEST_MANIFEST).unwrap(), host, std::path::Path::new("/test/host.toml")).unwrap()
+    }
+
+    fn program_of(c: &Config, role: &str) -> Program { Program { role: role.into(), run: c.roles[role].clone() } }
+
+    #[test]
+    fn each_kind_runs_its_own_role_and_the_host_says_what_runs() {
+        // queue 53: one entry per kind, the foil apart from the counterexample; the host maps role to program.
+        let c = config();
+        let goal = Commit(vec![]);
+        let p = |k: &Kind| program(&c, k);
+        assert_eq!(p(&Kind::Code { goal: goal.clone() }).role, "wide");
+        assert_eq!(p(&Kind::Queue { goal: "t.vtt".chars().collect() }).role, "stub");
+        assert_eq!(p(&Kind::Counterexample { goal: None }).role, "deep");
+        let m = Manifest { config: c.clone(), root: PathBuf::from(".") };
+        let foil = Kind::Foil { goal: crate::gates::AgentProcess { search: 0, index: 0 }, changed: vec![] };
+        assert_eq!((width(&m, &Kind::Counterexample { goal: None }, 0), width(&m, &foil, 0)), (1, 3));
+        // The argv: the role's program, then its model; a stub's alone.
+        assert_eq!(program_of(&c, "wide").argv(), ["claude", "-p", "--model", "claude-haiku-5-5"]);
+        assert_eq!(program_of(&c, "stub").argv(), ["/bin/sh", ".bon/stub.sh"]);
+        assert_eq!((program_of(&c, "wide").name(), program_of(&c, "stub").name()), ("claude".to_string(), "sh".to_string()));
+        // A role the manifest names must be the host's; a client and a model, or neither; each model priced.
+        let host = |extra: &str| -> Host { toml::from_str(&format!("{TEST_HOST}{extra}")).unwrap() };
+        let manifest = |m: &str| -> Config { toml::from_str(&TEST_MANIFEST.replace("role = \"stub\"", m)).unwrap() };
+        let f = std::path::Path::new("/h");
+        assert!(with_host(manifest("role = \"missing\""), host(""), f).err().unwrap().contains("no role missing"));
+        let odd = "[roles.odd]\nprogram = [\"x\"]\nmodel = \"claude-haiku-5-5\"\n";
+        assert!(with_host(manifest("role = \"odd\""), toml::from_str(&TEST_HOST.replace("[prices]", &format!("{odd}[prices]"))).unwrap(), f).err().unwrap().contains("or neither"));
+        let unpriced = "[roles.odd]\nprogram = [\"x\"]\nclient = \"claude\"\nmodel = \"claude-opus-5-5\"\n";
+        assert!(with_host(manifest("role = \"odd\""), toml::from_str(&TEST_HOST.replace("[prices]", &format!("{unpriced}[prices]"))).unwrap(), f).err().unwrap().contains("no price for claude-opus-5-5"));
+        let api = "[roles.odd]\nprogram = [\"bon-sample\"]\nclient = \"api\"\nmodel = \"claude-haiku-5-5\"\ncontext = 1000\n";
+        assert!(with_host(manifest("role = \"odd\""), toml::from_str(&TEST_HOST.replace("[prices]", &format!("{api}[prices]"))).unwrap(), f).err().unwrap().contains("[api]"));
+        let with_api = format!("[api]\naddress = \"http://127.0.0.1:1\"\nkey_file = \"/k\"\n{api}[prices]");
+        assert!(with_host(manifest("role = \"odd\""), toml::from_str(&TEST_HOST.replace("[prices]", &with_api)).unwrap(), f).is_ok());
+        let _ = host;
+        // Unknown keys are refused in a role, as everywhere.
+        assert!(toml::from_str::<Role>("program = [\"x\"]\nname = \"codex\"").is_err());
     }
 
     #[test]
     fn widths_repeat_their_last_value_and_set_the_attempts() {
         let c = config();
-        assert_eq!((at(&c.harness[0], 0), at(&c.harness[0], 1), at(&c.harness[0], 5)), (2, 4, 4));
-        assert_eq!(at(&c.counterexample.harness[0], 3), 1);
+        assert_eq!((at(&c.searches.code.n, 0), at(&c.searches.code.n, 1), at(&c.searches.code.n, 5)), (2, 4, 4));
+        assert_eq!(at(&c.searches.counterexample.n, 3), 1);
     }
 
     #[test]
@@ -3102,18 +3715,18 @@ mod tests {
         // The modelUsage of the first end-to-end run; Claude Code reported $0.00245213.
         let c = config();
         let out = r#"{"type":"result","total_cost_usd":0.00245213,"modelUsage":{"claude-haiku-5-5":{"inputTokens":6,"outputTokens":527,"cacheReadInputTokens":49463,"cacheCreationInputTokens":8467,"cacheCreationEphemeral5mInputTokens":0,"cacheCreationEphemeral1hInputTokens":8467,"costUSD":0.00245213}}}"#;
-        let (ours, theirs, prices) = generation(&c.harness[0], &c, out).unwrap();
+        let (ours, theirs, prices) = generation(&program_of(&c, "wide"), &c, out).unwrap();
         assert_eq!((ours, theirs), (2452, Some(2452)));
         assert_eq!(prices["claude-haiku-5-5"], c.prices["claude-haiku-5-5"]);
     }
 
     #[test]
-    fn a_harness_cost_of_zero_or_none_is_not_reported() {
+    fn a_program_cost_of_zero_or_none_is_not_reported() {
         // bon-sample's usage line for the api and codex transports, which know no price.
         let c = config();
         for usage in [r#""costUSD":0.0"#, r#""costUSD":0"#, r#""x":0"#] {
             let out = format!(r#"{{"type":"result","requests":1,"modelUsage":{{"claude-haiku-5-5":{{"inputTokens":10,"outputTokens":1000,"cacheReadInputTokens":0,{usage}}}}}}}"#);
-            assert_eq!(generation(&c.harness[0], &c, &out).unwrap(), (501, None, HashMap::from([("claude-haiku-5-5".into(), c.prices["claude-haiku-5-5"].clone())])));
+            assert_eq!(generation(&program_of(&c, "wide"), &c, &out).unwrap(), (501, None, HashMap::from([("claude-haiku-5-5".into(), c.prices["claude-haiku-5-5"].clone())])));
         }
     }
 
@@ -3124,7 +3737,7 @@ mod tests {
         let tiered: Price = toml::from_str("input = 0.10\ncached_input = 0.01\noutput = 0.50\ncache_write = 0.125\ncache_write_long = 0.20\ntier = { above = 100000, multiplier = 5 }").unwrap();
         assert_eq!(tiered.tier, Some(Tier { above: 100_000, multiplier: 5.0, output_multiplier: 1.0 }));
         c.prices.insert("claude-haiku-5-5".into(), tiered);
-        let h = &c.harness[0];
+        let h = &program_of(&c, "wide");
         // One request (bon-sample's), 150k-token prompt: input side 5x, output 1x.
         let one = r#"{"type":"result","requests":1,"modelUsage":{"claude-haiku-5-5":{"inputTokens":10,"cacheReadInputTokens":150000,"outputTokens":1000}}}"#;
         assert_eq!(generation(h, &c, one).unwrap().0, 5 * (1 + 1500) + 500);
@@ -3137,12 +3750,16 @@ mod tests {
 {"type":"result","modelUsage":{"claude-haiku-5-5":{"inputTokens":16,"cacheReadInputTokens":151000,"outputTokens":1100,"costUSD":0.008}}}"#;
         // Base 1.6 + 1510 + 550, and request a's input side again four times over.
         assert_eq!(generation(h, &c, session).unwrap(), (8066, Some(8000), HashMap::from([("claude-haiku-5-5".into(), c.prices["claude-haiku-5-5"].clone())])));
+        // How many requests passed the threshold: one of the session's two, the one-shot's one; codex says nothing per request.
+        assert_eq!((over_tier(h, &c, session), over_tier(h, &c, one)), (Some(1), Some(1)));
+        assert_eq!(over_tier(h, &c, &one.replace("150000", "1000")), Some(0));
+        assert_eq!(over_tier(h, &c, r#"{"type":"turn.completed","usage":{"input_tokens":5}}"#), None);
     }
 
     #[test]
     fn codex_cost_is_the_last_running_total_with_cached_input_apart() {
         let c = config();
-        let h = &c.counterexample.harness[0];
+        let h = &program_of(&c, "deep");
         let out = r#"{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":0,"output_tokens":0}}
 {"type":"turn.completed","usage":{"input_tokens":1000000,"cached_input_tokens":500000,"cache_write_input_tokens":0,"output_tokens":100000}}"#;
         // 500k input at $2, 500k cached at $0.10, 100k output at $10.
@@ -3196,6 +3813,8 @@ mod tests {
     fn a_test_lands_on_trunk_by_itself() {
         let (remote, work, base, test) = landing_fixture("lands");
         let m = Manifest { config: config(), root: work.clone() };
+        // What decided it, as capture keeps it: here, nothing to check again.
+        keep_decided(&test, Vec::new());
         land(&m, &rejecting_trunk(&base, &test), 0, None).unwrap();
         let rev = |dir: &std::path::Path, r: &str| git(dir, &["rev-parse", r]).unwrap();
         assert_eq!(rev(&remote, "main"), test, "the remote's trunk is the test's commit");
@@ -3218,6 +3837,7 @@ mod tests {
         }
         let moved = git(&remote, &["rev-parse", "main"]).unwrap();
         let m = Manifest { config: config(), root: work.clone() };
+        keep_decided(&test, Vec::new());
         let e = land(&m, &rejecting_trunk(&base, &test), 0, None).unwrap_err();
         assert!(e.contains("moved"), "{e}");
         assert_eq!(git(&remote, &["rev-parse", "main"]).unwrap(), moved, "the remote's trunk is unchanged");
@@ -3249,6 +3869,7 @@ mod tests {
         // The foil and counterexample searches ran after it.
         RUNS.store(3, std::sync::atomic::Ordering::SeqCst);
         let m = Manifest { config: config(), root: work.clone() };
+        keep_decided(&test, Vec::new());
         land(&m, &x, 0, Some(&tested)).unwrap();
         assert!(trace_dir(&work).join("0").join("0").join("candidate.bundle").is_file(), "under search 0, the tested one");
         assert!(!trace_dir(&work).join("1").exists(), "never under the foil search");
@@ -3454,7 +4075,7 @@ mod tests {
     }
 
     #[test]
-    fn a_harness_is_logged_in_only_when_its_status_says_so() {
+    fn a_client_is_logged_in_only_when_its_status_says_so() {
         // queue 32.
         assert!(logged_in("claude", true, "{\n  \"loggedIn\": true,\n}"));
         assert!(!logged_in("claude", true, "{\n  \"loggedIn\": false\n}"));
@@ -3463,20 +4084,177 @@ mod tests {
     }
 
     #[test]
-    fn a_stub_harness_runs_its_command_and_costs_nothing() {
+    fn a_stub_program_runs_its_argv_and_costs_nothing() {
+        let c = config();
+        let stub = program_of(&c, "stub");
+        assert_eq!(stub.argv(), ["/bin/sh", ".bon/stub.sh"]);
+        assert_eq!(generation(&stub, &c, "anything at all").unwrap(), (0, Some(0), HashMap::new()));
+        // A program that reaches a model still needs its token counts.
+        assert!(generation(&program_of(&c, "deep"), &c, "anything at all").is_err());
+        // Its cost is read from what it printed, whatever its client: bon-sample
+        // reaching codex prints a result event, as the claude CLI does.
+        let deep = program_of(&c, "deep");
+        let result = r#"{"type":"result","requests":1,"modelUsage":{"gpt-6.1-sol":{"inputTokens":1000000,"outputTokens":0}}}"#;
+        assert_eq!(generation(&deep, &c, result).unwrap().0, 2_000_000);
+    }
+
+    #[test]
+    fn what_decides_a_push_is_checked_again_from_a_clean_build_and_a_differing_verdict_is_suspect() {
+        // queue 65: a planted verdict that a clean build does not give stops the push; a true one does not.
+        let (_remote, work, base, _test) = landing_fixture("recheck");
+        let mut config = config();
+        config.checks.agree = vec!["cat a".into()];
+        let m = Manifest { config, root: work.clone() };
+        let tree = tree_of(&work, &base);
+        let decided = |command: &str, ok: bool, stdout: &str, test: Option<(&str, &[u8])>| Decided {
+            tree: tree.clone(), test: test.map(|(p, b)| (p.to_string(), b.to_vec())), command: command.into(), ok, stdout: stdout.into() };
+        // As they were: the tree has `a`, a written test exits 3, the agree check prints `a`.
+        keep_decided("true-verdicts", vec![decided("test -f a", true, "", None), decided("sh t.sh", false, "", Some(("t.sh", b"exit 3"))),
+                                           decided("cat a", true, "a", None), decided("test -f a", true, "", None)]);
+        if is_agent() { return; }
+        assert_eq!(recheck(&m, "true-verdicts"), Ok(()));
+        // Planted: the cache said the tests accept what a clean build rejects.
+        keep_decided("planted", vec![decided("test -f a", true, "", None), decided("test -f missing", true, "", None)]);
+        let e = recheck(&m, "planted").unwrap_err();
+        assert!(e.starts_with("suspect check: `test -f missing`") && e.contains("from a clean build it says a failure") && e.contains("nothing was pushed"), "{e}");
+        // An agree check whose output differs is suspect too; a test's is not compared.
+        keep_decided("agree", vec![decided("cat a", true, "b", None)]);
+        assert!(recheck(&m, "agree").unwrap_err().contains("prints other than"));
+        keep_decided("output", vec![decided("echo now", true, "then", None)]);
+        assert_eq!(recheck(&m, "output"), Ok(()));
+        // A candidate this bon process never judged is never pushed.
+        assert!(recheck(&m, "unknown").unwrap_err().contains("not pushed"));
+        // Each re-check ran (never answered by the cache) and left its log; its directories are gone.
+        let logs: Vec<String> = std::fs::read_dir(trace_dir(&work)).unwrap().flatten().map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.starts_with("recheck-planted-")).collect();
+        assert_eq!(logs.len(), 2);
+        for l in &logs { assert!(std::fs::read_to_string(trace_dir(&work).join(l)).unwrap().starts_with("exit: ")); }
+        let left = std::fs::read_dir(WORKING_DIRECTORIES).unwrap().flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with(&format!("{}.recheck.", std::process::id())));
+        assert!(!left, "a re-check's directories are removed");
+        let _ = std::fs::remove_dir_all(work.parent().unwrap());
+    }
+
+    #[test]
+    fn what_a_candidate_s_checks_said_is_kept_for_its_push() {
+        // queue 65: every check run or answered while a candidate is judged, on its thread and on those it hands the work to.
+        let on = On { tree: "t".into(), test: None, cache: Cache::Use };
+        let (_, kept) = deciding(|| {
+            decided(&on, "a", true, "x", std::path::Path::new("/l"));
+            let here = deciding_here();
+            std::thread::scope(|s| { s.spawn(|| within(&here, || decided(&on, "b", false, "", std::path::Path::new("/l")))); });
+        });
+        assert_eq!(kept.iter().map(|d| (d.command.as_str(), d.ok)).collect::<Vec<_>>(), [("a", true), ("b", false)]);
+        // Outside a candidate's judging, nothing is kept.
+        decided(&on, "c", true, "", std::path::Path::new("/l"));
+        assert!(deciding_here().is_none());
+    }
+
+    #[test]
+    fn the_verdict_key_covers_the_dependency_sources_and_not_the_host_file() {
+        // queue 64: a source the lockfile names changes the key; another file in the registry, or the host's prices, do not.
+        let d = std::env::temp_dir().join(format!("bon-deps-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (repo, home) = (d.join("repo"), d.join("cargo-home"));
+        let source = home.join("registry/src/index.crates.io-x/foo-1.0.0/src/lib.rs");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(home.join("registry/src/index.crates.io-x/bar-2.0.0")).unwrap();
+        std::fs::write(&source, "pub fn f() {}\n").unwrap();
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q"]).unwrap();
+        std::fs::write(repo.join("Cargo.lock"), "version = 4\n\n[[package]]\nname = \"foo\"\nversion = \"1.0.0\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n\n[[package]]\nname = \"mine\"\nversion = \"0.1.0\"\n").unwrap();
+        git(&repo, &["add", "."]).unwrap();
+        git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "c"]).unwrap();
+        let tree = tree_of(&repo, "HEAD");
         let mut c = config();
-        c.harness[0] = toml::from_str(r#"name = "stub"
-            model = "stub"
-            command = ["/bin/sh", ".bon/stub.sh"]
-            n = [3]"#).unwrap();
-        let h = c.harness[0].clone();
-        assert_eq!(harness_argv(&h, &c, std::path::Path::new("/tmp"), &[]), ["/bin/sh", ".bon/stub.sh"]);
-        // codex sandboxes to its working directory: the build and the slots are added.
-        let codex = harness_argv(&c.counterexample.harness[0], &c, std::path::Path::new("/w"), &[PathBuf::from("/b")]);
-        assert_eq!(codex[codex.len() - 3..], ["--add-dir", "/b", "-"]);
-        assert_eq!(generation(&h, &c, "anything at all").unwrap(), (0, Some(0), HashMap::new()));
-        // A built-in harness still needs its token counts.
-        assert!(generation(&c.counterexample.harness[0], &c, "anything at all").is_err());
+        c.root = repo.clone();
+        c.toolchain = vec![("RUSTUP_HOME".into(), "/opt/bon/rustup".into()), ("CARGO_HOME".into(), home.to_string_lossy().into())];
+        assert_eq!(dependency_dirs(&c, &std::fs::read_to_string(repo.join("Cargo.lock")).unwrap()), [home.join("registry/src/index.crates.io-x/foo-1.0.0")]);
+        let on = On { tree: tree.clone(), test: None, cache: Cache::Use };
+        let before = dependencies(&c, &tree, true);
+        assert!(!before.is_empty());
+        let key = verdict_key(&c, &on, "cargo test").unwrap();
+        // Another package's file, which the lockfile does not name: the same key.
+        std::fs::write(home.join("registry/src/index.crates.io-x/bar-2.0.0/lib.rs"), "x").unwrap();
+        assert_eq!(dependencies(&c, &tree, true), before);
+        // The host file's other facts: the same key.
+        let mut priced = c.clone();
+        priced.prices.clear();
+        priced.pools = Pools { agent_processes: 7, check_processes: 7, threads: c.pools.threads };
+        assert_eq!(verdict_key(&priced, &on, "cargo test"), Some(key.clone()));
+        // An edit to a source the lockfile names, even of the same size: another digest, and another key.
+        std::fs::write(&source, "pub fn g() {}\n").unwrap();
+        let after = dependencies(&c, &tree, true);
+        assert_ne!(after, before);
+        assert_ne!(verdict_key(&c, &on, "cargo test"), Some(key.clone()));
+        // Written back byte for byte: the digest is of the bytes, so the first key again.
+        std::fs::write(&source, "pub fn f() {}\n").unwrap();
+        assert_eq!(dependencies(&c, &tree, true), before);
+        assert_eq!(verdict_key(&c, &on, "cargo test"), Some(key));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_check_stops_at_its_own_cutoff_not_an_agent_process_s() {
+        // queue 66.
+        let mut c = config();
+        c.checks.time = 1;
+        c.agent_process.time = 600;
+        let log = std::env::temp_dir().join(format!("bon-cutoff-test-{}", std::process::id()));
+        let on = On { tree: String::new(), test: None, cache: Cache::Use };
+        let here = std::path::Path::new("/tmp");
+        let start = Instant::now();
+        let (ok, _, killed) = run_check(&c, &on, here, here, "/bin/sleep 60", &log);
+        assert!(!ok && killed, "{}", std::fs::read_to_string(&log).unwrap_or_default());
+        assert!(start.elapsed() < Duration::from_secs(10), "{:?}", start.elapsed());
+        let _ = std::fs::remove_file(&log);
+        let _ = std::fs::remove_dir_all(PathBuf::from(WORKING_DIRECTORIES).join(format!("{}.bin", std::process::id())));
+    }
+
+    #[test]
+    fn a_bon_process_that_ends_on_an_error_records_exited_and_the_error() {
+        // queue 76: on one line; after a block, the block already says why.
+        let root = std::env::temp_dir().join(format!("bon-exited-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = trace_dir(&root).join("transitions");
+        append_line(&file, "grant 2 0 1 code x");
+        record_exited(&root, "suspect check: `cargo test -q`\non tree t");
+        assert_eq!(std::fs::read_to_string(&file).unwrap().lines().last(), Some("exited: suspect check: `cargo test -q` on tree t"));
+        append_line(&file, "blocked: too_few_verified: fewer than two verified candidates");
+        record_exited(&root, "blocked: no attempt was selected");
+        assert!(std::fs::read_to_string(&file).unwrap().lines().last().unwrap().starts_with("blocked: too_few_verified"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_code_search_s_prompt_says_which_check_fails_and_why() {
+        // queue 74: trunk's failing check, its command and its errors, for every program alike.
+        let root = std::env::temp_dir().join(format!("bon-failing-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let mut c = config();
+        c.checks.test = vec!["cargo test -q".into()];
+        c.checks.verify = vec!["cargo verus verify".into()];
+        let m = Manifest { config: c, root: root.clone() };
+        let d = trace_dir(&root);
+        write_trace(&d.join("trunk-test-0"), "exit: 0\nseconds: 1.0\n--- stdout\nok\n--- stderr\n");
+        let noise: String = (0..400).map(|k| format!("   Compiling crate{k} v1.0\n")).collect();
+        write_trace(&d.join("trunk-verify-0"), format!("cached: abc\nexit: 1\nseconds: 3.0\n--- stdout\n--- stderr\n{noise}\
+            error: postcondition not satisfied\n    --> src/exec.rs:1300:5\n     |\n1300 |     a.len() <= b.len()\n\n\
+            warning: unused\n\nverification results:: 101 verified, 1 errors\n"));
+        let kind = Kind::Code { goal: Commit(vec![]) };
+        let a = aim(&m, &kind, None, "head");
+        assert!(a.starts_with("This check fails on trunk: cargo verus verify\nexit: 1\n"), "{a}");
+        assert!(a.contains("error: postcondition not satisfied\n    --> src/exec.rs:1300:5\n"), "{a}");
+        assert!(!a.contains("cargo test -q") && !a.contains("Compiling crate") && !a.contains("warning: unused"), "errors first, the rest left out: {a}");
+        let text = prompt(&kind, &m.config, &a);
+        assert!(text.contains("Trunk's checks reject this code.") && text.contains("src/exec.rs:1300:5"));
+        assert!(text.contains("Never change [\".cargo/\", \"build.rs\", \".bon/\", \"tests/\"] either"), "{text}");
+        // No error block: the output's last lines, bounded.
+        let tail = informative(&format!("exit: 101\n--- stdout\n{noise}test result: FAILED\n"));
+        assert!(tail.contains("test result: FAILED") && tail.lines().count() <= FAILING_LINES + 2, "{}", tail.lines().count());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
