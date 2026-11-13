@@ -16,7 +16,7 @@
               "hashes": [
                 {
                   "algorithm": "SHA-256",
-                  "value": "eaa7748b11fa881819a1aeac7836c48e8390079aa39101dc990e69dabbec7698"
+                  "value": "33ad901b6b3d2c9ee52064dc88550f8228b641a3242ba95899496ab6392f97aa"
                 }
               ],
               "href": "sbom.json",
@@ -822,12 +822,12 @@
       }
     ],
     "metadata": {
-      "last-modified": "2026-11-13T08:51:57Z",
+      "last-modified": "2026-11-13T09:21:06Z",
       "oscal-version": "1.2.3",
       "remarks": "proven: in the kernel, verified by Verus. trusted: reviewed by the owner, not verified. configured: a fact of the manifest. tested: program code and every other file, judged by the checks. Every control claim is proposed and awaits GRC review.",
       "title": "best-of-n",
-      "version": "0c5eee182f94"
+      "version": "7d4ab6b3f066"
     },
-    "uuid": "99e7dc90-0f44-4af8-987d-0cf581346b80"
+    "uuid": "939245f8-09d1-4214-81c8-09f95aa0c624"
   }
 }
