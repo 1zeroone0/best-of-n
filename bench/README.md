@@ -316,3 +316,43 @@ costs about $0.0014, so a verified candidate cost $0.0024 (16) and $0.0016
 (64). The program must be a file user `agent` can execute: a bon-sample under
 a 0700 directory exits 126 at once, and with no usage line bon charges each
 agent process the whole limit (`$16.0000` for 16).
+
+## Results: a user per check slot, sources nobody a candidate runs as owns (bench5)
+
+Same host, 2026-11-12/13, stubs, `SLEEP=30 K=1 CX_WIDTH=4`, other sessions
+loading the host (load 6–21 on 14 cores): wall times are noisy, the counts
+are not. "Before" is 07575ac (every check as agent, agent owning the
+dependency sources); "sources" is that binary with the sources engineer's;
+"after" is queue 56–59, 62, 63 (each check as its slot's user, `check0` …
+`check13`, the 14 the default pool comes to here). `bon code` row unless
+noted; checks are executed / answered by the cache.
+
+| config | width | build | wall s | CPU s | peak RSS MB | checks |
+|---|---|---|---|---|---|---|
+| kernel | 8 | before | 218 | 180 | 2334 | 42 / 104 |
+| kernel | 8 | sources | 190 | 175 | 2285 | 42 / 104 |
+| kernel | 8 | after | 181 | 161 | 2180 | 42 / 104 |
+| kernel | 32 | before | 446 | 230 | 2041 | 42 / 392 |
+| kernel | 32 | after | 193 | 198 | 2090 | 42 / 392 |
+| bon | 8 | before | 423 | 1250 | 6815 | 42 / 104 |
+| bon | 8 | after | 438 | 1562 | 7728 | 42 / 104 |
+| kernel, every tree distinct, K=0 | 64 | before | 280 | 440 | 2102 | 782 / 36 |
+| kernel, every tree distinct, K=0 | 64 | after | 269 | 434 | 2322 | 782 / 36 |
+
+The width-32 "before" ran under the heaviest load of the night (its
+counterexample search alone took 209 s, against 70 s after). The bon row's
+"after" is bon's source at a later commit (the account, its OSCAL test and
+the rules `bon check` holds), so more of it is its own checks. With every
+tree distinct, each of 782 checks takes a slot, so its user's leftovers are
+stopped (`kill -1` as that user, one sudo), its build directory is made
+(0700 and one ACL entry: no per-file cost) and filled by a clone as that
+user; the wall and CPU match the run where agent did all of it. A clone made
+by a slot's user is its own (534 of 534 files of the kernel's kept build,
+0.09 s); an ACL on every file instead would cost 0.03 s per 500 files. The
+isolated gate asks each of the 15 confined users once, all of its paths in
+one process (0.2 s for the 14 slots).
+
+Cargo builds and tests with a cargo home it cannot write: run as agent
+against a copy owned by engineer (no write for anyone else), the bench
+crate's `cargo test` and `cargo verus verify` ran offline and changed
+nothing under it, no lock file, no `.cargo-ok`, no cache or last-use record.
