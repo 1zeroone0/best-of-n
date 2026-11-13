@@ -937,12 +937,28 @@ fn working_directory_except(root: &std::path::Path, config: &Config, commit: &st
     Ok(())
 }
 
-/// A read-only checkout for running checks: agent may read and execute it and
-/// write only its build directory.
+/// A read-only checkout for running checks, engineer's alone: read-only, with
+/// no group or other access. The one check slot's user that runs its checks is
+/// granted read while they run (`checkout_readable`), so no other slot's user,
+/// and no agent process, reads this candidate's checkout (B4); the build
+/// directory each check writes is already its slot's user's alone (`slots_alone`).
 fn check_directory(root: &std::path::Path, commit: &str, dir: &std::path::Path) -> Result<(), String> {
     materialize(root, commit, dir)?;
-    sh(dir, "chmod", &["-R", "a-w,g+rX", "."])?;
+    sh(dir, "chmod", &["-R", "a-w,u+rX,go-rwx", "."])?;
     Ok(())
+}
+
+/// Grant `who` read, execute and search over a read-only checkout, once per
+/// checkout and user in this bon process: the slot's user reads the checkout
+/// its checks run in, and no other confined user does. Idempotent; skipped
+/// when bon runs confined (a candidate's tests, where there is no ACL to set).
+fn checkout_readable(dir: &std::path::Path, who: Who) {
+    if confined() { return; }
+    static DONE: std::sync::Mutex<Option<std::collections::HashSet<(PathBuf, String)>>> = std::sync::Mutex::new(None);
+    let key = (dir.to_path_buf(), who.name());
+    if !DONE.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(key) { return; }
+    let ace = format!("user:{} allow read,execute,search,readattr,readextattr,readsecurity", who.name());
+    let _ = sh(dir, "chmod", &["-R", "+a", &ace, &dir.to_string_lossy()]);
 }
 
 /// Trunk's build: made by trunk's checks, as a check slot's user, then copied to one of
@@ -1968,6 +1984,9 @@ fn run_check_with(config: &Config, on: &On, threads: usize, dir: &std::path::Pat
         None => { let s = Slot::check(config); let k = s.slot(); (Some(s), k) }
     });
     let who = Who::Check(k);
+    // The checkout is the slot's user's to read while its checks run; no other
+    // confined user reaches it (B4).
+    checkout_readable(dir, who);
     // A judge's build is made now, when a check must run in it, as the slot's user's.
     if !ensure_build(config, target, who) {
         write_trace(log, check_record(command, on, &format!("no build directory: {} could not be made {}'s", target.display(), who.name()), ""));
@@ -2824,6 +2843,10 @@ pub fn observe(m: &Manifest, commit: &Commit) -> (r: Result<(Observation, Vec<Ob
         working_directory(&m.root, &m.config, &c, &working).map_err(|e| format!("agent is not set up ({e}); run bon setup"))?;
         let checkout = probes[1].join(&name);
         check_directory(&m.root, &c, &checkout)?;
+        // A checkout is each slot's user's to read while its checks run (B4);
+        // the policy still has every check slot's user reading the checks, so
+        // the probe grants the read each slot's user would get on its own.
+        for j in 0..slots { checkout_readable(&checkout, Who::Check(j)); }
         // A kept build, as `keep` leaves one: engineer's, group bon, writable by no one else.
         let builds = probes[2].join("build");
         std::fs::create_dir_all(builds.join("debug")).map_err(|e| e.to_string())?;
@@ -5247,6 +5270,15 @@ mod tests {
         std::fs::create_dir_all(&only).unwrap();
         extract(&d, "HEAD", &["tests/"], &only).unwrap();
         assert!(only.join("tests/trunk.rs").exists() && !only.join("src").exists());
+        // B4: a checkout is engineer's alone — read-only, no group or other
+        // access — so no other slot's user and no agent process reads it.
+        let co = d.join("checkout");
+        check_directory(&d, "HEAD", &co).unwrap();
+        for p in ["src/lib.rs", "run.sh", "tests"] {
+            let m = std::fs::symlink_metadata(co.join(p)).unwrap().permissions().mode();
+            assert_eq!(m & 0o077, 0, "{p} is {m:o}: no group or other access");
+            assert_eq!(m & 0o222, 0, "{p} is {m:o}: read-only");
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 
