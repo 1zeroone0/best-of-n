@@ -314,7 +314,7 @@ fn protected(checks: &Vec<Path>, trusted: &Vec<Path>, p: &Path) -> (r: bool)
 }
 
 /// p is within the authority of a search of this kind.
-fn authority_contains(kind: &Kind, checks: &Vec<Path>, tests: &Vec<Path>, trusted: &Vec<Path>, p: &Path) -> (r: bool)
+pub fn authority_contains(kind: &Kind, checks: &Vec<Path>, tests: &Vec<Path>, trusted: &Vec<Path>, p: &Path) -> (r: bool)
     ensures r == spec::authority(kind@, paths(checks@), paths(tests@), paths(trusted@)).contains(p@),
 {
     match kind {

@@ -1826,6 +1826,7 @@ fn toolchain_identity(config: &Config) -> String {
     }).clone()
 }
 
+/// Every directory the toolchain object covers, for the isolated gate to
 /// observe (`observe`): the host file's homes (RUSTUP_HOME, CARGO_HOME; not
 /// The directories holding the dependency sources a lockfile names, under
 /// the checks' cargo home: each registry package as unpacked
@@ -3807,6 +3808,20 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
         (changed, diff) = changes(&commit)?;
     }
 
+    // The rules of queue 67-69, applied to this candidate by its own kind's
+    // authority (`broken_by_candidate`): a candidate that breaks a rule its
+    // base does not (a build script, a proc macro, a unit test, or plain Rust
+    // outside verus! in a file it may write; a check that would then run such
+    // a file) is not a clean verified candidate. `rules` reads the tree and
+    // the manifest only, so it runs on the candidate's commit without
+    // executing anything of the candidate's. The verdict's authority is the
+    // kernel's `exec::verified`, which asks for `accepted` or `proved` by
+    // kind; failing both makes it unverified whatever the kind.
+    if let Some(reason) = broken_by_candidate(m, kind, start, &commit) {
+        write_trace(&trace.join("rules"), &reason);
+        accepted = false;
+        proved = false;
+    }
     let intents: Vec<(Cue, Intent)> = match kind {
         Kind::Queue { goal } => queue_intents(root, start, &commit, &goal.iter().collect::<String>()),
         _ => Vec::new(),
@@ -4547,6 +4562,370 @@ pub fn spec_proposal(m: &Manifest, s: &Search, id: u64, wrap: &dyn Fn(&str, usiz
     Ok(format!("{at}/review.md"))
 }
 
+// ── what a search may write (queue 67, 68, 69) ──────────
+//
+// The rules of what a search may write and how its candidates are judged.
+// `bon check` applies them to engineer's tree (every search that reaches
+// trunk may write it); `capture` applies them to a candidate by its own
+// kind's authority (`broken_by_candidate`). One definition, read from the
+// tree, the manifest and the kernel's authority (`exec::authority_contains`);
+// nothing of a candidate's runs.
+
+pub const PROVEN_OR_CHECKED: &str = "every line a search may write is proven, or program code with declared checks";
+pub const NO_CHECK_WRITABLE: &str = "no check lives in a file a search may write";
+pub const NOT_JUDGED: &str = "nothing a candidate writes changes how it is judged";
+
+/// A predicate: whether a search of any of `kinds` may write `path`, as the
+/// kernel's authority decides with the manifest's checks, tests and trusted
+/// code (`exec::authority_contains`, the single source).
+fn writable_for<'a>(m: &'a Manifest, kinds: Vec<Kind>) -> impl Fn(&str) -> bool + 'a {
+    let (c, t, tr) = (checks(m), tests(m), trusted(m));
+    move |path| { let p = Path(path.chars().collect()); kinds.iter().any(|k| crate::exec::authority_contains(k, &c, &t, &tr, &p)) }
+}
+
+/// The three kinds whose candidates reach trunk and may write code: a fresh
+/// value of each, its goal empty (authority does not read the goal, but for
+/// a foil's `changed`, which `bon check` does not test).
+fn trunk_kinds() -> Vec<Kind> {
+    vec![Kind::Code { goal: Commit(vec![]) }, Kind::Compaction { goal: Commit(vec![]), out: vec![] }, Kind::Counterexample { goal: None }]
+}
+
+/// Where `commit`'s tree breaks a rule, one line each: the file, what is
+/// wrong, and the rule. `writable(path)` says whether a search may write it.
+/// Read from the tree, the manifest and the kernel's authority; nothing runs.
+/// - every file a search may write is proven (a module of the root package's
+///   library: the kernel) or program code a declared check reads (a Rust file
+///   of a target a cargo check builds, or one under a path a check names);
+/// - no file a check runs (by its path, its cargo target, or `cargo run`'s
+///   binary) is one a search may write, but the counterexample's own `path`;
+/// - no local crate has a build script or is a proc macro; no file a search
+///   may write holds a unit test, but the counterexamples' tests, which are
+///   judged by their evidence; and the kernel holds nothing outside `verus!`
+///   but `use`, `mod` and `extern crate` declarations.
+fn rules_with(root: &std::path::Path, commit: &str, m: &Manifest, writable: &dyn Fn(&str) -> bool) -> Result<Vec<String>, String> {
+    let files: Vec<String> = git(root, &["ls-tree", "-r", "-z", "--name-only", commit])?.split('\0').filter(|f| !f.is_empty()).map(String::from).collect();
+    let read = |p: &str| git(root, &["cat-file", "blob", &format!("{commit}:{p}")]).unwrap_or_default();
+    let exists = |p: &str| files.iter().any(|f| f == p);
+    let c = &m.config;
+    let mut broken = Vec::new();
+    // Every local crate: no build script, no proc macro.
+    for manifest in files.iter().filter(|f| f.rsplit('/').next() == Some("Cargo.toml")) {
+        let dir = manifest.strip_suffix("Cargo.toml").unwrap_or("");
+        let Ok(t) = toml::from_str::<toml::Value>(&read(manifest)) else {
+            broken.push(format!("{manifest}: not TOML cargo can read ({NOT_JUDGED})"));
+            continue;
+        };
+        let build = match t.get("package").and_then(|p| p.get("build")) {
+            Some(toml::Value::String(b)) => Some(format!("{dir}{b}")),
+            Some(toml::Value::Boolean(false)) => None,
+            _ => exists(&format!("{dir}build.rs")).then(|| format!("{dir}build.rs")),
+        };
+        if let Some(b) = build { broken.push(format!("{manifest}: a local crate with a build script, {b}, which runs when a check builds ({NOT_JUDGED})")); }
+        if ["proc-macro", "proc_macro"].iter().any(|k| t.get("lib").and_then(|l| l.get(*k)).and_then(|v| v.as_bool()) == Some(true)) {
+            broken.push(format!("{manifest}: a local crate that is a proc macro, which runs when a check builds ({NOT_JUDGED})"));
+        }
+    }
+    // The root package's targets, by cargo's defaults and its [lib], [[bin]], [[test]] and [[example]].
+    let package: toml::Value = toml::from_str(&read("Cargo.toml")).unwrap_or(toml::Value::Table(Default::default()));
+    let declared = |key: &str| -> Vec<String> {
+        package.get(key).and_then(|v| v.as_array()).into_iter().flatten().filter_map(|t| t.get("path").and_then(|p| p.as_str()).map(String::from)).collect()
+    };
+    let auto = |dir: &str| -> Vec<String> {
+        files.iter().filter(|f| f.strip_prefix(dir).is_some_and(|r| r.ends_with(".rs") && (!r.contains('/') || r.ends_with("/main.rs")))).cloned().collect()
+    };
+    let lib = package.get("lib").and_then(|l| l.get("path")).and_then(|p| p.as_str()).map(String::from)
+        .or_else(|| exists("src/lib.rs").then(|| "src/lib.rs".to_string()));
+    let kernel: Vec<String> = lib.iter().flat_map(|r| modules(r, &read, &exists, Some(&mut broken))).collect();
+    // Every check: (command, whether it is the counterexample's, which runs the test at its `path`).
+    let commands: Vec<(&str, bool)> = c.checks.test.iter().chain(&c.checks.verify).chain(&c.checks.agree).chain(c.checks.rank.values())
+        .chain(&c.checks.staged).map(|s| (s.as_str(), false))
+        .chain([(c.counterexample.build.as_str(), true), (c.counterexample.run.as_str(), true)]).collect();
+    let runs = |prefix: &str| commands.iter().any(|(w, _)| w.trim_start().starts_with(prefix));
+    let mut compiled: Vec<String> = Vec::new();
+    if runs("cargo ") {
+        let mut roots = declared("bin");
+        roots.extend(auto("src/bin/"));
+        if exists("src/main.rs") { roots.push("src/main.rs".into()); }
+        if runs("cargo test") { roots.extend(declared("test")); roots.extend(declared("example")); roots.extend(auto("tests/")); roots.extend(auto("examples/")); }
+        for r in roots { compiled.extend(modules(&r, &read, &exists, None)); }
+    }
+    let bin = |name: &str| -> Option<String> {
+        package.get("bin").and_then(|v| v.as_array()).into_iter().flatten().find(|b| b.get("name").and_then(|n| n.as_str()) == Some(name))
+            .and_then(|b| b.get("path").and_then(|p| p.as_str()).map(String::from))
+            .or_else(|| [format!("src/bin/{name}.rs"), format!("src/bin/{name}/main.rs")].into_iter().find(|p| exists(p)))
+            .or_else(|| (package.get("package").and_then(|p| p.get("name")).and_then(|n| n.as_str()) == Some(name) && exists("src/main.rs")).then(|| "src/main.rs".into()))
+    };
+    // What each check names: a file by its path, a cargo target, `cargo run`'s binary; and the directories it reads under.
+    let mut named: Vec<(String, &str)> = Vec::new();
+    let mut under: Vec<String> = Vec::new();
+    for (command, own) in &commands {
+        let w: Vec<&str> = command.split_whitespace().map(|w| w.trim_matches(|ch: char| "\"'();&|".contains(ch))).collect();
+        for (k, word) in w.iter().enumerate() {
+            let target = match (k.checked_sub(1).map(|j| w[j]), *word) {
+                (Some("--test"), n) => Some(format!("tests/{n}.rs")),
+                (Some("--example"), n) => Some(format!("examples/{n}.rs")),
+                (Some("--bench"), n) => Some(format!("benches/{n}.rs")),
+                (Some("--bin"), n) => bin(n),
+                (Some("cargo"), "run") if !w.contains(&"--bin") && !w.contains(&"--example") =>
+                    package.get("package").and_then(|p| p.get("default-run")).and_then(|d| d.as_str()).and_then(|d| bin(d)),
+                (_, p) if exists(p) => Some(p.to_string()),
+                (_, p) if !p.is_empty() && files.iter().any(|f| f.starts_with(&format!("{}/", p.trim_end_matches('/')))) => {
+                    under.push(p.trim_end_matches('/').to_string());
+                    None
+                }
+                _ => None,
+            };
+            if let Some(t) = target.filter(|t| !(*own && *t == c.counterexample.path)) { named.push((t, command)); }
+        }
+    }
+    for (t, command) in &named {
+        if writable(t) { broken.push(format!("{t}: the check `{command}` runs it, and a search may write it ({NO_CHECK_WRITABLE})")); }
+    }
+    let landed = |f: &str| c.counterexample.tests.iter().any(|t| f.starts_with(t.as_str()));
+    for f in files.iter().filter(|f| writable(f)) {
+        let read_by_check = compiled.contains(f) || named.iter().any(|(t, _)| t == f) || under.iter().any(|d| f.starts_with(&format!("{d}/")));
+        if !kernel.contains(f) && !read_by_check {
+            broken.push(format!("{f}: a search may write it, and it is neither proven, in the kernel, nor read by a declared check ({PROVEN_OR_CHECKED})"));
+        }
+        if !f.ends_with(".rs") { continue; }
+        let text = read(f);
+        if !landed(f) {
+            if let Some(n) = unit_test(&text) { broken.push(format!("{f}:{n}: a unit test in a file a search may write ({NOT_JUDGED})")); }
+        }
+        if kernel.contains(f) {
+            for n in outside_verus(&text) { broken.push(format!("{f}:{n}: plain Rust outside verus! in the kernel ({NOT_JUDGED})")); }
+        }
+    }
+    Ok(broken)
+}
+
+/// Where `commit`'s tree breaks a rule, judged for every search that reaches
+/// trunk: `bon check` on engineer's tree.
+pub fn rules(root: &std::path::Path, commit: &str, m: &Manifest) -> Result<Vec<String>, String> {
+    rules_with(root, commit, m, &writable_for(m, trunk_kinds()))
+}
+
+/// The kernel's files at `commit`: the root package's library modules (from
+/// `src/lib.rs`) that hold a `verus!` block and are not trusted, as the
+/// account's proven rule reads the working tree, but at a commit from git.
+/// Empty when there is no library. Used to tell a stale install from trunk's
+/// kernel without a list of file names in code.
+pub fn broken_by_candidate(m: &Manifest, kind: &Kind, base: &str, commit: &str) -> Option<String> {
+    let mut one = Kind::Counterexample { goal: None };
+    one = match kind {
+        Kind::Queue { .. } => Kind::Queue { goal: Transcript(Path(vec![])) },
+        Kind::Code { .. } => Kind::Code { goal: Commit(vec![]) },
+        Kind::Compaction { .. } => Kind::Compaction { goal: Commit(vec![]), out: vec![] },
+        Kind::Counterexample { .. } => one,
+        Kind::Foil { changed, .. } => Kind::Foil { goal: crate::gates::AgentProcess { search: 0, index: 0 }, changed: changed.clone() },
+        Kind::Spec { files, .. } => Kind::Spec { goal: Intent(vec![]), files: files.clone() },
+    };
+    let writable = writable_for(m, vec![one]);
+    let at = |c: &str| rules_with(&m.root, c, m, &writable);
+    match (at(base), at(commit)) {
+        (Ok(b), Ok(c)) => c.into_iter().find(|x| !b.contains(x)),
+        (_, Err(e)) | (Err(e), _) => Some(format!("the rules could not be read on the candidate: {e} ({NOT_JUDGED})")),
+    }
+}
+
+/// A Rust file and the modules it declares (`mod name;`), each where cargo
+/// looks for it, recursively. A `#[path]` module is not followed: in the
+/// kernel (`broken` Some) it is broken, since its plain Rust would go unread.
+fn modules(file: &str, read: &dyn Fn(&str) -> String, exists: &dyn Fn(&str) -> bool, mut broken: Option<&mut Vec<String>>) -> Vec<String> {
+    let mut out = vec![file.to_string()];
+    let mut k = 0;
+    while k < out.len() {
+        let f = out[k].clone();
+        k += 1;
+        let t = tokens(&read(&f));
+        let at = |i: usize| t.get(i).map_or("", |(s, _)| s.as_str());
+        // A crate root's or a mod.rs's modules sit beside it; another file's, in the directory of its name.
+        let dir = if k == 1 || f.ends_with("/mod.rs") { f.rsplit_once('/').map_or(String::new(), |(d, _)| format!("{d}/")) }
+                  else { format!("{}/", f.trim_end_matches(".rs")) };
+        for i in 0..t.len() {
+            if let Some(b) = broken.as_deref_mut().filter(|_| at(i) == "#" && at(i + 1) == "[" && at(i + 2) == "path") {
+                b.push(format!("{f}:{}: a #[path] module, which bon does not follow ({NOT_JUDGED})", t[i].1));
+            }
+            if at(i) == "mod" && at(i + 2) == ";" {
+                let name = at(i + 1);
+                if let Some(p) = [format!("{dir}{name}.rs"), format!("{dir}{name}/mod.rs")].into_iter().find(|p| exists(p)) {
+                    if !out.contains(&p) { out.push(p); }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The line of the first unit test in Rust source: a `#[test]` attribute (or
+/// `#[a::test]`), or a `cfg` attribute that names `test`.
+fn unit_test(text: &str) -> Option<usize> {
+    let t = tokens(text);
+    let at = |i: usize| t.get(i).map_or("", |(s, _)| s.as_str());
+    (0..t.len()).find(|&i| {
+        if at(i) != "#" || at(i + 1) != "[" { return false; }
+        let body: Vec<&str> = (i + 2..t.len()).map(at).take_while(|w| *w != "]").collect();
+        (body.last() == Some(&"test") && body.iter().all(|w| *w == ":" || w.chars().all(|ch| ch.is_alphanumeric() || ch == '_')))
+            || (body.first() == Some(&"cfg") && body.contains(&"test"))
+    }).map(|i| t[i].1)
+}
+
+/// The lines of Rust source's items outside every `verus! { … }` that are not
+/// a `use`, a `mod name;` or an `extern crate`, with the attributes on them.
+fn outside_verus(text: &str) -> Vec<usize> {
+    let t = tokens(text);
+    let at = |i: usize| t.get(i).map_or("", |(s, _)| s.as_str());
+    // The index past the group that opens at i ({, ( or [).
+    let group = |i: usize| -> usize {
+        let mut depth = 0i64;
+        for j in i..t.len() {
+            match at(j) {
+                "{" | "(" | "[" => depth += 1,
+                "}" | ")" | "]" => { depth -= 1; if depth == 0 { return j + 1; } }
+                _ => {}
+            }
+        }
+        t.len()
+    };
+    let mut lines = Vec::new();
+    let mut i = 0;
+    while i < t.len() {
+        if at(i) == "#" {
+            let a = if at(i + 1) == "!" { i + 2 } else { i + 1 };
+            if at(a) == "[" { i = group(a); continue; }
+        }
+        if at(i) == "verus" && at(i + 1) == "!" { i = group(i + 2); continue; }
+        let mut j = i;
+        if at(j) == "pub" { j += 1; if at(j) == "(" { j = group(j); } }
+        let declaration = at(j) == "use" || (at(j) == "mod" && at(j + 2) == ";") || (at(j) == "extern" && at(j + 1) == "crate");
+        if !declaration { lines.push(t[i].1); }
+        // To the item's end: its `;`, or its body, at depth zero.
+        while j < t.len() {
+            match at(j) {
+                ";" => { j += 1; break; }
+                "{" => { j = group(j); if at(j) == ";" { j += 1; } break; }
+                "(" | "[" => j = group(j),
+                _ => j += 1,
+            }
+        }
+        i = j;
+    }
+    lines
+}
+
+/// Each place a Rust file outside `declared` (the trusted files and the checks)
+/// skips a proof: `#[verifier::external…]`, `assume(` or `admit(`, as path:line.
+pub fn holes(root: &std::path::Path, declared: &[String]) -> Vec<String> {
+    fn walk(dir: &std::path::Path, root: &std::path::Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for e in entries.flatten() {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().to_string();
+            if p.is_dir() {
+                if !name.starts_with('.') && name != "target" && name != "node_modules" { walk(&p, root, out); }
+            } else if name.ends_with(".rs") {
+                out.push(p.strip_prefix(root).unwrap_or(&p).to_path_buf());
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(root, root, &mut files);
+    files.sort();
+    let mut found = Vec::new();
+    for f in files {
+        let rel = f.to_string_lossy().to_string();
+        if declared.iter().any(|d| rel == *d || rel.starts_with(&format!("{}/", d.trim_end_matches('/')))) { continue; }
+        let Ok(text) = std::fs::read_to_string(root.join(&f)) else { continue };
+        for n in skips(&text) { found.push(format!("{rel}:{n}")); }
+    }
+    found
+}
+
+/// The lines of Rust source `text` that skip a proof, read by tokens: a call of
+/// `assume` or `admit`, an `assume_specification`, or a `verifier::external…`
+/// or `verifier(external…)` attribute. Comments and literals are not code.
+pub fn skips(text: &str) -> Vec<usize> {
+    let tokens = tokens(text);
+    let t = |k: usize| tokens.get(k).map_or("", |(s, _)| s.as_str());
+    let mut lines = Vec::new();
+    for (k, (word, n)) in tokens.iter().enumerate() {
+        let call = matches!(word.as_str(), "assume" | "admit") && t(k + 1) == "(" && (k == 0 || t(k - 1) != "fn");
+        let specification = word == "assume_specification";
+        // #[verifier::external…] or #[verifier(external…)], also as an inner #![…].
+        let attribute = word == "#" && {
+            let a = if t(k + 1) == "!" { k + 2 } else { k + 1 };
+            t(a) == "[" && t(a + 1) == "verifier"
+                && ((t(a + 2) == ":" && t(a + 3) == ":" && t(a + 4).starts_with("external"))
+                    || (t(a + 2) == "(" && t(a + 3).starts_with("external")))
+        };
+        if (call || specification || attribute) && lines.last() != Some(n) { lines.push(*n); }
+    }
+    lines
+}
+
+/// Rust source as tokens: identifiers and single punctuation, each with its
+/// line. Comments and literals are not code: they make no token.
+pub fn tokens(text: &str) -> Vec<(String, usize)> {
+    let c: Vec<char> = text.chars().collect();
+    let ident = |ch: char| ch.is_alphanumeric() || ch == '_';
+    let mut tokens: Vec<(String, usize)> = Vec::new();
+    let (mut i, mut line) = (0, 1);
+    // Skips past the closing `"` of a string whose body starts at `j`; raw
+    // strings (`hashes` is Some) have no escapes.
+    let string_end = |mut j: usize, hashes: Option<usize>, line: &mut usize| -> usize {
+        while j < c.len() {
+            match (c[j], hashes) {
+                ('\n', _) => { *line += 1; j += 1; }
+                ('\\', None) => { if c.get(j + 1) == Some(&'\n') { *line += 1; } j += 2; }
+                ('"', None) => return j + 1,
+                ('"', Some(h)) if c[j + 1..].iter().take(h).filter(|&&x| x == '#').count() == h => return j + 1 + h,
+                _ => j += 1,
+            }
+        }
+        j
+    };
+    while i < c.len() {
+        let ch = c[i];
+        let next = c.get(i + 1).copied();
+        if ch == '\n' { line += 1; i += 1; }
+        else if ch.is_whitespace() { i += 1; }
+        else if ch == '/' && next == Some('/') { while i < c.len() && c[i] != '\n' { i += 1; } }
+        else if ch == '/' && next == Some('*') {
+            let mut depth = 0;
+            while i < c.len() {
+                if c[i] == '/' && c.get(i + 1) == Some(&'*') { depth += 1; i += 2; }
+                else if c[i] == '*' && c.get(i + 1) == Some(&'/') { depth -= 1; i += 2; if depth == 0 { break; } }
+                else { if c[i] == '\n' { line += 1; } i += 1; }
+            }
+        }
+        else if ch == '"' { i = string_end(i + 1, None, &mut line); }
+        else if ch == '\'' {
+            // A char literal, or a lifetime (no closing quote right after one char).
+            if next == Some('\\') { i += 3; while i < c.len() && c[i] != '\'' { i += 1; } i += 1; }
+            else if c.get(i + 2) == Some(&'\'') { i += 3; }
+            else { i += 1; }
+        }
+        else if ident(ch) {
+            let start = i;
+            while i < c.len() && ident(c[i]) { i += 1; }
+            let word: String = c[start..i].iter().collect();
+            // String prefixes: b"…", r"…", r#"…"#, br#"…"#, c"…", b'…'.
+            let raw = matches!(word.as_str(), "r" | "br" | "cr");
+            let hashes = c[i..].iter().take_while(|&&x| x == '#').count();
+            if raw && c.get(i + hashes) == Some(&'"') { i = string_end(i + hashes + 1, Some(hashes), &mut line); }
+            else if matches!(word.as_str(), "b" | "c") && c.get(i) == Some(&'"') { i = string_end(i + 1, None, &mut line); }
+            else if word == "b" && c.get(i) == Some(&'\'') {
+                i += 1;
+                if c.get(i) == Some(&'\\') { i += 1; }
+                while i < c.len() && c[i] != '\'' { i += 1; }
+                i += 1;
+            }
+            else { tokens.push((word, line)); }
+        }
+        else { tokens.push((ch.to_string(), line)); i += 1; }
+    }
+    tokens
+}
 
 #[cfg(test)]
 mod tests {
@@ -4967,6 +5346,33 @@ mod tests {
         c.toolchain.push(("RUSTUP_TOOLCHAIN".into(), tc.clone().unwrap()));
         let keyed = toolchain_identity(&c);
         assert!(keyed.contains(&tc.unwrap()));
+    }
+
+    #[test]
+    fn a_candidate_that_moves_kernel_code_outside_verus_is_not_verified() {
+        // queue 67-69 applied to a candidate (A2): the verify check gives exit 0
+        // when a kernel function moves outside verus!, but the rules do not.
+        let d = std::env::temp_dir().join(format!("bon-a2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("Cargo.toml"), "[package]\nname = \"k\"\nversion = \"0.0.0\"\nedition = \"2021\"\n").unwrap();
+        std::fs::write(d.join("src/lib.rs"), "pub mod k;\n").unwrap();
+        std::fs::write(d.join("src/k.rs"), "verus! {\npub fn f() -> u64 { 1 }\n} // verus!\n").unwrap();
+        git(&d, &["init", "-q"]).unwrap();
+        git(&d, &["add", "-A"]).unwrap();
+        git(&d, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base"]).unwrap();
+        let base = git(&d, &["rev-parse", "HEAD"]).unwrap();
+        // The candidate moves f outside verus! (its body never verified again).
+        std::fs::write(d.join("src/k.rs"), "verus! {\n} // verus!\npub fn f() -> u64 { 1 }\n").unwrap();
+        git(&d, &["add", "-A"]).unwrap();
+        git(&d, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "cand"]).unwrap();
+        let cand = git(&d, &["rev-parse", "HEAD"]).unwrap();
+        let m = Manifest { config: config(), root: d.clone() };
+        let code = Kind::Code { goal: Commit(vec![]) };
+        assert!(broken_by_candidate(&m, &code, &base, &base).is_none(), "the base breaks no rule");
+        let reason = broken_by_candidate(&m, &code, &base, &cand);
+        assert!(reason.as_deref().is_some_and(|r| r.contains("src/k.rs") && r.contains("outside verus!")), "{reason:?}");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -106,7 +106,7 @@ fn read(r: &Path) -> Result<Account, String> {
     }
     // Outside trusted code and the checks, nothing may skip a proof.
     let declared: Vec<String> = listed.iter().chain(&checks).cloned().collect();
-    let skipped = crate::holes(r, &declared);
+    let skipped = best_of_n::trusted::holes(r, &declared);
     if !skipped.is_empty() {
         return Err(format!("a proof is skipped outside trusted code and the checks: {}; prove it, or add the file to account.trusted", skipped.join(", ")));
     }
