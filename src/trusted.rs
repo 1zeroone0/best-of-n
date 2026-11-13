@@ -794,7 +794,7 @@ fn check_directory(root: &std::path::Path, commit: &str, dir: &std::path::Path) 
     Ok(())
 }
 
-/// Trunk's build: made as agent by trunk's checks, then copied to one of
+/// Trunk's build: made by trunk's checks, as a check slot's user, then copied to one of
 /// engineer's that no agent process can write, kept for later bon processes
 /// (see `kept`). Every build directory (an agent process's own, and its
 /// judge's) starts as a clone of it (see CLONE), so cargo rebuilds only what
@@ -897,7 +897,7 @@ fn append_line(file: &std::path::Path, line: &str) {
 /// index in the kernel (from 0 at initialize) plus it names its trace directory.
 static FIRST_RUN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Run trunk's checks, as agent: (every test accepts trunk, Verus verifies it).
+/// Run trunk's checks, as a check slot's user: (every test accepts trunk, Verus verifies it).
 /// Each candidate's build starts from trunk's, so they build it, unless a bon
 /// process before kept one for the same key (`trunk_key`): then the verdict
 /// cache answers them, or they run in a clone of it. Trunk's checks run alone,
@@ -906,7 +906,7 @@ fn warm(m: &Manifest, head: &str) -> (bool, bool) {
     WARMING.store(true, std::sync::atomic::Ordering::SeqCst);
     let (config, root) = (&m.config, &m.root);
     let tree = tree_of(root, head);
-    // bon run as agent (a candidate's tests) keeps nothing in engineer's directories.
+    // bon run confined (a candidate's tests) keeps nothing in engineer's directories.
     let key = if confined() { None } else { trunk_key(config, &tree) };
     let kept_build = key.as_deref().and_then(reuse);
     let mut result = (false, false);
@@ -1080,7 +1080,7 @@ fn prune_kept(keep: usize) {
     }
 }
 
-/// How a build directory is made from trunk's (as agent: `sh -c CLONE from to`):
+/// How a build directory is made from trunk's (as the build's user: `sh -c CLONE from to`):
 /// a copy-on-write clone of it, then each file `links` (beside it) names is
 /// hard-linked instead. A clone is a new file to macOS, which scans every new
 /// executable and library once, host-wide and one at a time, when it is first
@@ -1337,6 +1337,21 @@ impl Pools {
         let check_processes = host.check_processes.unwrap_or_else(|| check_pool(cores, free_memory_gb(), threads)).max(1);
         Pools { agent_processes: host.agent_processes.unwrap_or(64).max(1), check_processes, threads }
     }
+}
+
+/// The environment a check runs with on this host, as `env -i` arguments:
+/// the checks' PATH (the host file's, without agent's home), the toolchain's
+/// homes, and a check slot's user's home. Whoever asks with it (engineer, or
+/// a check slot's user in a check) sees the tools the checks run (`bon account`).
+pub fn check_environment() -> Vec<String> {
+    let host = host_file().ok().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| toml::from_str::<toml::Value>(&t).ok());
+    let text = |k: &str| host.as_ref().and_then(|h| h.get(k)).and_then(|v| v.as_str()).map(String::from);
+    let path: Vec<String> = host.as_ref().and_then(|h| h.get("path")).and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|d| d.as_str()).filter(|d| !std::path::Path::new(d).starts_with(AGENT_HOME)).map(String::from).collect())
+        .unwrap_or_else(|| vec!["/usr/bin".into(), "/bin".into()]);
+    let mut env = vec![format!("PATH={}", path.join(":")), format!("HOME={CHECK_HOME}")];
+    for (k, v) in [("RUSTUP_HOME", text("rustup_home")), ("CARGO_HOME", text("cargo_home"))] { if let Some(v) = v { env.push(format!("{k}={v}")); } }
+    env
 }
 
 /// How many check slots this host may have, so how many slot users `bon
@@ -1713,7 +1728,7 @@ fn dependencies(config: &Config, tree: &str, fresh: bool) -> String {
 }
 
 /// The cache key of a command on `on`, or None when it may not be cached: no
-/// tree, or bon running as agent (which may not keep engineer's cache). What
+/// tree, or bon running confined (which may not keep engineer's cache). What
 /// the check sees: the toolchain, the dependency sources, the tree, the test
 /// written into it, and the command.
 fn verdict_key(config: &Config, on: &On, command: &str) -> Option<String> {
@@ -1761,7 +1776,7 @@ fn flight(key: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
     FLIGHTS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).entry(key.to_string()).or_default().clone()
 }
 
-/// Run a check as agent in a read-only checkout, holding a check slot, with the
+/// Run a check in a read-only checkout, holding a check slot, as the slot's user, with the
 /// pool's threads; or answer it from the cache. A check's exit (0 or not), its
 /// output, and whether its cutoff (`[checks] time`) stopped it. Only a run that
 /// exited with a code of its own is cached: never one killed, signalled or not
@@ -2369,7 +2384,7 @@ pub fn on_trunk(m: &Manifest) -> (r: Result<(), String>) {
     Ok(())
 }
 
-/// Every test check and every verify check on a commit, run as agent in a
+/// Every test check and every verify check on a commit, run as a check slot's user in a
 /// checkout without `.git`, the way candidates are judged; each one's name,
 /// whether it exited 0, and its log. All of them run, not only until one fails.
 #[verifier::external]
@@ -3206,7 +3221,7 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
     let mut commit = commit;
     let mut written: Option<Vec<u8>> = None;
 
-    // Checks run in a read-only checkout, as agent.
+    // Checks run in a read-only checkout, as the slot's user.
     let cdir = scratch(&format!("{search}.{index}.check/{}", repository_name(root)));
     check_directory(root, &commit, &cdir)?;
     // Keyed by the candidate's tree: a byte-identical sibling's checks run once.
@@ -3501,7 +3516,7 @@ fn verdicts(m: &Manifest, tasks: &[(String, PathBuf)], test: &[u8], name: &str) 
 }
 
 /// Whether a test accepts `commit`: a read-only checkout of it with the test at
-/// the counterexample path, run as agent.
+/// the counterexample path, run as a check slot's user.
 /// The tree a counterexample's test builds on: the selected candidate it tests,
 /// or trunk's head.
 fn tested_tree(kind: &Kind, target: Option<&Search>, start: &str) -> String {
@@ -3629,7 +3644,7 @@ mod tests {
 
     #[test]
     fn the_pools_are_sized_from_the_host_file() {
-        let host = |keys: &str| -> Host { toml::from_str(&format!("{keys}\npath = []\nrustup_home = \"\"\ncargo_home = \"\"\n[prices]\n")).unwrap() };
+        let host = |keys: &str| -> Host { toml::from_str(&format!("{keys}\nuser = \"/u\"\npath = []\nrustup_home = \"\"\ncargo_home = \"\"\n[prices]\n")).unwrap() };
         // queue 26: width stays what bon.toml says; the pools bound what runs at once.
         // queue 54: the host file sets both pools directly.
         assert_eq!(Pools::of(&host("agent_processes = 500\ncheck_processes = 3\ncheck_threads = 4")), Pools { agent_processes: 500, check_processes: 3, threads: 4 });
@@ -3774,7 +3789,7 @@ mod tests {
         c.checks.time = 2;
         let tree = format!("test-tree-{}-{:?}", std::process::id(), Instant::now());
         let on = On { tree: tree.clone(), test: None, cache: Cache::Use };
-        // Run as agent (bon's judge runs bon's own tests so), bon keeps no cache at all.
+        // Run confined (bon's judge runs bon's own tests as a slot's user), bon keeps no cache at all.
         if confined() { assert_eq!(verdict_key(&c, &on, "echo hi"), None); return; }
         let key = verdict_key(&c, &on, "echo hi").unwrap();
         // Each part of the key changes it; no tree, no key.
@@ -3956,6 +3971,7 @@ mod tests {
 
     /// The tests' host file: no prices beyond these, a verdict cache of their own (never /tmp/bon's).
     const TEST_HOST: &str = r#"
+            user = "/the-tests-user-layer"
             path = ["/usr/bin", "/bin"]
             rustup_home = "/opt/bon/rustup"
             cargo_home = "/opt/bon/cargo-home"
@@ -3988,12 +4004,13 @@ mod tests {
             foil = { role = "deep", n = [3] }
         "#;
 
-    /// The tests' verdict cache: under the system's temporary directory, so
-    /// bon's tests leave nothing in /tmp/bon (queue 86).
-    fn test_verdicts() -> PathBuf { std::env::temp_dir().join(format!("bon-test-verdicts-{}", std::process::id())) }
+    /// The tests' user layer (its state: their verdict cache, their process
+    /// list): under the system's temporary directory, so bon's tests leave
+    /// nothing in /tmp/bon (queue 86) or in the host's user layer.
+    fn test_user() -> PathBuf { std::env::temp_dir().join(format!("bon-test-user-{}", std::process::id())) }
 
     fn config() -> Config {
-        let host: Host = toml::from_str(&format!("verdicts = {:?}\n{TEST_HOST}", test_verdicts().to_string_lossy())).unwrap();
+        let host: Host = toml::from_str(&TEST_HOST.replace("/the-tests-user-layer", &test_user().to_string_lossy())).unwrap();
         with_host(toml::from_str(TEST_MANIFEST).unwrap(), host, std::path::Path::new("/test/host.toml")).unwrap()
     }
 
@@ -4228,6 +4245,56 @@ mod tests {
     }
 
     #[test]
+    fn a_check_slot_s_user_writes_its_own_build_directory_alone() {
+        // queue 62, 57, 56: what a candidate's check runs as (its slot's user) writes its own build directory, and
+        // neither another slot's nor a kept trunk build; agent writes none of them; neither reads bon's state.
+        let c = config();
+        let asks = |who: Who| !confined() && run_as(who, &["/usr/bin/true"]).status().is_ok_and(|s| s.success());
+        // Confined (a candidate's tests), there is no one to ask as; otherwise bon setup made the slot users.
+        if confined() { return; }
+        assert!(asks(Who::Check(0)) && asks(Who::Check(1)), "no check slot users: run bon setup");
+        let can = |who: Who, argv: &[&str]| run_as(who, argv).status().is_ok_and(|s| s.success());
+        let (b0, b1) = (named_build("slot-test.0/build", Start::Empty), named_build("slot-test.1/build", Start::Empty));
+        assert!(ensure_build(&c, &b0, Who::Check(0)) && ensure_build(&c, &b1, Who::Check(1)));
+        let file = |d: &PathBuf| d.join("x").to_string_lossy().to_string();
+        assert!(can(Who::Check(0), &["/usr/bin/touch", &file(&b0)]), "a slot's user writes its own build directory");
+        assert!(!can(Who::Check(0), &["/usr/bin/touch", &file(&b1)]), "and not another slot's");
+        assert!(!can(Who::Check(0), &["/bin/ls", &b1.to_string_lossy()]), "nor reads it");
+        assert!(!can(Who::Agent, &["/usr/bin/touch", &file(&b0)]), "agent writes no slot's build directory");
+        // A slot's build is made again, empty, for another slot's user: nothing of the first stays.
+        assert!(ensure_build(&c, &b0, Who::Check(1)) && !b0.join("x").exists());
+        assert!(can(Who::Check(1), &["/usr/bin/touch", &file(&b0)]) && !can(Who::Check(0), &["/usr/bin/touch", &file(&b0)]));
+        remove_build(&c, &b0);
+        remove_build(&c, &b1);
+        assert!(!b0.exists() && !b1.exists(), "removed by its user, then engineer");
+        // A kept build, as `keep` leaves one: read, never written.
+        let kept = scratch("slot-test.kept");
+        std::fs::create_dir_all(kept.join("build")).unwrap();
+        std::fs::write(kept.join("build/lib.rlib"), "").unwrap();
+        sh(&kept, "chmod", &["-R", "go-w", "."]).unwrap();
+        for who in [Who::Agent, Who::Check(0)] {
+            assert!(can(who, &["/bin/cat", &kept.join("build/lib.rlib").to_string_lossy()]), "{who:?} reads a kept build");
+            assert!(!can(who, &["/usr/bin/touch", &kept.join("build/lib.rlib").to_string_lossy()]), "{who:?} writes no kept build");
+            assert!(!can(who, &["/usr/bin/touch", &kept.join("build/new").to_string_lossy()]), "{who:?} adds to no kept build");
+        }
+        // bon's state, in the user layer: no confined user reads, writes or searches it.
+        let state = state_dir().unwrap();
+        for who in [Who::Agent, Who::Check(0), Who::Check(1)] {
+            assert!(!can(who, &["/bin/ls", &state.to_string_lossy()]), "{who:?} lists no state");
+            assert!(!can(who, &["/usr/bin/touch", &state.join("x").to_string_lossy()]), "{who:?} writes no state");
+        }
+        // What a check leaves running is stopped before the slot's next check.
+        let mut left = Command::new("sudo").args(["-n", "-u", "check0", "/bin/sleep", "60"]).spawn().unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        vacate(0);
+        let start = Instant::now();
+        while left.try_wait().unwrap().is_none() && start.elapsed() < Duration::from_secs(5) { std::thread::sleep(Duration::from_millis(100)); }
+        assert!(left.try_wait().unwrap().is_some(), "vacate stops what check0 left running");
+        let _ = std::fs::remove_dir_all(&kept);
+        for p in ["slot-test.0", "slot-test.1"] { let _ = std::fs::remove_dir_all(scratch(p)); }
+    }
+
+    #[test]
     fn engineers_time_is_charged_once_split_among_the_searches_he_waits_on() {
         // queue 59: every running search but a background one is waited on, across bon processes and repositories.
         let e = |started: Option<u64>, background: bool| serde_json::json!({ "started": started, "background": background });
@@ -4290,7 +4357,7 @@ mod tests {
         let waiter = std::thread::spawn(move || { s.wait(); start.elapsed() });
         let mut c = Command::new("/bin/sh");
         c.args(["-c", "echo replying; sleep 2; echo done"]);
-        let r = supervised(c, None, Duration::from_secs(10), &log, Some(spoke));
+        let r = supervised(c, Who::Agent, None, Duration::from_secs(10), &log, Some(spoke));
         let heard = waiter.join().unwrap();
         assert!(r.ok && r.stdout == "replying\ndone\n", "{}", r.stdout);
         assert!(heard < Duration::from_millis(1500), "{heard:?}");
@@ -4303,7 +4370,7 @@ mod tests {
         let log = std::env::temp_dir().join(format!("bon-supervise-test-{}", std::process::id()));
         let c = as_agent(&config(), std::path::Path::new("/tmp"), &[], &["/bin/sh".into(), "-c".into(), "/bin/sleep 60 & wait".into()]);
         let start = Instant::now();
-        let Run { ok, killed, .. } = supervised(c, None, Duration::from_secs(1), &log, None);
+        let Run { ok, killed, .. } = supervised(c, Who::Agent, None, Duration::from_secs(1), &log, None);
         assert!(!ok && killed, "{}", std::fs::read_to_string(&log).unwrap_or_default());
         assert!(start.elapsed() < Duration::from_secs(6), "{:?}", start.elapsed());
         let _ = std::fs::remove_file(&log);
@@ -4522,8 +4589,8 @@ mod tests {
 
     #[test]
     fn the_verdict_key_covers_the_dependency_sources_and_not_the_host_file() {
-        // queue 64: a source the lockfile names changes the key; another file in the registry, or the host's prices, do not.
-        // Run as agent (bon's judge runs bon's own tests so), bon keeps no cache, so no key.
+        // queue 64, 63: which sources the lockfile names are unpacked changes the key; another file in the registry, or the host's prices, do not.
+        // Run confined (bon's judge runs bon's own tests as a slot's user), bon keeps no cache, so no key.
         if confined() { return; }
         let d = std::env::temp_dir().join(format!("bon-deps-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
@@ -4554,15 +4621,16 @@ mod tests {
         priced.prices.clear();
         priced.pools = Pools { agent_processes: 7, check_processes: 7, threads: c.pools.threads };
         assert_eq!(verdict_key(&priced, &on, "cargo test"), Some(key.clone()));
-        // An edit to a source the lockfile names, even of the same size: another digest, and another key.
-        std::fs::write(&source, "pub fn g() {}\n").unwrap();
+        // queue 63: the sources are engineer's, unpacked once from what the
+        // lockfile pins, so their bytes are the lockfile's to say; whether a
+        // package is unpacked yet (its .cargo-ok) is not: unpacking it changes the key.
+        std::fs::write(source.parent().unwrap().parent().unwrap().join(".cargo-ok"), "{\"v\":1}").unwrap();
         let after = dependencies(&c, &tree, true);
         assert_ne!(after, before);
         assert_ne!(verdict_key(&c, &on, "cargo test"), Some(key.clone()));
-        // Written back byte for byte: the digest is of the bytes, so the first key again.
-        std::fs::write(&source, "pub fn f() {}\n").unwrap();
-        assert_eq!(dependencies(&c, &tree, true), before);
-        assert_eq!(verdict_key(&c, &on, "cargo test"), Some(key));
+        // An edit to its bytes, which no candidate can make: the same key.
+        std::fs::write(&source, "pub fn g() {}\n").unwrap();
+        assert_eq!(dependencies(&c, &tree, true), after);
         let _ = std::fs::remove_dir_all(&d);
     }
 

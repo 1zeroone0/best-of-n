@@ -53,7 +53,8 @@ bon
 **You decide** the spec and the checks; the [queue](.bon/queue.tsv) holds what
 is wanted and not yet in the spec. **Search decides** the rest, as the POSIX
 user `agent`, which can read the checks and write only its own working
-directory. bon works on git's objects and the remote's trunk, never your
+directory; each check runs as its check slot's own user (`check0`, `check1`,
+…), which writes only its own build directory. bon works on git's objects and the remote's trunk, never your
 working tree: edit while it searches, and pull to follow. Every search's record
 goes to a private git remote of its own, never this repository.
 
@@ -71,12 +72,20 @@ checks the document against NIST's OSCAL JSON schema (its structure, required
 fields and identifier formats), not the metaschema's constraints, which NIST's
 `oscal-cli` validates.
 
+- **Isolated, as the policy states and the isolated gate observes before
+  every search:** each check runs as the user of the check slot it holds, in
+  a build directory only that user may enter, made a fresh clone of trunk's
+  kept build for it; nothing a slot's earlier check left running survives
+  into its next. No agent process and no check can write another slot's
+  build, trunk's kept builds, the checks' toolchain or the dependency sources
+  it compiles (engineer's), or reach bon's state (the verdict cache, the
+  process list), which lives in the user layer's `.bon`.
 - **Trusted, and not isolated:** agent processes all run as one user, so one
-  could write another's working directory, or build directory. A candidate's
-  checks build in a fresh clone of trunk's build, never the one its agent
-  process built in, but another candidate's check, running as the same user,
-  could still write there. Isolating them from each other is a reference
-  monitor's job, not bon's.
+  could write another's working directory, or its own build directory, which
+  no check uses. Every user can write the world-writable directories (`/tmp`),
+  so a check could leave a file there that a later check reads: a check that
+  reads outside its tree and the toolchain is not a function of what its key
+  says. Closing those is a sandbox's job (a reference monitor), not bon's.
 - **Next to Rust's types:** types keep a commit from passing as a path; Verus proves
   what a type cannot say, such as "this is the one candidate the spec selects".
 - **Next to Lean:** Lean checks a proof term in a small kernel, about a model of the

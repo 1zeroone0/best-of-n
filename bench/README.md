@@ -98,8 +98,9 @@ small, so a warm check is seconds.
 
 bon reads a host file the run writes (`BON_HOST`, in the sandbox): the
 installed host file's `path`, toolchain homes and `[prices]`, the two roles
-(`code`, `test`), the run's verdict cache, `cleanup = "own"`, and those
-sizes, so a run sizes the pools as another machine's directly
+(`code`, `test`), a user layer of the run's own (`user`, in the sandbox:
+its verdict cache and process list), and those sizes, so a run sizes the
+pools as another machine's directly
 (`CHECK_PROCESSES=6`: a 24 GB, 12-core laptop with 16 GB free). The rows
 below that name `BON_*` variables, `CORES` or `MEMORY_GB` are from before,
 when bon computed the pool from them.

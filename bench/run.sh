@@ -29,8 +29,10 @@
 #                  the host file's pool sizes, to size the pools as another
 #                  machine's [unset: this machine's defaults]
 # bon reads a host file the run writes (BON_HOST): the installed host file's
-# path, toolchain homes and prices, the two roles, the verdict cache in the
-# sandbox, cleanup = "own", and those sizes.
+# path, toolchain homes and prices, the two roles, a user layer of the run's
+# own in the sandbox (its verdict cache and process list), and those sizes.
+# Each check runs as its slot's user, check0, check1, …: there must be as
+# many as the check pool (bon setup makes them).
 set -eu
 WIDTH=${1:?usage: run.sh WIDTH [TAG]}
 TAG=${2:-w$WIDTH}
@@ -139,14 +141,13 @@ if grep -q '^traces' "$WORK/.bon/bon.toml"; then echo "refusing: bon.toml names 
 
 # The run's host file, written here: the installed host file's PATH,
 # toolchain homes and prices (keys of the same shape in every host file
-# bon has read), this run's two roles, its verdict cache, cleanup of its own
-# directories only, and any pool sizes asked for.
+# bon has read), this run's two roles, its own user layer (so its own verdict
+# cache and process list), and any pool sizes asked for.
 HOSTFILE=$SANDBOX/host.toml
 HOST=${HOST:-/etc/bon/host.toml}
 {
   grep -E '^(path|rustup_home|cargo_home) *=' "$HOST"
-  echo "verdicts = \"$SANDBOX/verdicts\""
-  echo 'cleanup = "own"'
+  echo "user = \"$SANDBOX/user\""
   for k in agent_processes check_processes check_threads; do
     v=$(eval "echo \${$(echo $k | tr a-z A-Z):-}")
     if [ -n "$v" ]; then echo "$k = $v"; fi

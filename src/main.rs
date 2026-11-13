@@ -25,12 +25,12 @@ const USAGE: &str = "usage:
   bon view                the same in the terminal view, as `bon` opens it in a terminal
   bon background [--plist] the stalest of compaction and counterexample, on spare capacity
   bon setup [--dry-run] [--for <user>]
-                          create user agent and group bon, and let <user> (default: you) run commands as agent;
+                          create users agent and check0, check1, … (one per check slot) and group bon, and let <user> (default: you) run commands as each;
                           run it as an administrator
   bon account [--check]   write what is proven, trusted, configured and tested, as OSCAL with its SBOM, or fail if it is stale
   bon types [--check]     write the types programs are built on, or fail if one is stale
   bon spec [NAME]         the spec's vocabulary and how it reaches the code, or one item
-  bon check               every check on the working tree, as agent, the way candidates are judged
+  bon check               every check on the working tree, as a check slot's user, the way candidates are judged
   bon cost                write .bon/cost.toml, what reaching trunk cost (bon does after each push)";
 
 /// The commands that grant capabilities.
@@ -178,7 +178,7 @@ fn protected(manifest: &toml::Value, path: &str) -> bool {
         || list(manifest.get("account").and_then(|s| s.get("trusted"))).iter().any(under)
 }
 
-/// bon check: every check on the working tree, run as agent in a checkout
+/// bon check: every check on the working tree, run as a check slot's user in a checkout
 /// without `.git`, the way candidates are judged; decided by exit codes. For a
 /// failure, where its errors are: in protected files the model fixes them; in
 /// the rest, a code search can.
@@ -193,7 +193,7 @@ fn check(root: &str) -> Result<(), String> {
         for (id, commit) in &reused { println!("  FAIL .bon/queue.tsv: id {id} was retired in {commit}; ids are never reused"); }
         return Err(format!("renumber from {}: one more than any id the queue has held", next_id(r)));
     }
-    println!("checking the working tree ({}) as agent, the way candidates are judged", &commit[..8]);
+    println!("checking the working tree ({}) as a check slot's user, the way candidates are judged", &commit[..8]);
     let results = best_of_n::trusted::check(&m, &commit.chars().collect())?;
     let mut failed = false;
     for (command, ok, log) in &results {

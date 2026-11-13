@@ -3,6 +3,12 @@ from __future__ import annotations
 
 from typing import TypedDict
 
+# POSIX permission bits.
+class Permission(TypedDict):
+    read: bool
+    write: bool
+    execute: bool
+
 # A git commit, by its hash. Its own type: a commit is never a path.
 Commit = str
 
@@ -87,6 +93,20 @@ class Search(TypedDict):
     trusted: list[Path]
     limit: int
     results: list[Candidate | None]
+
+# One confined user's permissions on each object the policy names, path by
+# path, as trusted code observed them: None where a path does not exist.
+# `build_directories[slot]` is check slot `slot`'s build directory.
+class Observation(TypedDict):
+    checks: list[Permission | None]
+    transcripts: list[Permission | None]
+    working_directory: list[Permission | None]
+    repository: list[Permission | None]
+    working_directories: list[Permission | None]
+    toolchain: list[Permission | None]
+    builds: list[Permission | None]
+    state: list[Permission | None]
+    build_directories: list[list[Permission | None]]
 
 # Everything bon shows, over the time range in `filter`.
 class Projection(TypedDict):
