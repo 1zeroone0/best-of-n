@@ -697,7 +697,8 @@ fn warm(m: &Manifest, head: &str) -> (bool, bool) {
     WARMING.store(true, std::sync::atomic::Ordering::SeqCst);
     let (config, root) = (&m.config, &m.root);
     let tree = tree_of(root, head);
-    let key = trunk_key(config, &tree);
+    // bon run as agent (a candidate's tests) keeps nothing in engineer's directories.
+    let key = if is_agent() { None } else { trunk_key(config, &tree) };
     let kept_build = key.as_deref().and_then(reuse);
     let mut result = (false, false);
     let dir = scratch(&format!("trunk/{}", repository_name(root)));
@@ -784,7 +785,7 @@ const TRUNK_BUILDS: usize = 3;
 /// homes, the tools' versions and bon's cargo (`toolchain_identity`). None
 /// when git names no tree.
 fn trunk_key(config: &Config, tree: &str) -> Option<String> {
-    if tree.is_empty() || is_agent() { return None; }
+    if tree.is_empty() { return None; }
     let mut h = Sha256::new();
     let id = toolchain_identity(config).1;
     let parts = [id.as_str(), tree, "test"].into_iter().chain(config.checks.test.iter().map(String::as_str))
