@@ -47,7 +47,7 @@ bon
 | `bon spec [NAME]` | the spec's vocabulary and how it reaches the code, or one item |
 | `bon types [--check]` | the types programs are built on, in TypeScript, Go and Python |
 | `bon account [--check]` | write what is proven, trusted, configured and tested, as OSCAL with its SBOM, or fail if it is stale |
-| `bon check` | every check on the working tree, as candidates are judged; whose fix a failure is |
+| `bon check` | every check on the working tree, as candidates are judged; whose fix a failure is; each file that breaks a rule on what a search may write |
 | `bon new <name>` | set up a project: a spec with the core nouns, its gates, an empty implementation, the manifest and the queue |
 
 **You decide** the spec and the checks; the [queue](.bon/queue.tsv) holds what
@@ -71,6 +71,22 @@ review, with [`.bon/sbom.json`](.bon/sbom.json) its CycloneDX bill of materials;
 checks the document against NIST's OSCAL JSON schema (its structure, required
 fields and identifier formats), not the metaschema's constraints, which NIST's
 `oscal-cli` validates.
+
+`bon check` holds three rules, naming the file and the rule where one
+breaks: every file a search may write is proven or read by a declared check;
+no check lives in such a file; and nothing a candidate writes changes how it
+is judged (no local crate with a build script or a proc macro, no unit test in
+such a file, no plain Rust outside `verus!` in the kernel). The remedy for a
+file no check reads is a check that reads it, or a line in `[checks] paths`;
+a candidate that needs it changed then reaches you as a protected change to
+review. Not enforced: a file the code takes in with `include_str!` counts as
+read only if a check names it. What decides a push is checked again from
+a clean build; beside it, once, run the expensive checks, `[checks] staged`,
+which no other candidate runs: one that fails stops bon as a suspect check
+does, and nothing is pushed. A compaction candidate's rank = its `rank`
+command's integer − its suite's seconds, rounded (each test and verify check
+run again once built, timed by bon, kept with the verdict, so a tree is timed
+once per host).
 
 - **Isolated, as the policy states and the isolated gate observes before
   every search:** each check runs as the user of the check slot it holds, in

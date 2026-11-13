@@ -2566,7 +2566,43 @@
       },
       {
         "name": "bon:trusted-file",
-        "value": "examples/kernel.rs"
+        "value": "checks/"
+      },
+      {
+        "name": "bon:trusted-file",
+        "value": "examples/"
+      },
+      {
+        "name": "bon:trusted-file",
+        "value": "Cargo.toml"
+      },
+      {
+        "name": "bon:trusted-file",
+        "value": "Cargo.lock"
+      },
+      {
+        "name": "bon:trusted-file",
+        "value": ".gitignore"
+      },
+      {
+        "name": "bon:trusted-file",
+        "value": "README.md"
+      },
+      {
+        "name": "bon:trusted-file",
+        "value": "skills/"
+      },
+      {
+        "name": "bon:trusted-file",
+        "value": "assets/"
+      },
+      {
+        "name": "bon:trusted-file",
+        "value": "bench/"
+      },
+      {
+        "name": "bon:trusted-file",
+        "value": "template/"
       },
       {
         "name": "bon:trusted-functions",

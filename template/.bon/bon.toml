@@ -11,8 +11,9 @@ limit = 0.0
 time = 3600
 
 [checks]
-# The spec and the gates' contracts: no search changes them.
-paths = ["src/spec.rs", "src/gates.rs"]
+# The spec, the gates' contracts, the types bon types emits from them, and
+# the build's configuration, which no check reads: no search changes them.
+paths = ["src/spec.rs", "src/gates.rs", "types/", "Cargo.toml", "Cargo.lock", ".gitignore"]
 # The tests: a candidate is accepted when each exits 0.
 test = ["cargo test -q"]
 # Verus: an accepted candidate is proved when each exits 0.

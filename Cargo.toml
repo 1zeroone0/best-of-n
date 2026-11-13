@@ -20,6 +20,24 @@ path = "src/main.rs"
 name = "bon-sample"
 path = "src/bin/bon-sample.rs"
 
+# engineer's tests, under checks/, which no search may change; tests/ holds
+# the counterexamples' tests.
+[[test]]
+name = "encoding"
+path = "checks/encoding.rs"
+
+[[test]]
+name = "bon-sample"
+path = "checks/bon-sample.rs"
+
+[[test]]
+name = "new"
+path = "checks/new.rs"
+
+[[test]]
+name = "oscal"
+path = "checks/oscal.rs"
+
 [dependencies]
 vstd = "=0.0.0-2026-10-18-0147"
 verus_state_machines_macros = "=0.0.0-2026-10-18-0147"

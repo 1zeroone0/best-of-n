@@ -9,8 +9,10 @@ limit = 5.00
 time = 3600
 
 [checks]
-# The spec, the gates' contracts and the agree check: no search changes them.
-paths = ["src/spec.rs", "src/gates.rs", "examples/kernel.rs"]
+# The spec, the gates' contracts, the agree check and engineer's tests; and
+# every file no check reads (bon check's rules): no search changes them.
+paths = ["src/spec.rs", "src/gates.rs", "checks/", "examples/", "Cargo.toml", "Cargo.lock", ".gitignore",
+         "README.md", "skills/", "assets/", "bench/", "template/"]
 # The tests: a candidate is accepted when each exits 0.
 test = ["cargo test -q", "cargo run -q -- account --check", "cargo run -q -- types --check"]
 # Verus: an accepted candidate is proved when each exits 0.

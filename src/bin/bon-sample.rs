@@ -25,29 +25,29 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const USAGE: &str = "usage: bon-sample --model <id> [--max-file-bytes N] [--max-output-tokens N] [--effort LEVEL] (BON_CLIENT, BON_CONTEXT and BON_HOST from bon)";
-const API_VERSION: &str = "2026-10-21";
+pub(crate) const USAGE: &str = "usage: bon-sample --model <id> [--max-file-bytes N] [--max-output-tokens N] [--effort LEVEL] (BON_CLIENT, BON_CONTEXT and BON_HOST from bon)";
+pub(crate) const API_VERSION: &str = "2026-10-21";
 /// The host file when BON_HOST names none.
-const HOST: &str = "/etc/bon/host.toml";
+pub(crate) const HOST: &str = "/etc/bon/host.toml";
 /// The largest prompt, in tokens, when the role names no context: under
 /// Haiku 5.5's tier line (100,000 tokens, past which every price is five
 /// times) with margin.
-const DEFAULT_CONTEXT_TOKENS: usize = 80_000;
+pub(crate) const DEFAULT_CONTEXT_TOKENS: usize = 80_000;
 /// Bytes counted per token of the budget: fewer than the 2.4 measured on this
 /// repository's code, so a prompt held to the budget in bytes stays under it
 /// in tokens (80,000 tokens are 160,000 bytes, about 67,000 measured tokens).
-const BYTES_PER_TOKEN: usize = 2;
-const DEFAULT_FILE_BYTES: usize = 160_000;
-const DEFAULT_OUTPUT_TOKENS: u64 = 16_000;
+pub(crate) const BYTES_PER_TOKEN: usize = 2;
+pub(crate) const DEFAULT_FILE_BYTES: usize = 160_000;
+pub(crate) const DEFAULT_OUTPUT_TOKENS: u64 = 16_000;
 /// Where codex runs: empty, and the same for every agent process.
-const CODEX_DIR: &str = "/var/empty";
+pub(crate) const CODEX_DIR: &str = "/var/empty";
 /// Directories never sent: build output, dependencies, version control.
-const SKIP_DIRS: [&str; 6] = [".git", "target", "node_modules", ".venv", "__pycache__", ".cargo"];
-const LOCKFILES: [&str; 10] = ["Cargo.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "go.sum",
+pub(crate) const SKIP_DIRS: [&str; 6] = [".git", "target", "node_modules", ".venv", "__pycache__", ".cargo"];
+pub(crate) const LOCKFILES: [&str; 10] = ["Cargo.lock", "package-lock.json", "yarn.lock", "pnpm-lock.yaml", "go.sum",
                                "poetry.lock", "uv.lock", "Gemfile.lock", "composer.lock", "flake.lock"];
 
 /// The output format, first in the stable prefix.
-const INSTRUCTIONS: &str = "You see a repository's files and a task, and you reply once, \
+pub(crate) const INSTRUCTIONS: &str = "You see a repository's files and a task, and you reply once, \
 with edits. You cannot run commands, open other files or ask questions: whatever the task says about reading or \
 running the checks, they run on your edits after you reply.
 
@@ -70,15 +70,15 @@ Reply with edit blocks in exactly this format, and after them one line saying wh
 ";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Client { Api, Claude, Codex }
+pub(crate) enum Client { Api, Claude, Codex }
 
 #[derive(Debug)]
-struct Args { client: Client, model: String, max_context: usize, max_file: usize, max_output: u64, effort: Option<String> }
+pub(crate) struct Args { pub(crate) client: Client, pub(crate) model: String, pub(crate) max_context: usize, pub(crate) max_file: usize, pub(crate) max_output: u64, pub(crate) effort: Option<String> }
 
-type Env<'a> = &'a dyn Fn(&str) -> Option<String>;
+pub(crate) type Env<'a> = &'a dyn Fn(&str) -> Option<String>;
 
 /// The arguments, and what bon gave in the environment: the client and the context budget.
-fn parse_args(argv: &[String], env: Env) -> Result<Args, String> {
+pub(crate) fn parse_args(argv: &[String], env: Env) -> Result<Args, String> {
     let client = match env("BON_CLIENT").as_deref() {
         Some("api") => Client::Api, Some("claude") => Client::Claude, Some("codex") => Client::Codex,
         Some(c) => return Err(format!("BON_CLIENT: unknown client {c}; api, claude or codex")),
@@ -108,7 +108,7 @@ fn parse_args(argv: &[String], env: Env) -> Result<Args, String> {
 }
 
 /// The host file's [api]: (address, key file).
-fn api(env: Env) -> Result<(String, String), String> {
+pub(crate) fn api(env: Env) -> Result<(String, String), String> {
     let file = env("BON_HOST").unwrap_or_else(|| HOST.into());
     let host: toml::Value = toml::from_str(&std::fs::read_to_string(&file).map_err(|e| format!("{file}: {e}"))?).map_err(|e| format!("{file}: {e}"))?;
     let key = |k: &str| host.get("api").and_then(|a| a.get(k)).and_then(|v| v.as_str()).map(String::from)
@@ -122,11 +122,11 @@ fn api(env: Env) -> Result<(String, String), String> {
 /// tree and the paths the task names, so the agent processes of a search send
 /// it byte for byte the same.
 #[derive(Debug, PartialEq)]
-struct Context { repository: String, included: Vec<String>, omitted: Vec<(String, &'static str)>, fixed: Vec<String> }
+pub(crate) struct Context { pub(crate) repository: String, pub(crate) included: Vec<String>, pub(crate) omitted: Vec<(String, &'static str)>, pub(crate) fixed: Vec<String> }
 
 /// Every file under `root`, relative, '/'-separated, sorted by bytes. Symlinks
 /// and the skipped directories are not followed.
-fn tree(root: &Path) -> Vec<String> {
+pub(crate) fn tree(root: &Path) -> Vec<String> {
     fn walk(dir: &Path, rel: &str, out: &mut Vec<String>) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };
         for e in entries.flatten() {
@@ -150,7 +150,7 @@ fn tree(root: &Path) -> Vec<String> {
 /// task first names them. Only path-like tokens count, with a `/` or a `.`, so
 /// a word such as "checks" does not pull in a directory of that name; a
 /// location a compiler or Verus prints (`src/exec.rs:1300:5`) names its file.
-fn named(prompt: &str, files: &[String]) -> Vec<String> {
+pub(crate) fn named(prompt: &str, files: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let path_char = |c: char| c.is_ascii_alphanumeric() || "_./-".contains(c);
     for token in prompt.split(|c: char| !path_char(c)) {
@@ -166,14 +166,14 @@ fn named(prompt: &str, files: &[String]) -> Vec<String> {
 
 /// Whether this process may write `p`: the checks and what else bon protects
 /// are read-only to agent in its working directory. Opened for writing, never written.
-fn writable(p: &Path) -> bool { std::fs::OpenOptions::new().write(true).open(p).is_ok() }
+pub(crate) fn writable(p: &Path) -> bool { std::fs::OpenOptions::new().write(true).open(p).is_ok() }
 
 /// The files in the request: the ones the task names first, each in full,
 /// then the rest that fit. A named file is never dropped for the budget while
 /// an unnamed one is kept: once a named file does not fit, no unnamed file
 /// comes; nor does the per-file cap apply to a named file. It says which files
 /// may not be changed.
-fn context(root: &Path, prompt: &str, max_context: usize, max_file: usize) -> Context {
+pub(crate) fn context(root: &Path, prompt: &str, max_context: usize, max_file: usize) -> Context {
     let files = tree(root);
     let first = named(prompt, &files);
     let order = first.iter().map(|f| (f, true)).chain(files.iter().filter(|f| !first.contains(f)).map(|f| (f, false)));
@@ -215,11 +215,11 @@ fn context(root: &Path, prompt: &str, max_context: usize, max_file: usize) -> Co
 // ── edits ───────────────────────────────────────────────
 
 #[derive(Debug, PartialEq)]
-struct Edit { path: String, search: String, replace: String }
+pub(crate) struct Edit { pub(crate) path: String, pub(crate) search: String, pub(crate) replace: String }
 
 /// The edit blocks of a reply. Text outside blocks is ignored; a block left
 /// open or out of order is an error.
-fn parse(reply: &str) -> Result<Vec<Edit>, String> {
+pub(crate) fn parse(reply: &str) -> Result<Vec<Edit>, String> {
     #[derive(PartialEq)]
     enum At { Outside, Search, Replace }
     let mut at = At::Outside;
@@ -254,7 +254,7 @@ fn parse(reply: &str) -> Result<Vec<Edit>, String> {
 
 /// A path the reply may write: relative, plain components only, and no
 /// symlink on the way (none could lead out of the working directory).
-fn checked(root: &Path, path: &str) -> Result<PathBuf, String> {
+pub(crate) fn checked(root: &Path, path: &str) -> Result<PathBuf, String> {
     let p = Path::new(path);
     if path.contains('\0') || path.contains('\\') { return Err(format!("{path}: refused")); }
     if p.is_absolute() { return Err(format!("{path}: absolute paths are refused")); }
@@ -277,7 +277,7 @@ fn checked(root: &Path, path: &str) -> Result<PathBuf, String> {
 }
 
 /// Apply every edit or none. Returns the paths written.
-fn apply(root: &Path, edits: &[Edit]) -> Result<Vec<String>, String> {
+pub(crate) fn apply(root: &Path, edits: &[Edit]) -> Result<Vec<String>, String> {
     let mut files: BTreeMap<String, (PathBuf, Option<String>, String)> = BTreeMap::new();
     for (i, e) in edits.iter().enumerate() {
         let block = i + 1;
@@ -343,17 +343,17 @@ fn apply(root: &Path, edits: &[Edit]) -> Result<Vec<String>, String> {
 // ── transports ──────────────────────────────────────────
 
 /// A model's reply and the usage line for bon.
-struct Reply { text: String, usage: serde_json::Value }
+pub(crate) struct Reply { pub(crate) text: String, pub(crate) usage: serde_json::Value }
 
 /// Why a transport gave no usable reply, and the reply when tokens were spent anyway.
-struct Failure { why: String, spent: Option<Reply> }
+pub(crate) struct Failure { pub(crate) why: String, pub(crate) spent: Option<Reply> }
 
 impl From<String> for Failure { fn from(why: String) -> Self { Failure { why, spent: None } } }
 
 /// The usage line, shaped like the Claude CLI's final `result` event. No
 /// `costUSD`: this transport knows no price, and bon prices the tokens itself.
 /// `requests`: one, so bon can apply a price's tier for a large prompt.
-fn usage_line(model: &str, input: u64, cache_read: u64, cache_write_5m: u64, cache_write_1h: u64, output: u64) -> serde_json::Value {
+pub(crate) fn usage_line(model: &str, input: u64, cache_read: u64, cache_write_5m: u64, cache_write_1h: u64, output: u64) -> serde_json::Value {
     serde_json::json!({ "type": "result", "requests": 1, "modelUsage": { model: {
         "inputTokens": input, "cacheReadInputTokens": cache_read, "outputTokens": output,
         "cacheCreationInputTokens": cache_write_5m + cache_write_1h,
@@ -362,7 +362,7 @@ fn usage_line(model: &str, input: u64, cache_read: u64, cache_write_5m: u64, cac
 }
 
 /// A quoted value in a curl config file.
-fn curl_quote(s: &str) -> String {
+pub(crate) fn curl_quote(s: &str) -> String {
     let mut out = String::from("\"");
     for c in s.chars() {
         match c { '\\' => out.push_str("\\\\"), '"' => out.push_str("\\\""), '\n' => out.push_str("\\n"), '\r' => out.push_str("\\r"), c => out.push(c) }
@@ -372,7 +372,7 @@ fn curl_quote(s: &str) -> String {
 }
 
 /// Run a program with `stdin`; (exit 0, stdout, stderr).
-fn run_with_stdin(mut c: Command, stdin: &str) -> Result<(bool, String, String), String> {
+pub(crate) fn run_with_stdin(mut c: Command, stdin: &str) -> Result<(bool, String, String), String> {
     let mut child = c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
         .map_err(|e| format!("spawn {:?}: {e}", c.get_program()))?;
     let mut pipe = child.stdin.take().unwrap();
@@ -385,7 +385,7 @@ fn run_with_stdin(mut c: Command, stdin: &str) -> Result<(bool, String, String),
 
 /// Run a program with `stdin`, `line` called on each line of its stdout as it
 /// comes; (exit 0, stdout, stderr).
-fn run_streaming(mut c: Command, stdin: &str, line: &mut dyn FnMut(&str)) -> Result<(bool, String, String), String> {
+pub(crate) fn run_streaming(mut c: Command, stdin: &str, line: &mut dyn FnMut(&str)) -> Result<(bool, String, String), String> {
     let mut child = c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
         .map_err(|e| format!("spawn {:?}: {e}", c.get_program()))?;
     let mut pipe = child.stdin.take().unwrap();
@@ -407,7 +407,7 @@ fn run_streaming(mut c: Command, stdin: &str, line: &mut dyn FnMut(&str)) -> Res
 }
 
 /// A program on the PATH the environment gives (bon's, or a test's).
-fn on_path(program: &str, env: Env) -> Command {
+pub(crate) fn on_path(program: &str, env: Env) -> Command {
     let mut c = Command::new(program);
     if let Some(p) = env("PATH") { c.env("PATH", p); }
     c
@@ -417,7 +417,7 @@ fn on_path(program: &str, env: Env) -> Command {
 /// its config, never in argv. The stable prefix is the system prompt, with a
 /// cache breakpoint at its end; the task is the user turn. Where the API is
 /// and the key's file are the host file's [api].
-fn via_api(a: &Args, ctx: &Context, prompt: &str, env: Env) -> Result<Reply, Failure> {
+pub(crate) fn via_api(a: &Args, ctx: &Context, prompt: &str, env: Env) -> Result<Reply, Failure> {
     let (base, key_file) = api(env)?;
     let key = std::fs::read_to_string(&key_file).map_err(|e| format!("{key_file}: {e}"))?.trim().to_string();
     if key.is_empty() { return Err(format!("{key_file} is empty").into()); }
@@ -463,13 +463,13 @@ fn via_api(a: &Args, ctx: &Context, prompt: &str, env: Env) -> Result<Reply, Fai
 /// request was taken, so its prompt is in the provider's cache for the next
 /// agent process (bon starts a search's other agent processes at its leader's
 /// first output).
-const REPLYING: &str = "bon-sample: replying";
+pub(crate) const REPLYING: &str = "bon-sample: replying";
 
 /// The Claude CLI, one shot: no tools, no settings, MCP, slash commands or
 /// session on disk. The format is the system prompt; the files then the task
 /// are the one user turn, so the prefix is the same for every agent process.
 /// Its events stream, so REPLYING goes out when the reply starts.
-fn via_claude(a: &Args, ctx: &Context, prompt: &str, env: Env) -> Result<Reply, Failure> {
+pub(crate) fn via_claude(a: &Args, ctx: &Context, prompt: &str, env: Env) -> Result<Reply, Failure> {
     let mut c = on_path("claude", env);
     c.args(["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--model", &a.model, "--tools", "",
             "--system-prompt", INSTRUCTIONS, "--setting-sources", "", "--strict-mcp-config", "--no-session-persistence", "--disable-slash-commands"]);
@@ -499,7 +499,7 @@ fn via_claude(a: &Args, ctx: &Context, prompt: &str, env: Env) -> Result<Reply, 
 /// empty directory: it has nothing to look at or write, and its environment
 /// context (which names the directory) is the same for every agent process,
 /// so the prefix caches. The edits are applied here, in the working directory.
-fn via_codex(a: &Args, ctx: &Context, prompt: &str, env: Env) -> Result<Reply, Failure> {
+pub(crate) fn via_codex(a: &Args, ctx: &Context, prompt: &str, env: Env) -> Result<Reply, Failure> {
     let mut c = on_path("codex", env);
     c.args(["exec", "--json", "--ephemeral", "--ignore-rules", "--ignore-user-config", "--skip-git-repo-check",
             "--sandbox", "read-only", "--color", "never", "-m", &a.model]);
@@ -525,9 +525,9 @@ fn via_codex(a: &Args, ctx: &Context, prompt: &str, env: Env) -> Result<Reply, F
 
 /// What the process prints and whether it succeeded: stdout (the reply, then
 /// the usage line last) and the reason on failure.
-struct Outcome { stdout: String, error: Option<String> }
+pub(crate) struct Outcome { pub(crate) stdout: String, pub(crate) error: Option<String> }
 
-fn run(argv: &[String], prompt: &str, root: &Path, env: Env) -> Outcome {
+pub(crate) fn run(argv: &[String], prompt: &str, root: &Path, env: Env) -> Outcome {
     let fail = |e: String| Outcome { stdout: String::new(), error: Some(e) };
     let a = match parse_args(argv, env) { Ok(a) => a, Err(e) => return fail(e) };
     // The files get what the budget leaves after the instructions and the task.
@@ -552,7 +552,7 @@ fn run(argv: &[String], prompt: &str, root: &Path, env: Env) -> Outcome {
     }
 }
 
-fn main() {
+pub(crate) fn main() {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut prompt = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut prompt) { eprintln!("bon-sample: stdin: {e}"); std::process::exit(2); }
@@ -561,303 +561,4 @@ fn main() {
     print!("{}", o.stdout);
     let _ = std::io::stdout().flush();
     if let Some(e) = o.error { eprintln!("bon-sample: {e}"); std::process::exit(1); }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    fn scratch() -> PathBuf {
-        static N: AtomicUsize = AtomicUsize::new(0);
-        let d = std::env::temp_dir().join(format!("bon-sample-test-{}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
-        let _ = std::fs::remove_dir_all(&d);
-        std::fs::create_dir_all(&d).unwrap();
-        d
-    }
-    fn write(root: &Path, p: &str, s: &[u8]) {
-        let f = root.join(p);
-        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
-        std::fs::write(f, s).unwrap();
-    }
-    fn read(root: &Path, p: &str) -> String { std::fs::read_to_string(root.join(p)).unwrap() }
-    fn block(path: &str, search: &str, replace: &str) -> String {
-        format!("@@@ FILE {path}\n@@@ SEARCH\n{search}@@@ REPLACE\n{replace}@@@ END\n")
-    }
-
-    #[test]
-    fn parses_blocks_and_ignores_prose() {
-        let reply = format!("Here:\n{}{}Changed a and created b.\n", block("src/a.rs", "x\n", "y\n"), block("b.txt", "", "new\n"));
-        let e = parse(&reply).unwrap();
-        assert_eq!(e, vec![Edit { path: "src/a.rs".into(), search: "x\n".into(), replace: "y\n".into() },
-                           Edit { path: "b.txt".into(), search: "".into(), replace: "new\n".into() }]);
-    }
-
-    #[test]
-    fn malformed_replies_are_errors() {
-        assert!(parse("no blocks here\n").is_err());
-        assert!(parse("@@@ FILE a\n@@@ SEARCH\nx\n@@@ REPLACE\ny\n").is_err(), "unterminated");
-        assert!(parse("@@@ FILE a\n@@@ REPLACE\ny\n@@@ END\n").is_err(), "out of order");
-        assert!(parse("@@@ SEARCH\nx\n@@@ REPLACE\ny\n@@@ END\n").is_err(), "no FILE");
-    }
-
-    #[test]
-    fn applies_in_order_and_creates_files() {
-        let d = scratch();
-        write(&d, "a.txt", b"one\ntwo\nthree\n");
-        let reply = format!("{}{}{}", block("a.txt", "two\n", "2\n"), block("a.txt", "2\nthree\n", "2\n3\n"), block("new/dir/b.txt", "", "b\n"));
-        let written = apply(&d, &parse(&reply).unwrap()).unwrap();
-        assert_eq!(written, vec!["a.txt".to_string(), "new/dir/b.txt".to_string()]);
-        assert_eq!(read(&d, "a.txt"), "one\n2\n3\n");
-        assert_eq!(read(&d, "new/dir/b.txt"), "b\n");
-    }
-
-    #[test]
-    fn a_last_line_without_newline_matches() {
-        let d = scratch();
-        write(&d, "a.txt", b"one\ntwo");
-        apply(&d, &parse(&block("a.txt", "two\n", "2\n")).unwrap()).unwrap();
-        assert_eq!(read(&d, "a.txt"), "one\n2");
-    }
-
-    #[test]
-    fn nothing_applies_unless_everything_does() {
-        let d = scratch();
-        write(&d, "a.txt", b"x\nx\n");
-        write(&d, "b.txt", b"b\n");
-        for bad in [block("b.txt", "b\n", "B\n") + &block("a.txt", "x\n", "y\n"),   // ambiguous
-                    block("b.txt", "b\n", "B\n") + &block("a.txt", "z\n", "y\n"),   // not found
-                    block("b.txt", "b\n", "B\n") + &block("c.txt", "z\n", "y\n"),   // no such file
-                    block("b.txt", "b\n", "B\n") + &block("../c.txt", "", "y\n")] { // refused
-            assert!(apply(&d, &parse(&bad).unwrap()).is_err(), "{bad}");
-            assert_eq!(read(&d, "a.txt"), "x\nx\n");
-            assert_eq!(read(&d, "b.txt"), "b\n");
-        }
-        assert_eq!(std::fs::read_dir(&d).unwrap().count(), 2, "no temporary files left");
-    }
-
-    #[test]
-    fn paths_outside_are_refused() {
-        let d = scratch();
-        std::os::unix::fs::symlink("/tmp", d.join("link")).unwrap();
-        for p in ["/etc/passwd", "../x", "a/../../x", "a/..", "link/x", "./", "", "a\\b"] {
-            assert!(checked(&d, p).is_err(), "{p}");
-        }
-        assert!(checked(&d, "src/new.rs").is_ok());
-        assert!(checked(&d, "./a.txt").is_err(), "a CurDir component is refused");
-    }
-
-    #[test]
-    fn context_is_deterministic_named_first_and_skips() {
-        let d = scratch();
-        write(&d, "src/z.rs", b"fn z() {}\n");
-        write(&d, "src/a.rs", b"fn a() {}\n");
-        write(&d, "checks/spec.rs", b"spec\n");
-        write(&d, "README.md", b"readme");
-        write(&d, "Cargo.lock", b"lock\n");
-        write(&d, "target/debug/x", b"build\n");
-        write(&d, ".git/HEAD", b"ref\n");
-        write(&d, "logo.png", b"\x89PNG\r\n\x1a\n\0\0\xff");
-        write(&d, "big.txt", &vec![b'a'; 2000]);
-        let prompt = "The checks are [\"src/z.rs\", \"checks/\"]: read them.";
-        let c = context(&d, prompt, 10_000, 1000);
-        assert_eq!(c, context(&d, prompt, 10_000, 1000), "the same tree and task give the same bytes");
-        assert_eq!(c.included, vec!["src/z.rs", "checks/spec.rs", "README.md", "src/a.rs"]);
-        assert_eq!(c.omitted, vec![("Cargo.lock".to_string(), "lockfile"), ("big.txt".to_string(), "over the per-file cap"),
-                                   ("logo.png".to_string(), "binary")]);
-        assert!(c.repository.contains("<file path=\"README.md\">\nreadme\n</file>\n"));
-        // Over the budget: skipped, and later files that fit still come.
-        let small = context(&d, prompt, 25, 1000);
-        assert_eq!(small.included, vec!["src/z.rs", "checks/spec.rs", "README.md"]);
-        assert!(small.omitted.contains(&("src/a.rs".to_string(), "over the context budget")));
-    }
-
-    #[test]
-    fn arguments() {
-        // queue 55: the client and the context budget come from the role, through bon's environment.
-        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        let role = |k: &str| match k { "BON_CLIENT" => Some("claude".to_string()), "BON_CONTEXT" => Some("10".to_string()), _ => None };
-        let a = parse_args(&s(&["--model", "m"]), &role).unwrap();
-        assert_eq!((a.client, a.model.as_str(), a.max_context), (Client::Claude, "m", 10 * BYTES_PER_TOKEN));
-        let api = |k: &str| (k == "BON_CLIENT").then(|| "api".to_string());
-        assert_eq!(parse_args(&s(&["--model", "m"]), &api).unwrap().max_context, DEFAULT_CONTEXT_TOKENS * BYTES_PER_TOKEN);
-        // The default, at the 2.4 bytes a token measured, is under Haiku's 100,000-token tier line.
-        assert!(DEFAULT_CONTEXT_TOKENS * BYTES_PER_TOKEN * 10 / 24 < 100_000);
-        assert!(parse_args(&s(&["--model", "m"]), &|_| None).unwrap_err().contains("BON_CLIENT"));
-        assert!(parse_args(&s(&["--model", "m"]), &|k| (k == "BON_CLIENT").then(|| "x".to_string())).is_err());
-        assert!(parse_args(&s(&[]), &role).is_err());
-        assert!(parse_args(&s(&["--via", "api", "--model", "m"]), &role).is_err(), "no --via: the role says the client");
-    }
-
-    /// A host file whose [api] is `address`, its key in a file of its own: the file.
-    fn host_with_api(address: &str, key: &str) -> String {
-        let d = scratch();
-        std::fs::write(d.join("key"), key).unwrap();
-        let host = d.join("host.toml");
-        std::fs::write(&host, format!("path = []\n[api]\naddress = {address:?}\nkey_file = {:?}\n", d.join("key").to_string_lossy())).unwrap();
-        host.to_string_lossy().to_string()
-    }
-
-    /// A directory holding `name`, a program that reads its stdin and prints `lines`:
-    /// a PATH on which it is that client, the system's tools after it.
-    fn client_on_path(name: &str, lines: &[String]) -> String {
-        let d = scratch();
-        let quoted: Vec<String> = lines.iter().map(|l| format!("'{l}'")).collect();
-        std::fs::write(d.join(name), format!("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' {}\n", quoted.join(" "))).unwrap();
-        std::fs::set_permissions(d.join(name), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        format!("{}:/usr/bin:/bin", d.display())
-    }
-
-    #[test]
-    fn a_failing_check_s_locations_name_their_files_and_a_named_file_is_never_dropped_for_another() {
-        // queue 74: `src/exec.rs:1300:5` in a check's output names src/exec.rs.
-        let d = scratch();
-        write(&d, "src/a.rs", b"fn a() {}\n");
-        write(&d, "src/exec.rs", &vec![b'x'; 3000]);
-        write(&d, "src/z.rs", b"fn z() {}\n");
-        let prompt = "This check fails on trunk: cargo verus verify\nerror: postcondition not satisfied\n   --> src/exec.rs:1300:5\n";
-        let files = tree(&d);
-        assert_eq!(named(prompt, &files), ["src/exec.rs"]);
-        // Named, it comes first, past the per-file cap.
-        let c = context(&d, prompt, 10_000, 1000);
-        assert_eq!(c.included, ["src/exec.rs", "src/a.rs", "src/z.rs"]);
-        // Over the budget, it is not shown, and then neither is any file the task does not name.
-        let c = context(&d, prompt, 100, 1000);
-        assert!(c.included.is_empty(), "{:?}", c.included);
-        assert!(c.omitted.contains(&("src/exec.rs".to_string(), "over the context budget")));
-        assert!(c.omitted.contains(&("src/a.rs".to_string(), "over the context budget")));
-    }
-
-    #[test]
-    fn the_context_says_which_files_cannot_be_changed() {
-        use std::os::unix::fs::PermissionsExt;
-        let d = scratch();
-        write(&d, "src/spec.rs", b"spec\n");
-        write(&d, "src/lib.rs", b"lib\n");
-        std::fs::set_permissions(d.join("src/spec.rs"), std::fs::Permissions::from_mode(0o444)).unwrap();
-        let c = context(&d, "task", 10_000, 1000);
-        assert_eq!(c.fixed, ["src/spec.rs"]);
-        assert!(c.repository.contains("You cannot change these files (the checks, and what else bon protects): an edit to any of them is refused: src/spec.rs\n"));
-        std::fs::set_permissions(d.join("src/spec.rs"), std::fs::Permissions::from_mode(0o644)).unwrap();
-    }
-
-    /// One HTTP exchange on a local port: returns the base URL and a handle
-    /// yielding the request's head and body.
-    fn mock(status: &str, body: String) -> (String, std::thread::JoinHandle<(String, String)>) {
-        use std::io::BufRead;
-        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}", l.local_addr().unwrap());
-        let status = status.to_string();
-        let h = std::thread::spawn(move || {
-            let (s, _) = l.accept().unwrap();
-            let mut r = std::io::BufReader::new(s.try_clone().unwrap());
-            let mut head = String::new();
-            loop { let mut line = String::new(); r.read_line(&mut line).unwrap(); if line == "\r\n" || line.is_empty() { break; } head.push_str(&line); }
-            let len: usize = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap())).unwrap_or(0);
-            let mut b = vec![0; len];
-            r.read_exact(&mut b).unwrap();
-            let mut s = s;
-            write!(s, "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len()).unwrap();
-            (head, String::from_utf8(b).unwrap())
-        });
-        (url, h)
-    }
-
-    #[test]
-    fn api_transport_against_a_local_server() {
-        let d = scratch();
-        write(&d, "src/lib.rs", b"pub fn f() -> u32 { 1 }\n");
-        write(&d, "checks.rs", b"// the check\n");
-        let key = scratch().join("key");
-        std::fs::write(&key, "sk-test-key\n").unwrap();
-        let reply = block("src/lib.rs", "pub fn f() -> u32 { 1 }\n", "pub fn f() -> u32 { 2 }\n") + "f returns 2.\n";
-        let response = serde_json::json!({
-            "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-haiku-5-5", "stop_reason": "end_turn",
-            "content": [{ "type": "thinking", "thinking": "" }, { "type": "text", "text": reply }],
-            "usage": { "input_tokens": 12, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 700, "output_tokens": 40,
-                       "cache_creation": { "ephemeral_5m_input_tokens": 700, "ephemeral_1h_input_tokens": 0 } },
-        });
-        let (url, server) = mock("200 OK", response.to_string());
-        let _ = key;
-        // queue 55: the address and the key's file are the host file's [api].
-        let host = host_with_api(&url, "sk-test-key\n");
-        let env = move |k: &str| match k { "BON_HOST" => Some(host.clone()), "BON_CLIENT" => Some("api".into()), _ => None };
-        let argv: Vec<String> = ["--model", "claude-haiku-5-5", "--max-output-tokens", "1000"].iter().map(|s| s.to_string()).collect();
-        let prompt = "Make f return 2. The checks are [\"checks.rs\"].";
-        let o = run(&argv, prompt, &d, &env);
-        assert_eq!(o.error, None);
-        assert_eq!(read(&d, "src/lib.rs"), "pub fn f() -> u32 { 2 }\n");
-        let (head, body) = server.join().unwrap();
-        let head = head.to_ascii_lowercase();
-        assert!(head.starts_with("post /v1/messages "), "{head}");
-        assert!(head.contains("x-api-key: sk-test-key\r\n") && head.contains(&format!("anthropic-version: {API_VERSION}")), "{head}");
-        let req: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(req["model"], "claude-haiku-5-5");
-        assert_eq!(req["max_tokens"], 1000);
-        assert_eq!(req["system"][0]["cache_control"]["type"], "ephemeral");
-        let system = req["system"][0]["text"].as_str().unwrap();
-        assert!(system.starts_with(INSTRUCTIONS));
-        assert!(system.find("checks.rs").unwrap() < system.find("src/lib.rs").unwrap(), "the named check comes first");
-        assert_eq!(req["messages"][0]["content"], prompt);
-        // The reply, then the usage line, last.
-        let last: serde_json::Value = serde_json::from_str(o.stdout.lines().last().unwrap()).unwrap();
-        assert_eq!(last["type"], "result");
-        let u = &last["modelUsage"]["claude-haiku-5-5"];
-        assert_eq!((u["inputTokens"].as_u64(), u["cacheCreationInputTokens"].as_u64(), u["outputTokens"].as_u64()), (Some(12), Some(700), Some(40)));
-        // No price here: no cost figure, so bon's own stands alone; one request.
-        assert!(u.get("costUSD").is_none());
-        assert_eq!(last["requests"], 1);
-        assert!(o.stdout.starts_with("@@@ FILE src/lib.rs"));
-    }
-
-    #[test]
-    fn api_errors_change_nothing() {
-        let d = scratch();
-        write(&d, "a.txt", b"a\n");
-        let key = scratch().join("key");
-        std::fs::write(&key, "k").unwrap();
-        let (url, server) = mock("400 Bad Request", r#"{"type":"error","error":{"type":"invalid_request_error","message":"no"}}"#.into());
-        let _ = key;
-        let host = host_with_api(&url, "k");
-        let env = move |k: &str| match k { "BON_HOST" => Some(host.clone()), "BON_CLIENT" => Some("api".into()), _ => None };
-        let argv: Vec<String> = ["--model", "m"].iter().map(|s| s.to_string()).collect();
-        let o = run(&argv, "task", &d, &env);
-        server.join().unwrap();
-        assert!(o.error.unwrap().contains("HTTP 400"));
-        assert_eq!(read(&d, "a.txt"), "a\n");
-    }
-
-    #[test]
-    fn a_reply_that_does_not_apply_still_reports_usage() {
-        let d = scratch();
-        write(&d, "a.txt", b"a\n");
-        let result = serde_json::json!({ "type": "result", "subtype": "success", "is_error": false, "result": block("a.txt", "nope\n", "b\n"),
-                                         "modelUsage": { "claude-haiku-5-5": { "inputTokens": 3, "outputTokens": 5, "costUSD": 0.001 } } });
-        // queue 55: the claude client is whatever `claude` the PATH finds.
-        let path = client_on_path("claude", &[result.to_string()]);
-        let env = move |k: &str| match k { "PATH" => Some(path.clone()), "BON_CLIENT" => Some("claude".into()), _ => None };
-        let argv: Vec<String> = ["--model", "claude-haiku-5-5"].iter().map(|s| s.to_string()).collect();
-        let o = run(&argv, "task", &d, &env);
-        assert!(o.error.unwrap().contains("SEARCH not found"));
-        assert_eq!(read(&d, "a.txt"), "a\n");
-        let last: serde_json::Value = serde_json::from_str(o.stdout.lines().last().unwrap()).unwrap();
-        assert_eq!(last["modelUsage"]["claude-haiku-5-5"]["outputTokens"], 5);
-    }
-
-    #[test]
-    fn codex_events_are_read() {
-        let d = scratch();
-        write(&d, "a.txt", b"a\n");
-        let msg = serde_json::json!({ "type": "item.completed", "item": { "type": "agent_message", "text": block("a.txt", "a\n", "b\n") } });
-        let turn = serde_json::json!({ "type": "turn.completed", "usage": { "input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 7 } });
-        let path = client_on_path("codex", &[msg.to_string(), turn.to_string()]);
-        let env = move |k: &str| match k { "PATH" => Some(path.clone()), "BON_CLIENT" => Some("codex".into()), _ => None };
-        let argv: Vec<String> = ["--model", "gpt-6.1-sol"].iter().map(|s| s.to_string()).collect();
-        let o = run(&argv, "task", &d, &env);
-        assert_eq!(o.error, None);
-        assert_eq!(read(&d, "a.txt"), "b\n");
-        let last: serde_json::Value = serde_json::from_str(o.stdout.lines().last().unwrap()).unwrap();
-        let u = &last["modelUsage"]["gpt-6.1-sol"];
-        assert_eq!((u["inputTokens"].as_u64(), u["cacheReadInputTokens"].as_u64()), (Some(40), Some(60)));
-    }
 }
