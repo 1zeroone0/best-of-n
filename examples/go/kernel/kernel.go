@@ -108,6 +108,8 @@ type Search struct {
 	Trusted []Path       `json:"trusted"`
 	Limit   uint64       `json:"limit"`
 	Results []*Candidate `json:"results"`
+	// The commits whose verdicts its agent processes are given.
+	Context []Commit `json:"context"`
 }
 
 // One confined user's permissions on each object the policy names, path by

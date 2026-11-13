@@ -15,6 +15,7 @@ fn wire_rejects_damage_and_preserves_json_boundaries() {
             out: vec![Hash(u64::MAX)], intents: vec![], accepts: vec![(i64::MIN, false)], accepts_foils: vec![],
             rejects_counterexamples: false, measured: true, added: vec![], rank: i64::MIN, diff: u64::MAX,
         })],
+        context: vec![Commit("\"c0ffee".chars().collect())],
     };
     let words = Kernel::encode(&s);
     let back = Kernel::decode(&words).unwrap();
@@ -23,6 +24,7 @@ fn wire_rejects_damage_and_preserves_json_boundaries() {
     assert_eq!(json["kind"]["code"]["goal"], "\0\"\\😀");
     assert_eq!(json["results"][0]["rank"], i64::MIN);
     assert_eq!(json["results"][0]["out"][0], u64::MAX.to_string());
+    assert_eq!(json["context"][0], "\"c0ffee");
     for end in 0..words.len() { assert!(Kernel::decode(&words[..end].to_vec()).is_none()); }
     let mut extra = words.clone(); extra.push(0);
     assert!(Kernel::decode(&extra).is_none());

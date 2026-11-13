@@ -2213,19 +2213,21 @@ const FAILING_BYTES: usize = 12_000;
 
 /// The informative part of a check's log (`supervised`'s: an exit line, then
 /// its stdout and stderr): each error and each failed test first (a block from
-/// a line starting `error` or `---- ` to the next blank line), then, if there
+/// a line starting `error`, or `---- ` and its first paragraph, to the next blank line), then, if there
 /// is none, the output's last lines; bounded by FAILING_LINES and FAILING_BYTES.
 fn informative(log: &str) -> String {
     let log = log.strip_prefix("cached: ").map_or(log, |t| t.split_once('\n').map_or("", |(_, r)| r));
     let exit = log.lines().next().unwrap_or("").to_string();
     let output: Vec<&str> = log.lines().filter(|l| !["seconds: ", "exit: ", "--- std", "program: ", "context: ", "behavior: "].iter().any(|h| l.starts_with(h))).collect();
     let mut errors: Vec<&str> = Vec::new();
-    let mut inside = false;
+    // A block ends at the first blank line after its header's first content
+    // line: a failed test's block opens with a blank line before its panic.
+    let (mut inside, mut content) = (false, false);
     for l in &output {
         let t = l.trim_start();
-        if t.starts_with("error") || t.starts_with("---- ") { inside = true; }
+        if t.starts_with("error") || t.starts_with("---- ") { inside = true; content = t.starts_with("error"); errors.push(l); continue; }
         if inside { errors.push(l); }
-        if l.trim().is_empty() { inside = false; }
+        if l.trim().is_empty() { if content { inside = false; } } else { content = true; }
     }
     let lines: Vec<&str> = if errors.is_empty() { output[output.len().saturating_sub(FAILING_LINES)..].to_vec() } else { errors };
     let mut out = format!("{exit}\n");
@@ -2240,20 +2242,66 @@ fn informative(log: &str) -> String {
     out
 }
 
-/// Trunk's checks that reject it, from their logs in this bon process's trace
-/// (`trunk-test-K`, `trunk-verify-K`): each one's command and the informative
-/// part of its output. Empty when none failed or none was logged.
-fn failing(m: &Manifest) -> String {
-    let d = trace_dir(&m.root);
-    let mut out = String::new();
-    for (kind, list) in [("test", &m.config.checks.test), ("verify", &m.config.checks.verify)] {
-        for (k, command) in list.iter().enumerate() {
-            let Ok(log) = std::fs::read_to_string(d.join(format!("trunk-{kind}-{k}"))) else { continue };
-            let text = informative(&log);
-            if text.starts_with("exit: 0\n") { continue; }
-            out.push_str(&format!("This check fails on trunk: {command}\n{text}"));
+/// The checks that rejected commit, each as its command and the informative
+/// part of its output: trunk's head (start) from this bon process's trunk
+/// logs (`trunk-test-K`, `trunk-verify-K`); a candidate from the logs in its
+/// trace, which its commit message names (`Trace:`): its test, verify, agree
+/// and rank checks. Empty when none failed or none was logged.
+fn rejected_by(m: &Manifest, commit: &str, start: &str, rank: Option<&String>) -> Vec<(String, String)> {
+    let c = &m.config.checks;
+    let mut logs: Vec<(String, String)> = Vec::new();
+    let dir = if commit == start {
+        for (k, v) in c.test.iter().enumerate() { logs.push((format!("trunk-test-{k}"), v.clone())); }
+        for (k, v) in c.verify.iter().enumerate() { logs.push((format!("trunk-verify-{k}"), v.clone())); }
+        trace_dir(&m.root)
+    } else {
+        let message = git(&m.root, &["log", "-1", "--format=%B", commit]).unwrap_or_default();
+        let Some(trace) = message.lines().find_map(|l| l.strip_prefix("Trace: ")) else { return Vec::new() };
+        for (k, v) in c.test.iter().enumerate() { logs.push((format!("test-{k}"), v.clone())); }
+        for (k, v) in c.verify.iter().enumerate() { logs.push((format!("verify-{k}"), v.clone())); }
+        for (k, v) in c.agree.iter().enumerate() { logs.push((format!("agree-{k}"), v.clone())); }
+        if let Some(r) = rank { logs.push(("rank".into(), r.clone())); }
+        m.root.join(trace.trim())
+    };
+    logs.into_iter().filter_map(|(file, command)| {
+        let text = informative(&std::fs::read_to_string(dir.join(file)).ok()?);
+        (!text.starts_with("exit: 0\n")).then_some((command, text))
+    }).collect()
+}
+
+/// A search's context as its prompt carries it: for each commit in order
+/// (trunk's head first), each check that rejected it and why, an output
+/// identical to one already shown once, with who showed it. The whole is
+/// bounded as one failing check is (FAILING_LINES, FAILING_BYTES): trunk's
+/// first; what does not fit after it is left out whole, never cut, and how
+/// many were is said in one line.
+fn rendered(m: &Manifest, kind: &Kind, start: &str, context: &[String]) -> String {
+    let rank = m.config.checks.rank.get(if matches!(kind, Kind::Compaction { .. }) { "compaction" } else { "code" });
+    // (command, output, the commits it rejected so)
+    let mut items: Vec<(String, String, Vec<String>)> = Vec::new();
+    for commit in context {
+        for (command, text) in rejected_by(m, commit, start, rank) {
+            match items.iter_mut().find(|i| i.0 == command && i.1 == text) {
+                Some(i) => i.2.push(commit.clone()),
+                None => items.push((command, text, vec![commit.clone()])),
+            }
         }
     }
+    let (mut out, mut lines, mut left) = (String::new(), 0usize, 0usize);
+    for (command, text, commits) in &items {
+        let others: Vec<String> = commits.iter().filter(|c| *c != start).map(|c| c[..c.len().min(8)].to_string()).collect();
+        let mut who: Vec<String> = Vec::new();
+        if commits.iter().any(|c| c == start) { who.push("trunk".into()); }
+        if !others.is_empty() {
+            who.push(format!("{} {} of the previous attempt ({})", others.len(), if others.len() == 1 { "candidate" } else { "candidates" }, others.join(", ")));
+        }
+        let item = format!("This check fails on {}: {command}\n{text}", who.join(" and on "));
+        let n = item.lines().count();
+        if !out.is_empty() && (out.len() + item.len() > FAILING_BYTES || lines + n > FAILING_LINES) { left += 1; continue; }
+        out.push_str(&item);
+        lines += n;
+    }
+    if left > 0 { out.push_str(&format!("[{left} more failing {} left out whole: {} did not fit]\n", if left == 1 { "check" } else { "checks" }, if left == 1 { "it" } else { "they" })); }
     out
 }
 
@@ -2261,7 +2309,7 @@ fn failing(m: &Manifest) -> String {
 /// since bon's last push (for blind tests, which see the spec and not the code),
 /// and the selected candidate's diff against its base (for foils). Capped, so a
 /// large change still fits.
-fn aim(m: &Manifest, kind: &Kind, target: Option<&Search>, start: &str) -> String {
+fn aim(m: &Manifest, kind: &Kind, target: Option<&Search>, start: &str, context: &[String]) -> String {
     let cap = |d: String| { let lines: Vec<&str> = d.lines().collect(); if lines.len() > 400 { format!("{}\n[… {} more lines]", lines[..400].join("\n"), lines.len() - 400) } else { d } };
     let selected = |p: &crate::gates::AgentProcess| target.and_then(|t| t.results.get(p.index)).and_then(|r| r.as_ref())
         .map(|c| (c.base.iter().collect::<String>(), c.commit.iter().collect::<String>()));
@@ -2283,9 +2331,10 @@ fn aim(m: &Manifest, kind: &Kind, target: Option<&Search>, start: &str) -> Strin
             }
             None => String::new(),
         },
-        // Which check rejects trunk and why: its command and its errors, so
-        // the agent process knows what fails before it reads a file.
-        Kind::Code { .. } => failing(m),
+        // Which check rejects trunk and why, and the previous attempt's
+        // candidates: each command and its errors, exactly the search's
+        // context, so the agent process knows what fails before it reads a file.
+        Kind::Code { .. } | Kind::Compaction { .. } => rendered(m, kind, start, context),
         _ => String::new(),
     }
 }
@@ -2693,12 +2742,13 @@ verus! {
 /// search a counterexample attacks; `foils`, the foil search its tests must
 /// tell from correct code.
 #[verifier::external_body]
-pub fn run(m: &Manifest, kind: &Kind, a: usize, start: &Commit, target: Option<&Search>, foils: Option<&Search>) -> Vec<(Option<Candidate>, u64)> {
+pub fn run(m: &Manifest, kind: &Kind, a: usize, start: &Commit, target: Option<&Search>, foils: Option<&Search>, context: &Vec<Commit>) -> Vec<(Option<Candidate>, u64)> {
     // Number runs once per bon process, so a command that runs several drivers
     // (a counterexample on trunk, then a code search) never reuses a working directory or trace.
     let search = RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     if let Ok(mut l) = LATEST.lock() { *l = label(kind); }
     let start: String = start.iter().collect();
+    let context: Vec<String> = context.iter().map(|c| c.iter().collect()).collect();
     search_started(&m.root, search, kind, a, &tree_of(&m.root, &start));
     if !WARMING.load(std::sync::atomic::Ordering::SeqCst) { warm(m, &start); }
     let p = program(&m.config, kind);
@@ -2714,7 +2764,7 @@ pub fn run(m: &Manifest, kind: &Kind, a: usize, start: &Commit, target: Option<&
     let spoke = std::sync::Arc::new(Signal::default());
     std::thread::scope(|scope| {
         for (i, h) in slots.iter().enumerate() {
-            let (out, start, traces, spoke) = (&out, &start, &traces, &spoke);
+            let (out, start, traces, spoke, context) = (&out, &start, &traces, &spoke, &context);
             scope.spawn(move || {
                 // Whatever the leader does, the rest go on when it is done.
                 struct Spoken<'a>(&'a Signal);
@@ -2722,7 +2772,7 @@ pub fn run(m: &Manifest, kind: &Kind, a: usize, start: &Commit, target: Option<&
                 let _spoken = (i == 0).then(|| Spoken(spoke));
                 if i > 0 { spoke.wait(); }
                 let lead = (i == 0).then(|| spoke.clone());
-                *out[i].lock().unwrap() = agent_process(m, kind, search, i, h, start, target, foils, &traces.join(i.to_string()), lead);
+                *out[i].lock().unwrap() = agent_process(m, kind, search, i, h, start, target, foils, context, &traces.join(i.to_string()), lead);
             });
         }
     });
@@ -2813,7 +2863,9 @@ pub fn report(m: &Manifest, s: &Search, verified: usize, generation: u64, starte
     let summary = serde_json::json!({
         "search": search, "kind": kind, "goal": goal,
         "time": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
-        "agent_processes": n, "limit": s.limit as f64 / 1_000_000.0, "verified": verified, "generation_dollars": generation,
+        "agent_processes": n, "limit": s.limit as f64 / 1_000_000.0,
+        // The commits whose verdicts its prompt carried (the kernel's context).
+        "context": s.context.iter().map(|c| c.iter().collect::<String>()).collect::<Vec<_>>(), "verified": verified, "generation_dollars": generation,
         "seconds": hours * 3600.0, "charged_seconds": charged, "rate": rate, "background": background, "time_dollars": time,
         "cost_per_verified_candidate": per,
         // The host's semaphores in force for this search.
@@ -2857,10 +2909,12 @@ pub fn record_initialize(m: &Manifest, root: &Commit, limit: u64) {
     record(m, &format!("initialize {root} {limit}"));
 }
 
-/// grant: its width, when, each agent process's limit, its kind and goal. The
-/// last search is the one granted, on the trunk verdict its kind needs.
+/// grant: its width, when, each agent process's limit, its kind and goal;
+/// then, on a line of its own (the grant line's tail is the goal), its
+/// context: `context` and each commit. The last search is the one granted,
+/// on the trunk verdict its kind needs, with this context.
 #[verifier::external_body]
-pub fn record_grant(m: &Manifest, kind: &Kind, n: usize, agent_process_limit: u64, Ghost(checks_accept): Ghost<bool>, Ghost(searches): Ghost<Seq<spec::Search>>)
+pub fn record_grant(m: &Manifest, kind: &Kind, n: usize, agent_process_limit: u64, context: &Vec<Commit>, Ghost(checks_accept): Ghost<bool>, Ghost(searches): Ghost<Seq<spec::Search>>)
     requires
         searches.len() > 0,
         kind@ is Code ==> !checks_accept,
@@ -2868,10 +2922,12 @@ pub fn record_grant(m: &Manifest, kind: &Kind, n: usize, agent_process_limit: u6
         searches.last().kind == kind@,
         searches.last().n == n as nat,
         searches.last().limit == agent_process_limit as nat,
+        searches.last().context == crate::gates::commits(context@),
 {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     let (k, goal) = label(kind);
     record(m, &format!("grant {n} {now} {agent_process_limit} {k} {goal}"));
+    record(m, &std::iter::once("context".to_string()).chain(context.iter().map(|c| c.iter().collect())).collect::<Vec<_>>().join(" "));
 }
 
 /// wait: when, the agent process, the commit it returned (or none), what it
@@ -3236,7 +3292,7 @@ pub const BUILD: [&str; 2] = [".cargo/", "build.rs"];
 /// `spoke`: the leader's signal, set at its program's first output.
 #[allow(clippy::too_many_arguments)]
 fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, p: &Program, start: &str,
-                 target: Option<&Search>, foils: Option<&Search>, trace: &std::path::Path, spoke: Option<std::sync::Arc<Signal>>) -> (Option<Candidate>, u64) {
+                 target: Option<&Search>, foils: Option<&Search>, context: &[String], trace: &std::path::Path, spoke: Option<std::sync::Arc<Signal>>) -> (Option<Candidate>, u64) {
     traced(trace, std::fs::create_dir_all(trace));
     let config = &m.config;
     // An agent process's slot for its program and its setup alone: never
@@ -3276,7 +3332,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, p: &Pro
     };
     let argv = p.argv();
     write_trace(&trace.join("argv"), argv.join(" "));
-    let text = prompt(kind, config, &aim(m, kind, target, start));
+    let text = prompt(kind, config, &aim(m, kind, target, start, context));
     write_trace(&trace.join("prompt"), &text);
     let b = build.to_string_lossy().to_string();
     let mut env = vec![("CARGO_TARGET_DIR", b.clone()), ("BON_BUILD", b), ("CARGO_BUILD_JOBS", config.pools.threads.to_string())];
@@ -3330,7 +3386,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, p: &Pro
             "intents": c.intents.iter().map(|(q, i)| (q, text(i))).collect::<Vec<_>>(),
         })),
     });
-    let facts = agent_process_record(facts, candidate.as_ref());
+    let facts = agent_process_record(facts, candidate.as_ref(), context);
     write_trace(&trace.join("facts.json"), serde_json::to_string_pretty(&facts).unwrap_or_default());
     (candidate, spent)
 }
@@ -3343,13 +3399,14 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, p: &Pro
 // README's "The trace" says where each lives in each record.
 
 /// An agent process's facts in the one shape: its program (already there),
-/// the prompt it was given (`context`, the trace file), the commit it returned
+/// what it was given (`context`: the trace file `prompt`, and the commits
+/// whose verdicts the prompt carries, `prompt + <commit> …`), the commit it returned
 /// (`output`), what its checks said (`verdict`: proved, accepted, rejected; none
 /// when it returned no candidate) and its agree outputs' hashes (`behavior`).
-fn agent_process_record(mut facts: serde_json::Value, candidate: Option<&Candidate>) -> serde_json::Value {
+fn agent_process_record(mut facts: serde_json::Value, candidate: Option<&Candidate>, context: &[String]) -> serde_json::Value {
     let verdict = candidate.map(|c| if !c.accepted { "rejected" } else if c.proved { "proved" } else { "accepted" });
     let behavior = candidate.filter(|c| !c.out.is_empty()).map(|c| c.out.iter().map(|h| h.0.to_string()).collect::<Vec<_>>().join(","));
-    facts["context"] = "prompt".into();
+    facts["context"] = if context.is_empty() { "prompt".to_string() } else { format!("prompt + {}", context.join(" ")) }.into();
     facts["output"] = candidate.map(|c| c.commit.iter().collect::<String>()).into();
     facts["verdict"] = verdict.into();
     facts["behavior"] = behavior.into();
@@ -4386,6 +4443,7 @@ mod tests {
                 commit: text(test), base: text(base), accepted: true, proved: false, changed: vec![text("tests/c_1.sh")],
                 out: vec![], intents: vec![], accepts: vec![(-1, false)], accepts_foils: vec![], measured: false, added: vec![], rejects_counterexamples: false, rank: 0, diff: 1,
             })],
+            context: vec![],
         }
     }
 
@@ -4441,7 +4499,7 @@ mod tests {
             accepts, accepts_foils: vec![], measured: false, added: vec![], rejects_counterexamples: false, rank: 0, diff: 1,
         };
         let search = |kind: Kind, c: Candidate| Search {
-            kind, base: text(&base), n: 1, checks: vec![], tests: vec![text("tests/")], trusted: vec![], limit: 1, results: vec![Some(c)],
+            kind, base: text(&base), n: 1, checks: vec![], tests: vec![text("tests/")], trusted: vec![], limit: 1, results: vec![Some(c)], context: vec![],
         };
         let tested = search(Kind::Code { goal: text(&base) }, candidate(&wrong, vec![], vec![]));
         let x = search(Kind::Counterexample { goal: Some(crate::gates::AgentProcess { search: 0, index: 0 }) },
@@ -4689,7 +4747,7 @@ mod tests {
         };
         let tested = Search {
             kind: Kind::Code { goal: text("head") }, base: text("head"), n: 2, checks: vec![], tests: vec![], trusted: vec![], limit: 1,
-            results: vec![Some(candidate("first")), Some(candidate("selected"))],
+            results: vec![Some(candidate("first")), Some(candidate("selected"))], context: vec![],
         };
         let on = |goal| Kind::Counterexample { goal };
         // On a selected candidate: its tree, which builds even while trunk's head does not.
@@ -4707,13 +4765,13 @@ mod tests {
         };
         let tested = |second: u64| Search {
             kind: Kind::Code { goal: text("head") }, base: text("head"), n: 2, checks: vec![], tests: vec![], trusted: vec![], limit: 1,
-            results: vec![Some(candidate("first", 7)), Some(candidate("second", second))],
+            results: vec![Some(candidate("first", 7)), Some(candidate("second", second))], context: vec![],
         };
         // No git here: the spec's diff is empty, so the aim is what the tested search shows.
         let m = Manifest { config: config(), root: PathBuf::from("/nonexistent/bon-aim") };
         let kind = Kind::Counterexample { goal: Some(crate::gates::AgentProcess { search: 0, index: 0 }) };
-        assert!(aim(&m, &kind, Some(&tested(8)), "head").contains("They behave differently"));
-        assert_eq!(aim(&m, &kind, Some(&tested(7)), "head"), "", "a selection's test is aimed by the spec alone");
+        assert!(aim(&m, &kind, Some(&tested(8)), "head", &[]).contains("They behave differently"));
+        assert_eq!(aim(&m, &kind, Some(&tested(7)), "head", &[]), "", "a selection's test is aimed by the spec alone");
         // Its test builds on the verified candidate the goal names.
         assert_eq!(tested_tree(&kind, Some(&tested(8)), "head"), "first");
     }
@@ -4968,13 +5026,36 @@ mod tests {
             error: postcondition not satisfied\n    --> src/exec.rs:1300:5\n     |\n1300 |     a.len() <= b.len()\n\n\
             warning: unused\n\nverification results:: 101 verified, 1 errors\n"));
         let kind = Kind::Code { goal: Commit(vec![]) };
-        let a = aim(&m, &kind, None, "head");
+        let a = aim(&m, &kind, None, "head", &["head".to_string()]);
         assert!(a.starts_with("This check fails on trunk: cargo verus verify\nexit: 1\n"), "{a}");
         assert!(a.contains("error: postcondition not satisfied\n    --> src/exec.rs:1300:5\n"), "{a}");
         assert!(!a.contains("cargo test -q") && !a.contains("Compiling crate") && !a.contains("warning: unused"), "errors first, the rest left out: {a}");
         let text = prompt(&kind, &m.config, &a);
         assert!(text.contains("Trunk's checks reject this code.") && text.contains("src/exec.rs:1300:5"));
         assert!(text.contains("Never change [\".cargo/\", \"build.rs\", \".bon/\", \"tests/\"] either"), "{text}");
+        // queue 73: a second attempt carries the previous attempt's unverified
+        // candidates' failing checks, from the logs their commits name, after
+        // trunk's; an output two showed alike, once; what does not fit, left out whole.
+        git(&root, &["init", "-q"]).unwrap();
+        let commit_of = |name: &str| {
+            let out = Command::new("git").args(["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", name, "-m", &format!("Trace: .bon/traces/x/0/{name}")])
+                .current_dir(&root).output().unwrap();
+            assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+            git(&root, &["rev-parse", "HEAD"]).unwrap()
+        };
+        let (one, two, three) = (commit_of("1"), commit_of("2"), commit_of("3"));
+        let logs = root.join(".bon/traces/x/0");
+        let failed = |msg: &str| format!("exit: 101\nseconds: 1.0\n--- stdout\n---- t stdout ----\n\n{msg}\n\nfailures:\n");
+        for k in ["1", "2"] { write_trace(&logs.join(k).join("test-0"), failed("thread 't' panicked: left 1 right 2")); }
+        let long: String = (0..FAILING_LINES).map(|k| format!("---- t{k} stdout ----\npanicked\n")).collect();
+        write_trace(&logs.join("3").join("test-0"), format!("exit: 101\n--- stdout\n{long}"));
+        let context = ["head".to_string(), one.clone(), two.clone(), three];
+        let a = aim(&m, &kind, None, "head", &context);
+        assert!(a.starts_with("This check fails on trunk: cargo verus verify\n"), "trunk's first: {a}");
+        assert_eq!(a.matches("left 1 right 2").count(), 1, "identical outputs once: {a}");
+        assert!(a.contains(&format!("This check fails on 2 candidates of the previous attempt ({}, {}): cargo test -q\n", &one[..8], &two[..8])), "{a}");
+        assert!(a.ends_with("[1 more failing check left out whole: it did not fit]\n") && !a.contains("t3 stdout"), "{a}");
+        assert!(a.len() <= FAILING_BYTES + 200 && a.lines().count() <= FAILING_LINES + 1, "bounded as one failing check: {}", a.len());
         // No error block: the output's last lines, bounded.
         let tail = informative(&format!("exit: 101\n--- stdout\n{noise}test result: FAILED\n"));
         assert!(tail.contains("test result: FAILED") && tail.lines().count() <= FAILING_LINES + 2, "{}", tail.lines().count());

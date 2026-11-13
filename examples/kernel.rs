@@ -47,7 +47,7 @@ fn main() {
     for kind in kinds {
         let s = Search {
             kind, base: t("b0"), n: 3, checks: vec![t("src/spec.rs")], tests: vec![t("tests/counterexample.rs")], trusted: vec![t("src/trusted.rs")], limit: 9,
-            results: vec![Some(candidate("x1", 7, 1)), None, Some(candidate("y2", 7, -2))],
+            results: vec![Some(candidate("x1", 7, 1)), None, Some(candidate("y2", 7, -2))], context: vec![t("c0ffee")],
         };
         let words = Kernel::encode(&s);
         let back = Kernel::decode(&words);
@@ -60,7 +60,7 @@ fn main() {
     // A code search whose two verified candidates show two behaviors (out 7 and 8):
     // nothing is selected and nothing blocks yet; a counterexample search on its first verified candidate decides.
     let search = |kind: Kind, results: Vec<Option<Candidate>>| Search {
-        kind, base: t("b0"), n: results.len(), checks: vec![t("src/spec.rs")], tests: vec![t("tests/")], trusted: vec![t("src/trusted.rs")], limit: 9, results,
+        kind, base: t("b0"), n: results.len(), checks: vec![t("src/spec.rs")], tests: vec![t("tests/")], trusted: vec![t("src/trusted.rs")], limit: 9, results, context: vec![],
     };
     let tested = search(Kind::Code { goal: t("c0ffee") }, vec![Some(candidate("x1", 7, 1)), None, Some(candidate("y2", 8, -2))]);
     println!("disagree: selected {:?}, first verified {:?}, blocked {}", Kernel::selected(&tested), Kernel::first_verified(&tested), word(Kernel::blocked(&tested, None, None)));

@@ -67,7 +67,7 @@ it was given (**context**), what it returned (**output**), how it was judged
 
 | record | program | context | output | verdict | behavior |
 |---|---|---|---|---|---|
-| an agent process, `<pid>/<search>/<index>/facts.json` | its program | `prompt` | its candidate's commit | `proved`, `accepted` or `rejected` | its agree outputs' hashes |
+| an agent process, `<pid>/<search>/<index>/facts.json` | its program | `prompt`, then `+` each commit whose verdicts the prompt carries (the search's context, also its `context` line after `grant`) | its candidate's commit | `proved`, `accepted` or `rejected` | its agree outputs' hashes |
 | a check, its log | `program:` its command | `context:` the tree, and any test written into it | the log's stdout and stderr | `exit:` | `behavior:` its stdout's hash |
 | a decision, `decisions.jsonl` | `engineer` | what the interrupt showed | the commit that answered it | what came of it (derived) | the choice it showed |
 
@@ -138,6 +138,10 @@ once per user layer).
   so a check could leave a file there that a later check reads: a check that
   reads outside its tree and the toolchain is not a function of what its key
   says. Closing those is a sandbox's job (a reference monitor), not bon's.
+  A candidate shapes its own checks' output, and a later attempt's agent
+  processes read it in their prompt (a search's context): it reaches the
+  generators, never how anything is judged or selected, and never a
+  counterexample's or a foil's writer (the spec's `blind`).
 - **Next to Rust's types:** types keep a commit from passing as a path; Verus proves
   what a type cannot say, such as "this is the one candidate the spec selects".
 - **Next to Lean:** Lean checks a proof term in a small kernel, about a model of the

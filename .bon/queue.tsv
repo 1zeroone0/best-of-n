@@ -4,5 +4,4 @@ id	intent
 27	Background work, compaction and counterexample searches on trunk, runs only on spare capacity, stalest first, staleness being trunk commits since that kind last ran.
 28	Programs may run the kernel's gates compiled in, in any language, with no trusted code beyond their entry points.
 72	A test fails when a surface name (a spec item, a gate contract, a kernel public item, an emitted type, a trace word, a manifest or host key) is undefined or names two things; a candidate's new identifiers may be scored, fewer ranking higher.
-73	A search may carry earlier searches' verdicts on its goal in its context (Search.context); a counterexample's or a foil's context never holds check output from a member.
 83	For an accepted intent, a spec search's agent processes each propose a spec change; the verified ones are grouped by behavior, nothing is pushed, and it ends in a proposal reviewed as new words, decisions, reach and scenarios, the splits between them being the decisions.

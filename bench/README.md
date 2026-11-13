@@ -69,6 +69,11 @@ The sandbox's `pick(a, b)` may return either (its spec says so); trunk's
 returns `a`, and with `BEHAVIORS=2` half the code stubs make it `b`: two
 behaviors, both verified, for the disagreement path.
 
+With `FEEDBACK=1` (and `ATTEMPTS=2`), a first attempt's code stubs make `max`
+return the smaller, which a test rejects; the second attempt's prompt
+carries those candidates' failing test (the search's context), and a stub
+that sees it writes the fix: the case of feeding a failed check's output back.
+
 A code or foil stub then runs `cargo test` and `cargo verus verify` itself `K`
 times, as an agent iterating does.
 
