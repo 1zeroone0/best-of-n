@@ -75,7 +75,8 @@ case "$PROJECT" in
     PATHS='"src/spec.rs", "tests/trunk.rs", "examples/kernel.rs"'
     ;;
   bon)
-    # bon's source at HEAD, its own .bon/ replaced by the benchmark's and
+    # bon's source at HEAD, its own .bon/ replaced by the benchmark's (its
+    # account kept, which a test reads) and
     # bench/ (which says how trunk is broken) left out. On its trunk exec::eq
     # says a strict prefix equals the longer text: the tests miss it, Verus
     # does not. A code stub restores the file kept in .bon/fix/, which is
@@ -84,7 +85,7 @@ case "$PROJECT" in
     WORK=$SANDBOX/bon
     mkdir -p "$WORK"
     (cd "$REPO" && git archive HEAD) | tar -x -C "$WORK"
-    rm -rf "$WORK/.bon" "$WORK/bench" && mkdir -p "$WORK/.bon"
+    rm -rf "$WORK/bench" && find "$WORK/.bon" -mindepth 1 -maxdepth 1 ! -name account.json ! -name sbom.json -exec rm -rf {} +
     if [ "$PROGRAM" = "$STUB" ]; then mkdir -p "$WORK/.bon/fix/src" && cp "$WORK/src/exec.rs" "$WORK/.bon/fix/src/exec.rs"; fi
     perl -0pi -e 's/    a\.len\(\) == b\.len\(\) && is_prefix_of\(a, b\)\n/    a.len() <= b.len() && is_prefix_of(a, b)\n/ or die "exec::eq not found\n"' "$WORK/src/exec.rs"
     PATHS='"src/spec.rs", "src/gates.rs", "examples/kernel.rs"'
