@@ -193,6 +193,48 @@ struct Host {
     /// The Messages API, for a role whose client is `api`.
     #[serde(default)]
     api: Option<Api>,
+    /// Where a transcript dropped in the user layer's folder goes: a pattern
+    /// of its meeting title, and the repository (its root, absolute or under
+    /// the user layer's root). A title matches a pattern that it contains,
+    /// ignoring case.
+    #[serde(default)]
+    routes: std::collections::BTreeMap<String, String>,
+}
+
+/// The user layer's root the host file names (`user`), and its routes: each
+/// title pattern with its repository's root, a relative one under the user
+/// layer's root. None without a host file bon reads.
+pub fn user_layer() -> Option<(PathBuf, Vec<(String, PathBuf)>)> {
+    let host = read_host(&host_file().ok()?).ok()?;
+    let root = PathBuf::from(&host.user);
+    let routes = host.routes.iter().map(|(p, r)| (p.clone(), root.join(r))).collect();
+    Some((root, routes))
+}
+
+/// The host's two pools as the host file sizes them (`Pools::of`); None
+/// without a host file bon reads.
+pub fn host_pools() -> Option<Pools> { read_host(&host_file().ok()?).ok().map(|h| Pools::of(&h)) }
+
+/// How many slots of each pool are held now, host-wide: each slot file below
+/// the pool's size that some process holds locked. Asked by taking each lock
+/// without waiting and freeing it at once; a slot file that does not exist was
+/// never taken. Read-only: nothing is made.
+pub fn pools_held(pools: &Pools) -> (usize, usize) {
+    let held = |dir: PathBuf, name: &str, n: usize| (0..n).filter(|k| {
+        std::fs::File::open(dir.join(format!("{name}.{k}"))).is_ok_and(|f| match f.try_lock() {
+            Ok(()) => { let _ = f.unlock(); false }
+            Err(_) => true,
+        })
+    }).count();
+    (held(base(), "agent_process", pools.agent_processes), held(base().join("checks"), "check", pools.check_processes))
+}
+
+/// Memory, in GB: this machine's physical memory, and what is free for checks
+/// now (`free_memory_gb`).
+pub fn memory_gb() -> (f64, f64) {
+    let total = Command::new("sysctl").args(["-n", "hw.memsize"]).output().ok()
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<f64>().ok()).unwrap_or(0.0) / 1e9;
+    (total, free_memory_gb())
 }
 
 /// What a role runs: its program, the client through which it reaches a
@@ -2136,30 +2178,44 @@ fn generation(p: &Program, config: &Config, stdout: &str) -> Result<(u64, Option
 /// How many of the program's requests sent a prompt over its model's tier
 /// threshold (`Tier::above`), read as `generation` reads them: a `result`
 /// with `"requests": 1` is one request per model, else each `assistant`
-/// event is one. A model with no tier has no threshold to pass. None where
-/// the output says nothing per request (codex's running total).
-fn over_tier(p: &Program, config: &Config, stdout: &str) -> Option<u64> {
-    if p.run.model.is_none() { return Some(0); }
+/// event is one. A model with no tier has no threshold to pass. With them,
+/// what they cost beyond the base price, in microdollars. None where the
+/// output says nothing per request (codex's running total).
+fn over_tier(p: &Program, config: &Config, stdout: &str) -> Option<(u64, u64)> {
+    if p.run.model.is_none() { return Some((0, 0)); }
     let events: Vec<serde_json::Value> = stdout.lines().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).collect();
-    let above = |model: &str| config.prices.get(model).and_then(|p| p.tier.as_ref()).map(|t| t.above as f64);
     let r = events.iter().rev().find(|v| v["type"] == "result")?;
+    // Each request: its model and its tokens (input, cache reads, output, 5-minute and 1-hour cache writes).
+    let mut requests: Vec<(String, [f64; 5])> = Vec::new();
     if r["requests"].as_u64() == Some(1) {
-        return Some(r["modelUsage"].as_object().into_iter().flatten().filter(|(model, u)| {
+        for (model, u) in r["modelUsage"].as_object().into_iter().flatten() {
             let n = |k: &str| u[k].as_f64().unwrap_or(0.0);
-            let w = n("cacheCreationEphemeral5mInputTokens") + n("cacheCreationEphemeral1hInputTokens");
-            let w = if w == 0.0 { n("cacheCreationInputTokens") } else { w };
-            above(model).is_some_and(|a| n("inputTokens") + n("cacheReadInputTokens") + w > a)
-        }).count() as u64);
+            let (w5, w1) = (n("cacheCreationEphemeral5mInputTokens"), n("cacheCreationEphemeral1hInputTokens"));
+            let w5 = if w5 + w1 == 0.0 { n("cacheCreationInputTokens") } else { w5 };
+            requests.push((model.clone(), [n("inputTokens"), n("cacheReadInputTokens"), n("outputTokens"), w5, w1]));
+        }
+    } else {
+        let mut by: HashMap<String, (String, serde_json::Value)> = HashMap::new();
+        for v in events.iter().filter(|v| v["type"] == "assistant") {
+            let m = &v["message"];
+            if let (Some(id), Some(model)) = (m["id"].as_str(), m["model"].as_str()) { by.insert(id.into(), (model.into(), m["usage"].clone())); }
+        }
+        for (model, u) in by.into_values() {
+            let n = |k: &str| u[k].as_f64().unwrap_or(0.0);
+            let c = &u["cache_creation"];
+            let (w5, w1) = (c["ephemeral_5m_input_tokens"].as_f64().unwrap_or(0.0), c["ephemeral_1h_input_tokens"].as_f64().unwrap_or(0.0));
+            let w5 = if w5 + w1 == 0.0 { n("cache_creation_input_tokens") } else { w5 };
+            requests.push((model, [n("input_tokens"), n("cache_read_input_tokens"), n("output_tokens"), w5, w1]));
+        }
     }
-    let mut requests: HashMap<String, (String, serde_json::Value)> = HashMap::new();
-    for v in events.iter().filter(|v| v["type"] == "assistant") {
-        let m = &v["message"];
-        if let (Some(id), Some(model)) = (m["id"].as_str(), m["model"].as_str()) { requests.insert(id.into(), (model.into(), m["usage"].clone())); }
+    let rate = |p: &Price, t: &[f64; 5]| (t[0] * p.input + t[1] * p.cached_input + t[2] * p.output + t[3] * p.cache_write + t[4] * p.cache_write_long) / 1_000_000.0;
+    let (mut count, mut beyond) = (0, 0.0);
+    for (model, t) in &requests {
+        let Some(price) = config.prices.get(model) else { continue };
+        let Some(tier) = &price.tier else { continue };
+        if t[0] + t[1] + t[3] + t[4] > tier.above as f64 { count += 1; beyond += rate(&price.at(f64::INFINITY), t) - rate(price, t); }
     }
-    Some(requests.values().filter(|(model, u)| {
-        let n = |k: &str| u[k].as_f64().unwrap_or(0.0);
-        above(model).is_some_and(|a| n("input_tokens") + n("cache_read_input_tokens") + n("cache_creation_input_tokens") > a)
-    }).count() as u64)
+    Some((count, micro(beyond)))
 }
 
 /// How many lines and bytes of a failing check's output a prompt carries.
@@ -3323,6 +3379,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, p: &Pro
     remove_build(config, &build);
     // Without token counts there is no measured cost: charge the whole limit.
     let (spent, program_cost, prices) = generation(p, config, &stdout).unwrap_or((micro(config.agent_process.limit), None, HashMap::new()));
+    let over = over_tier(p, config, &stdout);
     if killed { write_trace(&trace.join("killed"), "time limit"); }
     // The judge's build: a fresh clone of trunk's, which no agent process wrote,
     // made only if a check must run (the verdict cache may answer them all).
@@ -3342,8 +3399,9 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, p: &Pro
         "program": p.name(), "role": p.role, "client": p.run.client, "model": p.run.model,
         "generation_microdollars": spent, "killed": killed,
         "program_generation_microdollars": program_cost,
-        // Its requests over its model's tier threshold, where the output says each request's prompt.
-        "requests_over_tier": over_tier(p, config, &stdout),
+        // Its requests over its model's tier threshold, where the output says each request's prompt,
+        // and what they cost beyond the base price.
+        "requests_over_tier": over.map(|o| o.0), "over_tier_microdollars": over.map(|o| o.1),
         // The prices this cost was computed at, so the trace stays true when the host's prices change.
         "prices": prices,
         // The program's own figure differs from bon's by more than 5%: the price table or the program is stale.
@@ -4833,8 +4891,9 @@ mod tests {
         // Base 1.6 + 1510 + 550, and request a's input side again four times over.
         assert_eq!(generation(h, &c, session).unwrap(), (8066, Some(8000), HashMap::from([("claude-haiku-5-5".into(), c.prices["claude-haiku-5-5"].clone())])));
         // How many requests passed the threshold: one of the session's two, the one-shot's one; codex says nothing per request.
-        assert_eq!((over_tier(h, &c, session), over_tier(h, &c, one)), (Some(1), Some(1)));
-        assert_eq!(over_tier(h, &c, &one.replace("150000", "1000")), Some(0));
+        // And what they cost beyond the base price: request a's input side four times over, the one-shot's likewise.
+        assert_eq!((over_tier(h, &c, session), over_tier(h, &c, one)), (Some((1, 6004)), Some((1, 6004))));
+        assert_eq!(over_tier(h, &c, &one.replace("150000", "1000")), Some((0, 0)));
         assert_eq!(over_tier(h, &c, r#"{"type":"turn.completed","usage":{"input_tokens":5}}"#), None);
     }
 

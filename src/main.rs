@@ -7,9 +7,11 @@ use std::process::Command;
 use best_of_n::process;
 
 mod account;
+mod host;
 mod interrupt;
 mod new;
 mod projection;
+mod route;
 mod tui;
 mod types;
 mod view;
@@ -47,6 +49,8 @@ fn main() {
         Ok(r) => r,
         // init checks for a repository itself; account and types also run without .git (checks).
         Err(_) if matches!(args.first().map(String::as_str), Some("init" | "new" | "setup" | "account" | "types" | "help" | "-h" | "--help")) => ".".into(),
+        // Outside every repository, the view and bon pending show the host: no root.
+        Err(_) if args.first().is_none_or(|a| a == "pending" || a == "view" || a.starts_with("--")) => String::new(),
         Err(e) => fail(&format!("not in a git repository: {e}")),
     };
     let command = args.first().map(String::as_str).unwrap_or("");
@@ -108,6 +112,11 @@ fn dispatch(root: &str, args: &[String]) -> Result<(), String> {
             println!("{} bon processes, {} goals, {} searches, {} agent processes, {} spec items, {} queue lines", p.processes.len(), p.groups.len(),
                 p.processes.iter().map(|b| b.searches.len()).sum::<usize>(), p.processes.iter().flat_map(|b| &b.searches).map(|s| s.candidates.len()).sum::<usize>(),
                 p.spec.as_ref().map_or(0, |s| s.items.len()), p.queue.as_ref().map_or(0, |q| q.len()));
+            Ok(())
+        }
+        // Outside every repository, the host's projection (queue 60).
+        Some("view") if root.is_empty() && args.iter().any(|a| a == "--state") => {
+            println!("{}", serde_json::to_string_pretty(&host::state(None)).unwrap_or_default());
             Ok(())
         }
         Some("view") if args.iter().any(|a| a == "--state") => {
@@ -722,6 +731,8 @@ fn init_account(r: &Path) -> String {
 /// draws, printed.
 fn status(root: &str, args: &[String]) -> Result<(), String> {
     let filter = view::Filter::args(args)?;
+    // Outside every repository: the host.
+    if root.is_empty() { print!("{}", host::text(&host::state(None))); return Ok(()); }
     if git(Path::new(root), &["show", "HEAD:.bon/bon.toml"]).is_err() {
         println!("no .bon/bon.toml at trunk's head: run bon init");
         return Ok(());
@@ -984,7 +995,9 @@ const HOST_TEMPLATE: &str = r#"# bon's host file: facts about this host, not abo
 
 # The user layer's root, between this host and its repositories: bon's state
 # that outlives a bon process (the verdict cache, the process list) is in its
-# .bon, engineer's alone.
+# .bon, engineer's alone. `bon` outside every repository shows the host: the
+# repositories under this root with a .bon/bon.toml, and any a bon process
+# searches.
 user = "@USER@"
 
 # PATH for agent processes and checks. Nothing else is inherited. Checks drop
@@ -994,6 +1007,18 @@ path = ["/opt/bon/cargo/bin", "/opt/bon/verus", "/opt/homebrew/bin", "/usr/bin",
 # The toolchain checks judge with, installed by bon setup: root's all the way up.
 rustup_home = "/opt/bon/rustup"
 cargo_home = "/opt/bon/cargo-home"
+
+# Where a transcript dropped in the user layer's folder (<user>/transcripts)
+# goes: a pattern of its meeting title (its WebVTT header's text, else its
+# file name), and the repository, its path under the user layer's root or
+# absolute. A title matches a pattern it contains, ignoring case; a transcript
+# goes where its matching routes name one repository, into that repository's
+# transcripts directory (moved, not committed), when bon pending runs. One no
+# route names, or whose routes name two repositories, stays in the folder,
+# pending, until a route names it or you move it.
+[routes]
+# "Acme" = "acme"
+# "weekly sync" = "bon"
 
 # What each role a repository's [searches] names runs. program: the argv, run
 # as agent in the working directory with the prompt on its stdin; bon appends
@@ -1276,6 +1301,11 @@ mod tests {
         assert_eq!(host["user"].as_str(), Some("@USER@"));
         assert!(host["roles"].get("wide").is_some() && host["roles"].get("deep").is_some());
         assert_eq!(host["prices"]["claude-haiku-5-5"]["tier"]["above"].as_integer(), Some(100_000));
+        // queue 80: the routes are a table of the host's own, empty until the owner names one; every top-level key stays top-level.
+        assert!(host["routes"].as_table().is_some_and(|r| r.is_empty()) && host.get("path").is_some() && host["routes"].get("path").is_none());
+        let routed = HOST_TEMPLATE.replace("# \"Acme\" = \"acme\"", "\"Acme\" = \"acme\"");
+        assert_eq!(best_of_n::trusted::host_shape(&routed), Ok(()));
+        assert_eq!(toml::from_str::<toml::Value>(&routed).unwrap()["routes"]["Acme"].as_str(), Some("acme"));
         // The old shape is refused, naming what replaced it.
         assert!(best_of_n::trusted::host_shape("generation = 8\npath = []").unwrap_err().contains("agent_processes"));
         // queue 56, 58: the verdict cache's place and cleanup are no host keys now.

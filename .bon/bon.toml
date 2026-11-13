@@ -47,7 +47,7 @@ visible = ["Cargo.toml", "Cargo.lock"]
 [account]
 name = "best-of-n"
 description = "bon: a kernel, verified by Verus, that searches for code, and the trusted code around it."
-trusted = ["src/trusted.rs", "src/main.rs", "src/view.rs", "src/types.rs", "src/projection.rs", "src/interrupt.rs", "src/tui.rs", "src/account.rs", "src/new.rs"]
+trusted = ["src/trusted.rs", "src/main.rs", "src/view.rs", "src/types.rs", "src/projection.rs", "src/interrupt.rs", "src/host.rs", "src/route.rs", "src/tui.rs", "src/account.rs", "src/new.rs"]
 tools = { rustc = "rustc --version", verus = "verus --version", git = "git --version", sudo = "printf 'macOS '; sw_vers -buildVersion", tar = "tar --version", perl = "perl -e 'print $^V'" }
 # The network services the programs call.
 services = { "Anthropic API" = "https://api.anthropic.com", "OpenAI API" = "https://api.openai.com" }

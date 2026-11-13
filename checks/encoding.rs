@@ -5,6 +5,15 @@
 use best_of_n::exec::Kernel;
 use best_of_n::gates::*;
 
+/// The kernel implements every gate and the encoding: the tests do not build
+/// without either. In this check, engineer's, and out of gates.rs, so the
+/// spec's files stand alone.
+#[test]
+fn the_kernel_implements_every_gate_and_the_encoding() {
+    fn kernel<K: Gates + Encoding>() {}
+    kernel::<Kernel>();
+}
+
 #[test]
 fn wire_rejects_damage_and_preserves_json_boundaries() {
     let s = Search {

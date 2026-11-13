@@ -1585,10 +1585,3 @@ impl Gates for Kernel {
 }
 
 } // verus!
-
-/// The kernel implements every gate and the encoding; a build without either
-/// fails. Here, not in gates.rs, so the spec's files stand alone.
-#[allow(dead_code)]
-fn kernel<K: crate::gates::Gates + crate::gates::Encoding>() {}
-#[allow(dead_code)]
-fn kernel_is_complete() { kernel::<Kernel>(); }

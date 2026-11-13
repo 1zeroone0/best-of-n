@@ -214,6 +214,8 @@ type Totals struct {
 	Success []Success `json:"success"`
 	// Cost per verified candidate by kind, program and model.
 	PerVerified []PerVerified `json:"per_verified"`
+	// Requests over a model's tier threshold, by kind, role and model.
+	OverTier []OverTier `json:"over_tier"`
 	// The host's two semaphores against wall time.
 	Utilization Utilization `json:"utilization"`
 	// Time and cost to a push, by kind, and each search's as a fixed part
@@ -330,6 +332,19 @@ type PerVerified struct {
 	TimeCost       float64 `json:"time_cost"`
 }
 
+// The agent processes of one kind, role and model whose output said each
+// request's prompt (`measured` of `agent_processes`), their requests over the
+// model's tier threshold, and what those cost beyond the base price.
+type OverTier struct {
+	Kind           string  `json:"kind"`
+	Role           string  `json:"role"`
+	Model          string  `json:"model"`
+	AgentProcesses uint64  `json:"agent_processes"`
+	Measured       uint64  `json:"measured"`
+	Requests       uint64  `json:"requests"`
+	Beyond         float64 `json:"beyond"`
+}
+
 // The host's agent_processes and check_processes semaphores over the reported
 // searches in range: `wall` is the union of their wall times, in seconds.
 type Utilization struct {
@@ -339,11 +354,14 @@ type Utilization struct {
 	CheckProcesses Pool    `json:"check_processes"`
 }
 
-// One semaphore: the slot-seconds held, and its size where every search
-// recorded the same one. Utilization is held ÷ (size × wall).
+// One semaphore: the slot-seconds held, its size where every search that
+// records one (`sized` of them) recorded the same, and its utilization over
+// those: their held slot-seconds ÷ (size × the union of their wall times).
 type Pool struct {
-	Held float64 `json:"held"`
-	Size *uint64 `json:"size"`
+	Held        float64  `json:"held"`
+	Size        *uint64  `json:"size"`
+	Utilization *float64 `json:"utilization"`
+	Sized       uint64   `json:"sized"`
 }
 
 // One kind's run-time distribution: its pushes' time (seconds) and cost to a
@@ -526,8 +544,12 @@ type SearchTrace struct {
 	Trees *uint64 `json:"trees"`
 	// Agent processes per behavior: for each distinct `out` its verified
 	// candidates show, how many show it, in the order each first appears.
-	Behaviors  []uint64 `json:"behaviors"`
-	Candidates []Facts  `json:"candidates"`
+	Behaviors []uint64 `json:"behaviors"`
+	// Its agent processes' requests over their model's tier threshold, and
+	// what those cost beyond the base price.
+	RequestsOverTier uint64  `json:"requests_over_tier"`
+	OverTier         float64 `json:"over_tier"`
+	Candidates       []Facts `json:"candidates"`
 	// A code or compaction search: how its attempt ended (pushed, blocked,
 	// landed, exited, running).
 	End *string `json:"end"`
@@ -564,11 +586,17 @@ type GoalRef struct {
 type Facts struct {
 	Index uint64 `json:"index"`
 	// The program it ran (older traces: their `harness`).
-	Program    *string  `json:"program"`
+	Program *string `json:"program"`
+	// The role it ran as, in traces that record it.
+	Role       *string  `json:"role"`
 	Model      *string  `json:"model"`
 	Generation *float64 `json:"generation"`
-	Commit     *string  `json:"commit"`
-	Accepted   bool     `json:"accepted"`
+	// Its requests over its model's tier threshold, and what they cost
+	// beyond the base price; none where its output said nothing per request.
+	RequestsOverTier *uint64  `json:"requests_over_tier"`
+	OverTier         *float64 `json:"over_tier"`
+	Commit           *string  `json:"commit"`
+	Accepted         bool     `json:"accepted"`
 	// Verus verified it.
 	Proved       bool    `json:"proved"`
 	Verified     bool    `json:"verified"`
@@ -756,6 +784,121 @@ type Service struct {
 	Name      string   `json:"name"`
 	Endpoints []string `json:"endpoints"`
 	Group     *string  `json:"group"`
+}
+
+// The host as bon shows it (queue 60): every repository the user layer
+// holds, or the one it was read in, and across them what waits on engineer,
+// the host's two pools, its memory, each running bon process and a journal,
+// from the process list, the slot files, the traces and the OS.
+type Host struct {
+	// The user layer's root, from the host file; none without one.
+	User *string `json:"user"`
+	// The repository it was read in; none for the whole host.
+	Here         *string      `json:"here"`
+	Repositories []Repository `json:"repositories"`
+	// What only engineer can answer, every repository's and the user
+	// layer's, oldest first: pending and resolved.
+	Interrupts []Interrupt `json:"interrupts"`
+	Waiting    Waiting     `json:"waiting"`
+	Pools      HostPools   `json:"pools"`
+	Memory     Memory      `json:"memory"`
+	// Each running bon process, those of one tree together.
+	Trees []TreeGroup `json:"trees"`
+	// What happened, oldest first: pushes, blocks, landings, interrupts raised and resolved.
+	Journal    []Event      `json:"journal"`
+	Turnaround []Turnaround `json:"turnaround"`
+	Now        int64        `json:"now"`
+}
+
+// A repository bon reaches: one under the user layer's root with a
+// .bon/bon.toml, one a live bon process searches, or one a route names.
+type Repository struct {
+	Name string `json:"name"`
+	Root string `json:"root"`
+	// Whether trunk's head has a .bon/bon.toml.
+	Configured bool   `json:"configured"`
+	Pending    uint64 `json:"pending"`
+	Running    uint64 `json:"running"`
+	// When its latest bon process started.
+	Latest *int64 `json:"latest"`
+	// What its bon processes cost since local midnight.
+	Today float64 `json:"today"`
+}
+
+// The searches engineer waits on now (running, not background) of the
+// repositories shown, among `host` of them on the host; what his time costs
+// an hour while they run (each search's repository's rate, split among the
+// host's waited-on searches); and his time charged today.
+type Waiting struct {
+	Searches uint64  `json:"searches"`
+	Host     uint64  `json:"host"`
+	PerHour  float64 `json:"per_hour"`
+	Today    float64 `json:"today"`
+}
+
+// The host file's two semaphores, their slots held now, and how many of the
+// shown repositories' agent processes are in flight and in checks.
+type HostPools struct {
+	AgentProcesses Slots   `json:"agent_processes"`
+	CheckProcesses Slots   `json:"check_processes"`
+	CheckThreads   *uint64 `json:"check_threads"`
+}
+
+// One semaphore: its size, the slots held host-wide, and how many of the
+// shown repositories' agent processes need it now.
+type Slots struct {
+	Size  *uint64 `json:"size"`
+	Held  uint64  `json:"held"`
+	Shown uint64  `json:"shown"`
+}
+
+// The machine's memory, what is free for checks, and what the running bon
+// processes' trees hold resident, in GB.
+type Memory struct {
+	Total float64 `json:"total"`
+	Free  float64 `json:"free"`
+	Bon   float64 `json:"bon"`
+}
+
+// The running bon processes that start from one tree.
+type TreeGroup struct {
+	Tree      *string   `json:"tree"`
+	Processes []Running `json:"processes"`
+}
+
+// A bon process the process list says is running, and what its trace says.
+type Running struct {
+	Pid        uint64  `json:"pid"`
+	Repository string  `json:"repository"`
+	Root       string  `json:"root"`
+	Trace      *string `json:"trace"`
+	Background bool    `json:"background"`
+	Kind       *string `json:"kind"`
+	Goal       *string `json:"goal"`
+	Search     *uint64 `json:"search"`
+	Attempt    *uint64 `json:"attempt"`
+	Started    *int64  `json:"started"`
+	// When the bon process started.
+	Start int64 `json:"start"`
+	// Its process tree's resident memory, in GB.
+	Memory   float64 `json:"memory"`
+	Sentence string  `json:"sentence"`
+	Width    *uint64 `json:"width"`
+	Returned uint64  `json:"returned"`
+	Verified uint64  `json:"verified"`
+	InFlight uint64  `json:"in_flight"`
+	InChecks uint64  `json:"in_checks"`
+	Waiting  uint64  `json:"waiting"`
+	Cost     float64 `json:"cost"`
+}
+
+// One thing that happened: when, in which repository (none: the user
+// layer's), what (pushed, blocked, landed, raised, resolved), and a line.
+type Event struct {
+	Time       int64  `json:"time"`
+	Repository string `json:"repository"`
+	Kind       string `json:"kind"`
+	Text       string `json:"text"`
 }
 
 // Tuple2 is written in JSON as a 2-element array.

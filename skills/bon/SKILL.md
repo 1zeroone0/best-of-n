@@ -163,6 +163,9 @@ The repository holds the words; this skill does not repeat them.
   million tokens: `input`, `cached_input`, `cache_write`, `cache_write_long`,
   `output`, and a `tier` that multiplies them `above` a prompt size by
   `multiplier` and `output_multiplier`), and two
+  `[routes]` (a meeting title pattern to a repository, its path under the
+  user layer's root: a title matches a pattern it contains, ignoring case),
+  and two
   semaphores shared by every bon process on the host: `agent_processes` and
   `check_processes` (checks at once, the judge's and every cargo an agent
   process runs; `bon setup` makes a user per slot), with `check_threads` per
@@ -269,7 +272,8 @@ at a time.
 
 | when | run |
 |---|---|
-| see everything | `bon` in a terminal (the view: Project, Spec, Queue, Traces); piped, it prints text |
+| see everything | `bon` in a terminal (the view: Project, Spec, Queue, Traces); piped, it prints text; outside every repository, the host: what waits on engineer across repositories, the pools, memory, each bon process, a journal |
+| engineer dropped a transcript in `<user>/transcripts` | `bon pending` routes it by the host file's `[routes]` into its repository's transcripts directory; commit it there, push, then `bon queue`. One routed nowhere is pending until a route names it or he moves it |
 | the spec, its vocabulary and how it reaches the code | `bon spec`, or `bon spec NAME` for one item |
 | the kernel's types changed | `bon types`; `bon types --check` is a test |
 | the spec changed and trunk's checks reject it | `bon code` |
@@ -384,7 +388,8 @@ when an earlier bon process of the same pid left a trace.
   `check_processes` in force).
 - `.bon/traces/<pid>/<search>/<index>/facts.json`: each agent process's
   `program`, `role`, `client`, `model`, cost and `prices`,
-  `requests_over_tier`, and its `candidate` (`commit`, `accepted`, `proved`,
+  `requests_over_tier` and what they cost beyond the base price
+  (`over_tier_microdollars`), and its `candidate` (`commit`, `accepted`, `proved`,
   `changed`, `added`, `diff`, `lines_added`, `lines_removed`, `rank`, `out`,
   `accepts`, `rejects_counterexamples`); its program's log is `program`.
   A compaction candidate's `rank` is its rank command's integer less its
@@ -417,6 +422,12 @@ when an earlier bon process of the same pid left a trace.
   its `interrupt` id, `raised`, `resolved`, the answering commit (`output`),
   the choice it showed (`behavior`), and `transcript` (`path`, `sha256`).
   Interrupts themselves are never stored: `bon view --state` derives them.
+- The user layer's `.bon/traces/routes.jsonl`: each transcript route, in the
+  one shape (`program` route, `context` its path in the folder, `sha256`,
+  `title`, `output` the repository or null, `verdict` why it went nowhere or
+  `moved`); a transcript interrupt's decision record goes beside it, in the
+  user layer's `.bon/traces/decisions.jsonl`. `bon view --state` outside every
+  repository is the host's projection.
 - `bon view --state`: the projection, as JSON.
 
 ## Never
