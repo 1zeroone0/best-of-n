@@ -23,6 +23,9 @@ case "$prompt" in
   *"Write one test, at"*) kind=counterexample ;;
   *) kind=other ;;
 esac
+# Its reply begins at once (a model's first token), then takes SLEEP: bon
+# starts a search's other agent processes at its first one's first output.
+echo "stub $kind $index: replying"
 sleep "$SLEEP"
 PROJECT=${PROJECT:-kernel}
 v=$((index % VARIANTS))

@@ -343,6 +343,29 @@ fn run_with_stdin(mut c: Command, stdin: &str) -> Result<(bool, String, String),
     Ok((out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned()))
 }
 
+/// Run a program with `stdin`, `line` called on each line of its stdout as it
+/// comes; (exit 0, stdout, stderr).
+fn run_streaming(mut c: Command, stdin: &str, line: &mut dyn FnMut(&str)) -> Result<(bool, String, String), String> {
+    let mut child = c.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()
+        .map_err(|e| format!("spawn {:?}: {e}", c.get_program()))?;
+    let mut pipe = child.stdin.take().unwrap();
+    let text = stdin.to_string();
+    let writer = std::thread::spawn(move || { let _ = pipe.write_all(text.as_bytes()); });
+    let mut err_pipe = child.stderr.take().unwrap();
+    let errors = std::thread::spawn(move || { let mut e = String::new(); let _ = err_pipe.read_to_string(&mut e); e });
+    let mut out = String::new();
+    let mut reader = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut l = String::new();
+    while std::io::BufRead::read_line(&mut reader, &mut l).map_err(|e| e.to_string())? > 0 {
+        line(l.trim_end());
+        out.push_str(&l);
+        l.clear();
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    let _ = writer.join();
+    Ok((status.success(), out, errors.join().unwrap_or_default()))
+}
+
 /// The Messages API through curl: the key and the body go on curl's stdin as
 /// its config, never in argv. The stable prefix is the system prompt, with a
 /// cache breakpoint at its end; the task is the user turn.
@@ -389,16 +412,31 @@ fn via_api(a: &Args, ctx: &Context, prompt: &str, env: Env) -> Result<Reply, Fai
     Err(last.into())
 }
 
+/// The line bon-sample prints the moment its model's reply begins: the
+/// request was taken, so its prompt is in the provider's cache for the next
+/// sample (bon starts a search's other agent processes at its leader's first
+/// output).
+const REPLYING: &str = "bon-sample: replying";
+
 /// The Claude CLI, one shot: no tools, no settings, MCP, slash commands or
 /// session on disk. The format is the system prompt; the files then the task
-/// are the one user turn, so the prefix is the same for every sample.
+/// are the one user turn, so the prefix is the same for every sample. Its
+/// events stream, so REPLYING goes out when the reply starts.
 fn via_claude(a: &Args, ctx: &Context, prompt: &str, env: Env) -> Result<Reply, Failure> {
     let program = env("BON_SAMPLE_CLAUDE").unwrap_or_else(|| "claude".into());
     let mut c = Command::new(program);
-    c.args(["-p", "--output-format", "json", "--model", &a.model, "--tools", "", "--system-prompt", INSTRUCTIONS,
-            "--setting-sources", "", "--strict-mcp-config", "--no-session-persistence", "--disable-slash-commands"]);
+    c.args(["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--model", &a.model, "--tools", "",
+            "--system-prompt", INSTRUCTIONS, "--setting-sources", "", "--strict-mcp-config", "--no-session-persistence", "--disable-slash-commands"]);
     if let Some(e) = &a.effort { c.args(["--effort", e]); }
-    let (ok, out, err) = run_with_stdin(c, &format!("{}\n{prompt}", ctx.repository))?;
+    let mut replying = false;
+    let (ok, out, err) = run_streaming(c, &format!("{}\n{prompt}", ctx.repository), &mut |line: &str| {
+        if !replying && serde_json::from_str::<serde_json::Value>(line).is_ok_and(|v| v["type"] == "stream_event" || v["type"] == "assistant") {
+            replying = true;
+            let mut o = std::io::stdout();
+            let _ = writeln!(o, "{REPLYING}");
+            let _ = o.flush();
+        }
+    })?;
     let v = out.lines().rev().filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok()).find(|v| v["type"] == "result")
         .ok_or(format!("claude printed no result{}: {}", if ok { "" } else { " and failed" }, err.trim()))?;
     // One prompt, no tools: one request (bon applies a price's tier per request).

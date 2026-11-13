@@ -336,11 +336,17 @@ fn as_agent_on(config: &Config, path: &[String], dir: &std::path::Path, env: &[(
     c
 }
 
-/// Run to completion or kill at `time`, with all it started. Returns (exit 0,
-/// stdout, killed).
-fn supervise(c: Command, stdin: Option<String>, time: Duration, log: &std::path::Path) -> (bool, String, bool) {
-    let r = supervised(c, stdin, time, log);
-    (r.ok, r.stdout, r.killed)
+/// Something that happens once, which threads wait for: a search's leading
+/// agent process has spoken (see `run`).
+#[derive(Default)]
+struct Signal { done: std::sync::Mutex<bool>, cv: std::sync::Condvar }
+
+impl Signal {
+    fn set(&self) { *self.done.lock().unwrap_or_else(|e| e.into_inner()) = true; self.cv.notify_all(); }
+    fn wait(&self) {
+        let mut d = self.done.lock().unwrap_or_else(|e| e.into_inner());
+        while !*d { d = self.cv.wait(d).unwrap_or_else(|e| e.into_inner()); }
+    }
 }
 
 /// What a supervised command did: exit 0, its stdout, whether its time limit
@@ -349,7 +355,9 @@ fn supervise(c: Command, stdin: Option<String>, time: Duration, log: &std::path:
 /// log as written.
 struct Run { ok: bool, stdout: String, killed: bool, exited: bool, log: String }
 
-fn supervised(mut c: Command, stdin: Option<String>, time: Duration, log: &std::path::Path) -> Run {
+/// Run to completion or kill at `time`, with all it started. `spoke`, if
+/// given, is set when the command first writes to stdout.
+fn supervised(mut c: Command, stdin: Option<String>, time: Duration, log: &std::path::Path, spoke: Option<std::sync::Arc<Signal>>) -> Run {
     std::os::unix::process::CommandExt::process_group(&mut c, 0);
     c.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
     let start = Instant::now();
@@ -367,7 +375,19 @@ fn supervised(mut c: Command, stdin: Option<String>, time: Duration, log: &std::
     }
     let mut out = child.stdout.take().unwrap();
     let mut err = child.stderr.take().unwrap();
-    let o = std::thread::spawn(move || { let mut s = String::new(); let _ = out.read_to_string(&mut s); s });
+    let o = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; 65536];
+        loop {
+            match out.read(&mut chunk) {
+                Ok(0) => break,
+                Ok(n) => { bytes.extend_from_slice(&chunk[..n]); if let Some(s) = &spoke { s.set(); } }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        String::from_utf8_lossy(&bytes).into_owned()
+    });
     let e = std::thread::spawn(move || { let mut s = String::new(); let _ = err.read_to_string(&mut s); s });
     // Done when the command has exited and nothing it started holds its output.
     let mut status = None;
@@ -1407,7 +1427,7 @@ fn run_check_with(config: &Config, on: &On, threads: usize, dir: &std::path::Pat
         Some(held) => { if held.is_none() { *held = Some(Slot::check(config)); } None }
         None => Some(Slot::check(config)),
     });
-    let r = supervised(c, None, Duration::from_secs(config.agent_process.time), log);
+    let r = supervised(c, None, Duration::from_secs(config.agent_process.time), log, None);
     if let (Some(k), true) = (&key, r.exited) { store(k, r.ok, &r.stdout, &r.log); }
     (r.ok && !r.killed, r.stdout, r.killed)
 }
@@ -1918,13 +1938,23 @@ pub fn run(m: &Manifest, kind: &Kind, a: usize, start: &Commit, target: Option<&
     let traces = trace_dir(&m.root).join(search.to_string());
     traced(&traces, std::fs::create_dir_all(&traces));
     // Every agent process at once: the generation pool bounds the model
-    // sessions, the check pool their checks and the judge's.
+    // sessions, the check pool their checks and the judge's. The first leads:
+    // the rest start once it has written its first output (or ended), so a
+    // harness whose sessions open alike (the same prompt, the same files)
+    // has its prefix cached by the first, and the rest read it.
     let out: Vec<std::sync::Mutex<(Option<Candidate>, u64)>> = slots.iter().map(|_| std::sync::Mutex::new((None, 0))).collect();
+    let spoke = std::sync::Arc::new(Signal::default());
     std::thread::scope(|scope| {
         for (i, h) in slots.iter().enumerate() {
-            let (out, start, traces) = (&out, &start, &traces);
+            let (out, start, traces, spoke) = (&out, &start, &traces, &spoke);
             scope.spawn(move || {
-                *out[i].lock().unwrap() = agent_process(m, kind, search, i, h, start, target, foils, &traces.join(i.to_string()));
+                // Whatever the leader does, the rest go on when it is done.
+                struct Spoken<'a>(&'a Signal);
+                impl Drop for Spoken<'_> { fn drop(&mut self) { self.0.set(); } }
+                let _spoken = (i == 0).then(|| Spoken(spoke));
+                if i > 0 { spoke.wait(); }
+                let lead = (i == 0).then(|| spoke.clone());
+                *out[i].lock().unwrap() = agent_process(m, kind, search, i, h, start, target, foils, &traces.join(i.to_string()), lead);
             });
         }
     });
@@ -2172,9 +2202,10 @@ pub const SBOM: &str = ".bon/sbom.json";
 pub const BUILD: [&str; 2] = [".cargo/", "build.rs"];
 
 /// One agent process: generate, capture, observe. Its log goes under `trace`.
+/// `spoke`: the leader's signal, set at its harness's first output.
 #[allow(clippy::too_many_arguments)]
 fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Harness, start: &str,
-                 target: Option<&Search>, foils: Option<&Search>, trace: &std::path::Path) -> (Option<Candidate>, u64) {
+                 target: Option<&Search>, foils: Option<&Search>, trace: &std::path::Path, spoke: Option<std::sync::Arc<Signal>>) -> (Option<Candidate>, u64) {
     traced(trace, std::fs::create_dir_all(trace));
     let config = &m.config;
     // A generation slot for the session and its setup alone: never held while
@@ -2220,7 +2251,8 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, h: &Har
     let mut env = vec![("CARGO_TARGET_DIR", b.clone()), ("BON_BUILD", b), ("CARGO_BUILD_JOBS", config.pools.threads.to_string())];
     if let Some(w) = warm { env.push(("BON_WARM", w.to_string_lossy().to_string())); }
     let c = as_agent_on(config, &with_wrapper(config, config.path.clone()), &dir, &env, &argv);
-    let (_, stdout, killed) = supervise(c, Some(text), Duration::from_secs(config.agent_process.time), &trace.join("harness"));
+    let run = supervised(c, Some(text), Duration::from_secs(config.agent_process.time), &trace.join("harness"), spoke);
+    let (stdout, killed) = (run.stdout, run.killed);
     drop(session);
     remove_build(config, &build);
     // Without token counts there is no measured cost: charge the whole limit.
@@ -3260,12 +3292,27 @@ mod tests {
     }
 
     #[test]
+    fn a_leader_has_spoken_at_its_first_output_not_at_its_end() {
+        let log = std::env::temp_dir().join(format!("bon-spoke-test-{}", std::process::id()));
+        let spoke = std::sync::Arc::new(Signal::default());
+        let (s, start) = (spoke.clone(), Instant::now());
+        let waiter = std::thread::spawn(move || { s.wait(); start.elapsed() });
+        let mut c = Command::new("/bin/sh");
+        c.args(["-c", "echo replying; sleep 2; echo done"]);
+        let r = supervised(c, None, Duration::from_secs(10), &log, Some(spoke));
+        let heard = waiter.join().unwrap();
+        assert!(r.ok && r.stdout == "replying\ndone\n", "{}", r.stdout);
+        assert!(heard < Duration::from_millis(1500), "{heard:?}");
+        let _ = std::fs::remove_file(&log);
+    }
+
+    #[test]
     fn a_time_limit_stops_everything_the_command_started() {
         // queue 47: a grandchild holding stdout dies with its command.
         let log = std::env::temp_dir().join(format!("bon-supervise-test-{}", std::process::id()));
         let c = as_agent(&config(), std::path::Path::new("/tmp"), &[], &["/bin/sh".into(), "-c".into(), "/bin/sleep 60 & wait".into()]);
         let start = Instant::now();
-        let (ok, _, killed) = supervise(c, None, Duration::from_secs(1), &log);
+        let Run { ok, killed, .. } = supervised(c, None, Duration::from_secs(1), &log, None);
         assert!(!ok && killed, "{}", std::fs::read_to_string(&log).unwrap_or_default());
         assert!(start.elapsed() < Duration::from_secs(6), "{:?}", start.elapsed());
         let _ = std::fs::remove_file(&log);
