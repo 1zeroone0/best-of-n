@@ -210,6 +210,15 @@ pub fn read(here: Option<&Path>) -> (Vec<(PathBuf, Value)>, Option<PathBuf>, Vec
     (states, layer.map(|(u, _)| u), live)
 }
 
+/// The host's part a repository shows, from its projection already read:
+/// its own processes and journal, and the host's pools and memory.
+pub fn slice(root: &Path, state: &Value) -> Value {
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+    let user = best_of_n::trusted::user_layer().map(|(u, _)| std::fs::canonicalize(&u).unwrap_or(u));
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+    of(&[(root.clone(), state.clone())], Some(&root), user.as_deref(), &best_of_n::trusted::processes(), now)
+}
+
 /// The host's projection, as types: the repository at `here`, or the whole host.
 pub fn state(here: Option<&Path>) -> Value {
     let (states, user, live) = read(here);

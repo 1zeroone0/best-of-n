@@ -84,7 +84,7 @@ fn transcripts_of(repo: &Path) -> Option<PathBuf> {
 }
 
 /// What one routing did to one transcript, for the owner to read.
-pub struct Routed { pub file: String, pub title: String, pub to: Option<PathBuf>, pub why: Option<String> }
+pub struct Routed { pub file: String, pub to: Option<PathBuf>, pub why: Option<String> }
 
 /// Route every transcript in the user layer's folder at `user` by `routes`,
 /// at `now`: each that one repository's routes name moves into that
@@ -115,7 +115,7 @@ pub fn route(user: &Path, routes: &[(String, PathBuf)], now: i64) -> Result<Vec<
         let shown = |r: &Path| r.strip_prefix(user).map_or(r.display().to_string(), |p| p.display().to_string());
         // Where it goes, or why nowhere.
         let why = match to.as_slice() {
-            [] => Err("no route matches its title".to_string()),
+            [] => Err(format!("no route matches \"{title}\"")),
             [repo] => match transcripts_of(repo) {
                 None => Err(format!("its route names {}, which has no .bon/bon.toml at trunk's head", shown(repo))),
                 Some(dir) => {
@@ -126,7 +126,7 @@ pub fn route(user: &Path, routes: &[(String, PathBuf)], now: i64) -> Result<Vec<
                     }
                 }
             },
-            many => Err(format!("its routes name {} repositories: {}", many.len(), many.iter().map(|r| shown(r)).collect::<Vec<_>>().join(", "))),
+            many => Err(format!("\"{title}\" matches routes to {} repositories: {}", many.len(), many.iter().map(|r| shown(r)).collect::<Vec<_>>().join(", "))),
         };
         match why {
             Ok((repo, dir, dest)) => {
@@ -136,12 +136,12 @@ pub fn route(user: &Path, routes: &[(String, PathBuf)], now: i64) -> Result<Vec<
                 }
                 let _ = std::fs::remove_file(&path);
                 lines.push(line(json!(repo.to_string_lossy()), Value::Null));
-                out.push(Routed { file: name, title: title.clone(), to: Some(dest), why: None });
+                out.push(Routed { file: name, to: Some(dest), why: None });
             }
             // Recorded once: a transcript already pending stays so.
             Err(why) if !pending(&recorded).iter().any(|(h, _)| *h == hash) => {
                 lines.push(line(Value::Null, json!(why)));
-                out.push(Routed { file: name, title: title.clone(), to: None, why: Some(why) });
+                out.push(Routed { file: name, to: None, why: Some(why) });
             }
             Err(_) => {}
         }
@@ -152,7 +152,7 @@ pub fn route(user: &Path, routes: &[(String, PathBuf)], now: i64) -> Result<Vec<
         if seen.contains(&hash) { continue; }
         let gone = json!({ "program": "route", "context": context, "sha256": hash, "title": recorded.iter().rev().find(|r| r["sha256"] == hash.as_str()).map_or(Value::Null, |r| r["title"].clone()),
             "output": null, "verdict": "moved", "behavior": null, "time": now });
-        out.push(Routed { file: Path::new(&context).file_name().map_or(context.clone(), |n| n.to_string_lossy().to_string()), title: gone["title"].as_str().unwrap_or("").into(), to: None, why: Some("moved".into()) });
+        out.push(Routed { file: Path::new(&context).file_name().map_or(context.clone(), |n| n.to_string_lossy().to_string()), to: None, why: Some("moved".into()) });
         lines.push(gone);
     }
     if !lines.is_empty() {
@@ -171,7 +171,7 @@ pub fn text(routed: &[Routed]) -> String {
     routed.iter().map(|r| match (&r.to, r.why.as_deref()) {
         (Some(dest), _) => format!("routed {} to {}: commit it to trunk, then bon queue\n", r.file, dest.display()),
         (None, Some("moved")) => format!("{} left the folder\n", r.file),
-        (None, why) => format!("{} (meeting title \"{}\") stays in the folder: {}\n", r.file, r.title, why.unwrap_or("")),
+        (None, why) => format!("{} stays in the folder: {}\n", r.file, why.unwrap_or("")),
     }).collect()
 }
 

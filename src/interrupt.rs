@@ -346,11 +346,12 @@ pub fn transcripts(user: &Path) -> Vec<Value> {
         let id = if again == 0 { format!("transcript {hash}") } else { format!("transcript {hash} {again}") };
         let mut i = json!({ "kind": "transcript", "id": id, "repository": "", "root": user.to_string_lossy(),
             "about": name, "raised": raised, "resolved": null, "reason": null, "answer": null, "came_of_it": null, "decision": null, "transcript": null });
-        i["what"] = json!([format!("meeting title \"{title}\": {}", r["verdict"].as_str().unwrap_or("no route matches its title"))]);
-        // Routes that name more than one repository are narrowed; else one is added.
-        let how = if r["verdict"].as_str().is_some_and(|v| v.contains("repositories")) {
-            format!("change [routes] in {host} so that one repository's patterns match \"{title}\", then bon pending")
-        } else { format!("add \"{}\" = \"<repository>\" to [routes] in {host}, then bon pending", title.replace('"', "")) };
+        i["what"] = json!([r["verdict"].as_str().map_or(format!("no route matches \"{title}\""), String::from)]);
+        // No route: one is added; else the routes (or the repository they name, or the file) change.
+        let how = match r["verdict"].as_str() {
+            None => true, Some(v) => v.starts_with("no route matches"),
+        }.then(|| format!("add \"{}\" = \"<repository>\" to [routes] in {host}, then bon pending", title.replace('"', "")))
+            .unwrap_or_else(|| format!("change [routes] in {host} so that one bon repository's patterns match \"{title}\", then bon pending"));
         i["choices"] = json!([
             { "choice": "route", "how": how,
               "cost": "a queue search in that repository, once the transcript is committed there" },
