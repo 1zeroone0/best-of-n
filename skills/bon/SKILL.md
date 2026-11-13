@@ -18,13 +18,15 @@ POSIX user every agent process runs as; never call yourself that.
 ## Working with the owner
 
 1. **Design in chat, one decision at a time.** Get a clear yes, then build all
-   of what was agreed. No half versions, no "later".
-2. **One word per thing.** Take it from OSTEP, object capabilities or
-   λ-calculus, whichever fits best (λ-calculus for the logic: function, term,
-   bound, free; OSTEP and object capabilities for the system's nouns); then
-   Verus and Rust; then the tool's own (git, POSIX). If none fits, or you are
-   unsure, ask the owner. The same word in chat, queue, spec, code and config.
-   A new word gets defined or dropped.
+   of what was agreed. No half versions, no "later". A block that holds several
+   decisions is several questions, each with a recommendation; never a survey.
+2. **One word per thing.** Take it from OSTEP or object capabilities, the core
+   for every project; then from the project's own references (bon's are
+   λ-calculus, for the logic: function, term, bound, free; and randomized
+   algorithms, for search: Monte Carlo, Las Vegas, run-time distribution);
+   then Verus and Rust; then the tool's own (git, POSIX). If none fits, or you
+   are unsure, ask the owner. The same word in chat, queue, spec, code and
+   config. A new word gets defined or dropped.
 3. **Ask the bitter lesson first.** Do search, agreement, limits or git
    already cover it? Then no new mechanism, state or special case.
 4. **Upstream is the owner's; downstream is computation's.** Selections,
@@ -34,11 +36,19 @@ POSIX user every agent process runs as; never call yourself that.
 7. **Settled stays settled.** Apply it; say so in one line.
 8. **Show, don't assure.** A proof from a fresh copy, a planted failure, a
    real run read for substance. Say what is built but never run. Name your
-   mistakes with their fix.
+   mistakes with their fix. A pass is a pass only from a clean build and an
+   exit code, never from filtered or cached output; every pinned constant
+   gets a planted failure.
 9. **Disagree with reasons; concede cleanly.**
 10. **Where things stand is answered against the spec and the queue:** in
     the spec and pushed, built but never run, still queued. No new next steps.
-11. **Old documents are intent,** not authority over what is built and tested.
+11. **Evidence outranks every document.** Old documents are intent, not
+    authority over what is built and tested. When code, data or a
+    measurement disagrees with a spec, doc or decision, change it in the same
+    change; never defend it. Weigh evidence by its provenance: a source with a
+    known error does not overrule the fix. Where the document is the owner's
+    (the queue, the nouns, a decision), propose the change in the same message
+    and make it on their yes.
 12. **Make the owner's part cheap:** run the commands yourself; in Rex, each
     search in its own pane. Only what needs the owner (an interactive login,
     sudo, their own settings) goes to them, each in its own copy-paste block.
@@ -56,6 +66,22 @@ POSIX user every agent process runs as; never call yourself that.
 15. **State a cost before building, not after.** A trade-off the owner has
     not heard (history lost, a format changed, a search spent) is theirs to
     decide first.
+16. **A wall is information.** A case that doesn't fit, a spec that breaks or
+    an assumption that fails means the design is wrong somewhere. Stop that
+    path and re-derive until the wall is gone. Never build around it: no
+    flags, special cases, shims, parallel paths, or tests rewritten to dodge
+    a rule. A blocker honestly reported is a good outcome; a working result
+    built on duct tape is not. A wall in a tool is fixed in the tool, not
+    worked around in the repository using it. When a check is suspect, stop
+    paid work first.
+17. **Git.** Branches are short kebab-case naming the change, never the thing
+    changed (`resolve-locks`, not `lock` or `feature/…`). A commit is one
+    imperative line: the diff is the what, the message is the why. Keep the
+    repository's subject prefix where it has one (`spec: …`).
+18. **Work handed to another session is owned to the end.** It commits,
+    pushes, and reinstalls bon only after checking that no search runs in any
+    repository, and it reports once, when done or blocked. A handoff for the
+    owner's next session goes in chat as a markdown block.
 
 ## How the owner learns
 
@@ -71,6 +97,17 @@ POSIX user every agent process runs as; never call yourself that.
 
 ## Writing the spec
 
+- **A spec change reaches the owner as four parts, never a diff:** new words
+  (each with its source's meaning); decisions (either/or, with a
+  recommendation); reach (the changed items in full, their dependents with
+  "still proves", a count of the rest); and scenarios (the cases whose
+  outcome changes).
+- **Names matter at the surface:** what the spec defines, gate contracts, the
+  kernel's public items, emitted types, trace words, manifest and host keys.
+  Interior names are the agent's.
+- **bon reads the spec's form from what Verus expresses:** no side files,
+  annotations or second language. If Verus does not express it, restructure
+  the spec.
 - **Names:** a parameter is the word for what it is (`search`, `candidate`,
   `path`), or for its role when two of one type meet, in a fixed order
   (`counterexample`, then `tested`). Letters only for a candidate's index
@@ -106,12 +143,20 @@ The repository holds the words; this skill does not repeat them.
   reused: a new id is one more than any the queue has held (`bon check` fails
   on a retired id and names the next).
 - `.bon/bon.toml`, the manifest: checks (`paths`, `test`, `verify`, `agree`,
-  `rank`), harnesses and width lists `n`, limits, `rate`, `[counterexample]`
-  (`path`, `build`, `run`, `tests`, `visible`), trunk.
-- `/etc/bon/host.toml`, the host file: agent's `path`, model `prices`, and
-  the pools: `generation` (model sessions at once), `checks` (checks at once,
-  the judge's and agents' own cargo; by default free memory / 1.5 GB, at
-  most 2 threads per core among them), `check_threads`.
+  `rank`), harnesses (`name`, `model`, an optional `command` that replaces
+  the built-in one; `name = "stub"` runs no model) and width lists `n`,
+  limits, `rate`, `[counterexample]` (`harness`, `path`, `build`, `run`,
+  `tests`, `visible`), `[sbom]`, `[programs]`, trunk.
+- `/etc/bon/host.toml`, the host file: agent's `path`, the toolchain's homes,
+  model `prices`, and two semaphores shared by every bon process on the host:
+  `generation` (agent processes at once) and `checks` (checks at once, the
+  judge's and every cargo an agent process runs), with `check_threads` per
+  check. `BON_HOST` names another host file, as a benchmark does.
+- `bon-sample`: a harness that makes one model call (context in, edits out)
+  through the API, the claude CLI or the codex CLI. Program code: bon's checks
+  judge what it writes.
+- `bench/`: how bon itself scales, on stub harnesses in a sandbox with a
+  local bare origin (`bench/README.md`).
 
 ## Two levels
 
@@ -130,15 +175,20 @@ candidate yourself.
 
 **Tests.** What Verus proves needs no test. A candidate is rejected or
 accepted by the tests, proved by Verus, then verified when it stays within
-its authority. Tests reach trunk only as a counterexample's: a behavior the
-spec forbids, which a verified candidate (or trunk) showed, recorded as a test
+its authority. Tests reach trunk only as a counterexample's: what the spec
+forbids, which a verified candidate (or trunk) did, recorded as a test
 written blind from the spec. A test that accepts everything shows nothing and
 is never pushed. Compaction keeps the suite small: it may remove or merge
 those tests as long as the suite still rejects every counterexample. A
 repository that needs end to end gets deterministic simulation under one seed.
 
-**Widths.** Searches are Monte Carlo: go wide; the host's pools cap how
-many model sessions and how many checks run at once. Report the spread, not just the winner. Size a run to its
+**Widths.** Searches are Monte Carlo: go wide. A push is Las Vegas: whatever
+reaches trunk passed every gate; only the time to it varies. A search costs a
+fixed part plus a part per distinct tree, and the fixed part sets the
+narrowest search worth running. The host's `generation` and `checks` cap how
+many agent processes and checks run at once. The model follows the search
+kind, not the attempt: a distribution where a check can score, depth where
+only the owner can. Report the spread, not just the winner. Size a run to its
 change: a mechanical one (a rename, a doc) runs narrow, `n = [3, 6]`, by a
 commit to `bon.toml`; batch spec changes into one search; a spec change that
 the existing code still satisfies needs no search, and `bon check` shows it.
@@ -196,6 +246,7 @@ at a time.
 | a new transcript arrived | `bon queue`; show the owner the patch it names and the contested cues; they accept it with `git am` |
 | spare capacity should work | `bon background` (`--plist` for launchd) |
 | a dependency, tool or trusted function changed | `bon sbom`; commit `.bon/sbom.json` |
+| what reaching trunk cost | `bon cost` writes `.bon/cost.toml` (bon does after each push) |
 | before a search, a commit or a push | `bon check` |
 
 **A run's settings** (`n`, harnesses, limits) are read from `.bon/bon.toml`
@@ -218,14 +269,52 @@ Read the trace and bring the finding:
 
 - **Fewer than two verified:** the spec change is too big, or a check is
   wrong. Propose where to split it, or name the check.
-- **Undecided:** verified candidates showed more than one behavior, at least
-  two blind tests judged every one, and none split them: the spec allows each.
-  Propose the spec or test that decides. (A test that did split them already
-  landed, and the next attempt ran from it.)
+- **Verified candidates disagree:** bon runs a counterexample search on the
+  first verified one before anything reaches you. A test that splits them
+  lands, and the next attempt runs from it.
+- **Undecided:** two tests judged every one and none splits them: the spec
+  does not decide. Bring the behaviors side by side, and propose the spec or
+  test that decides.
+- **Too few tests:** fewer than two verified tests (on candidates that
+  disagree, fewer than two that judge every one). Read why the tests failed
+  to build or run on the candidates; name the `[counterexample]` setting or
+  check at fault, or widen its list.
 - **Every accepted, proved candidate changed a protected file:** search found
   the change but may not make it. `bon` prints the diff; review it, apply it,
   `bon check`, run again. Bring engineer only what you cannot resolve.
 - **Trunk moved:** run it again.
+
+## Hill climbing
+
+When bon is slow or will not scale, measure before changing anything.
+
+1. **State the bound you want.** Compute is the bottleneck, not bon: wall
+   time near the checks' CPU-seconds over the cores, plus what waits on a
+   model. Everything is judged against that floor.
+2. **Read the traces first.** They already hold each session's and each
+   check's seconds. Split the time (model, checks, other) before forming a
+   view; the cause is rarely where the symptom is.
+3. **Profile to one function, one command, one fork.** A whole-crate figure
+   hides the one function that is all of it. Ask what it waits on, not only
+   what it computes: time in a slot against CPU used.
+4. **Build the benchmark before the fix.** A sandbox with a local bare
+   origin and no `traces`, stub agents, and widths 8 to 500. Vary one thing:
+   width, distinct trees, whether agents run checks, memory. Record wall,
+   CPU and peak memory of the whole process tree.
+5. **Name the cost model.** A fixed cost per search and a cost per distinct
+   tree. Report both; a fixed cost sets the narrowest search worth running.
+6. **One lever at a time, measured before and after.** Keep what moves the
+   number; say what did not. A change that does not move it is removed.
+7. **Do nothing for a candidate until something asks, and nothing twice for
+   the same tree.** Most waste is work done on a candidate's behalf.
+8. **Never let a candidate reach how it is judged.** Faster to start and run
+   is fair; a shared build, a cached pass or a skipped check that a candidate
+   could influence is not.
+9. **Say which numbers are stubs.** A stub measures bon; only real samples
+   measure the search. Predict before each run and report where you were wrong.
+10. **Hand long runs to another session** with the brief in full: the goal,
+    what is ruled out, the safety rules, what to report. Verify its claims
+    from a clean build before merging.
 
 ## In bon's own repository
 
@@ -250,8 +339,8 @@ run of bon has its own `<pid>`: its pid, or `<pid>.<start>` (unix seconds)
 when an earlier bon process of the same pid left a trace.
 
 - `.bon/traces/<pid>/transitions`: each transition, by its spec name, with
-  its arguments; the lines that are not transitions (selected, blocked, not
-  found, proposal) say what the bon process concluded.
+  its arguments; the lines that are not transitions (selected, disagreed,
+  blocked, not found, proposal) say what the bon process concluded.
 - `.bon/traces/<pid>/searches.jsonl`: each search's `agent_processes`,
   `verified`, `generation_dollars`, `seconds`, `rate`, `time_dollars`,
   `cost_per_verified_candidate`.
@@ -259,6 +348,12 @@ when an earlier bon process of the same pid left a trace.
   `harness`, `model`, cost and `prices`, and its `candidate` (`commit`,
   `accepted`, `proved`, `changed`, `diff`, `rank`, `out`, `accepts`,
   `rejects_counterexamples`).
+- `.bon/traces/<pid>/trunk-test-k`, `trunk-verify-k`, `trunk-build`: trunk's
+  check logs. A log whose first line is `cached: <key>` was answered by the
+  verdict cache (`/tmp/bon/verdicts`, keyed by tree, command, test,
+  toolchain and host file), not run. Trunk's build is kept for later bon
+  processes (`/tmp/bon/trunk-<key>`, engineer's alone), and every build
+  directory starts as a clone of it.
 - `.bon/traces/<pid>/pushes.jsonl`: each push's `commit`, `searches`,
   `generation_dollars`, `time_dollars` and `process_cost`: what this bon
   process spent. A push's cost (every bon process of its kind since the last
