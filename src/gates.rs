@@ -182,18 +182,46 @@ pub open spec fn first_by_key<K, V>(pairs: Seq<(K, V)>) -> Map<K, V> {
     Map::new(pairs.map_values(|pair: (K, V)| pair.0).to_set(), |key: K| pairs[first(pairs, key)].1)
 }
 
-/// agent's permissions on each object, path by path, as trusted code observed
-/// them: None where a path does not exist.
-pub open spec fn observed(checks: Seq<Option<Permission>>, transcripts: Seq<Option<Permission>>, working_directory: Seq<Option<Permission>>,
-    repository: Seq<Option<Permission>>, working_directories: Seq<Option<Permission>>, toolchain: Seq<Option<Permission>>) -> Map<Object, Seq<Option<Permission>>> {
-    map![
-        Object::Checks => checks,
-        Object::Transcripts => transcripts,
-        Object::WorkingDirectory => working_directory,
-        Object::Repository => repository,
-        Object::WorkingDirectories => working_directories,
-        Object::Toolchain => toolchain,
-    ]
+/// One confined user's permissions on each object the policy names, path by
+/// path, as trusted code observed them: None where a path does not exist.
+/// `build_directories[slot]` is check slot `slot`'s build directory.
+pub struct Observation {
+    pub checks: Vec<Option<Permission>>,
+    pub transcripts: Vec<Option<Permission>>,
+    pub working_directory: Vec<Option<Permission>>,
+    pub repository: Vec<Option<Permission>>,
+    pub working_directories: Vec<Option<Permission>>,
+    pub toolchain: Vec<Option<Permission>>,
+    pub builds: Vec<Option<Permission>>,
+    pub state: Vec<Option<Permission>>,
+    pub build_directories: Vec<Vec<Option<Permission>>>,
+}
+
+/// What observation says of object, path by path: nothing of a slot past its
+/// build directories.
+pub open spec fn on(observation: Observation, object: Object) -> Seq<Option<Permission>> {
+    match object {
+        Object::Checks => observation.checks@,
+        Object::Transcripts => observation.transcripts@,
+        Object::WorkingDirectory => observation.working_directory@,
+        Object::Repository => observation.repository@,
+        Object::WorkingDirectories => observation.working_directories@,
+        Object::Toolchain => observation.toolchain@,
+        Object::Builds => observation.builds@,
+        Object::State => observation.state@,
+        Object::BuildDirectory(slot) =>
+            if slot < observation.build_directories.len() { observation.build_directories@[slot as int]@ } else { Seq::empty() },
+    }
+}
+
+/// agent's observation and each check slot's user's, by slot, as the policy
+/// reads them: each confined user, with every object, to what its observation
+/// says of it.
+pub open spec fn observed(agent: Observation, slots: Seq<Observation>) -> IMap<(User, Object), Seq<Option<Permission>>> {
+    IMap::new(
+        |key: (User, Object)| spec::confined(key.0, slots.len()),
+        |key: (User, Object)| on(match key.0 { User::check(slot) => slots[slot as int], _ => agent }, key.1),
+    )
 }
 
 // ── encoding ────────────────────────────────────────────
@@ -419,11 +447,10 @@ pub trait Encoding {
 /// Each gate is named for the spec predicate it decides, and its contract is
 /// that predicate.
 pub trait Gates {
-    /// agent's permissions match the policy, on every path of every object, and
-    /// none is missing.
-    fn isolated(checks: &Vec<Option<Permission>>, transcripts: &Vec<Option<Permission>>, working_directory: &Vec<Option<Permission>>,
-        repository: &Vec<Option<Permission>>, working_directories: &Vec<Option<Permission>>, toolchain: &Vec<Option<Permission>>) -> (r: bool)
-        ensures r == spec::isolated(observed(checks@, transcripts@, working_directory@, repository@, working_directories@, toolchain@));
+    /// There is a check slot, and agent's permissions and each slot's user's
+    /// match the policy, on every path of every object, and none is missing.
+    fn isolated(agent: &Observation, slots: &Vec<Observation>) -> (r: bool)
+        ensures r == spec::isolated(observed(*agent, slots@), slots.len() as nat);
 
     /// Accepted, proved, every changed path within the authority, and for a
     /// compaction, every counterexample still rejected.

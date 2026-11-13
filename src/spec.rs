@@ -38,16 +38,20 @@ pub struct Transcript(pub Path);
 /// A WebVTT cue, by its start time in milliseconds. (TCB: WebVTT)
 pub type Cue = nat;
 
-/// A POSIX user. Names match the users on this machine. Also a commit's git author.
+/// A POSIX user. Names match the users on this machine: `check(slot)` is the
+/// user `check<slot>`, as which the checks that hold check slot `slot` run.
+/// Also a commit's git author.
 #[allow(non_camel_case_types)]
-pub enum User { engineer, agent }
+pub enum User { engineer, agent, check(nat) }
 
-/// The objects the policy gives agent rights over: files and directories
-/// (OSTEP), each designated by its path.
+/// The objects the policy gives agent and each check slot's user rights over:
+/// files and directories (OSTEP), each designated by its path, where that user
+/// meets it.
 pub enum Object {
-    /// Verus (the spec and proofs) and the tests. Owner: engineer.
+    /// Verus (the spec and proofs) and the tests: in a working directory, and
+    /// in the checkout a check runs in. Owner: engineer.
     Checks,
-    /// The transcripts. Owner: engineer.
+    /// The transcripts, where the checks are. Owner: engineer.
     Transcripts,
     /// One per agent process. Owner: agent.
     WorkingDirectory,
@@ -55,14 +59,24 @@ pub enum Object {
     Repository,
     /// The directory holding every working directory. agent may search it (pass
     /// through to a path it is given) but not list it or add to it. Every agent
-    /// process and every check runs as the one user agent, so they are not
-    /// isolated from each other: one that knows another's path reaches it.
-    /// Owner: engineer.
+    /// process runs as the one user agent, so agent processes are not isolated
+    /// from each other: one that knows another's path reaches it. Each check
+    /// runs as its slot's user. Owner: engineer.
     WorkingDirectories,
-    /// The toolchain the checks run with: rustup's home, cargo's home, and every
-    /// directory on the checks' PATH, as the host file names them. Owner: root
-    /// (or engineer), all the way up.
+    /// The toolchain the checks run with: rustup's home, cargo's home and the
+    /// dependency sources in it, and every directory on the checks' PATH, as
+    /// the host file names them. Owner: root (or engineer), all the way up.
     Toolchain,
+    /// Trunk's kept builds, which every build directory starts as a clone of.
+    /// Owner: engineer.
+    Builds,
+    /// bon's state that outlives a bon process, in the user layer: the `.bon`
+    /// directory of the root the host file names, starting with the verdict
+    /// cache. A verdict a candidate could write would pass every gate. Owner: engineer.
+    State,
+    /// Check slot `slot`'s build directory: where the check that holds the slot
+    /// builds. Owner: engineer.
+    BuildDirectory(nat),
 }
 
 /// POSIX permission bits.
@@ -201,7 +215,8 @@ pub open spec fn authority(kind: Kind, checks: Set<Path>, tests: Set<Path>, trus
     }
 }
 
-/// Who may do what.
+/// Who may do what. Check slot `slot`'s user may do what agent may, but reach
+/// no working directory, and write its own build directory alone.
 pub open spec fn policy(user: User, object: Object) -> Permission {
     match (user, object) {
         (User::agent, Object::Checks)           => Permission { read: true,  write: false, execute: true },
@@ -210,37 +225,94 @@ pub open spec fn policy(user: User, object: Object) -> Permission {
         (User::agent, Object::Repository)       => Permission { read: false, write: false, execute: false },
         (User::agent, Object::WorkingDirectories) => Permission { read: false, write: false, execute: true },
         (User::agent, Object::Toolchain)        => Permission { read: true,  write: false, execute: true },
+        (User::agent, Object::Builds)           => Permission { read: true,  write: false, execute: true },
+        (User::agent, Object::State)            => Permission { read: false, write: false, execute: false },
+        (User::agent, Object::BuildDirectory(_)) => Permission { read: false, write: false, execute: false },
+        (User::check(_), Object::Checks)           => Permission { read: true,  write: false, execute: true },
+        (User::check(_), Object::Transcripts)      => Permission { read: true,  write: false, execute: true },
+        (User::check(_), Object::WorkingDirectory) => Permission { read: false, write: false, execute: false },
+        (User::check(_), Object::Repository)       => Permission { read: false, write: false, execute: false },
+        (User::check(_), Object::WorkingDirectories) => Permission { read: false, write: false, execute: true },
+        (User::check(_), Object::Toolchain)        => Permission { read: true,  write: false, execute: true },
+        (User::check(_), Object::Builds)           => Permission { read: true,  write: false, execute: true },
+        (User::check(_), Object::State)            => Permission { read: false, write: false, execute: false },
+        (User::check(slot), Object::BuildDirectory(other)) => Permission { read: slot == other, write: slot == other, execute: slot == other },
         (User::engineer, _)                   => Permission { read: true,  write: true,  execute: true },
     }
 }
 
-/// agent's permissions, as trusted code observed them, match the policy. Each
-/// object is observed path by path: agent's permissions on a path, or None where
-/// the path does not exist. Every path observed exists and matches the policy,
-/// and every object but the transcripts, which a repository may not have, is
-/// observed on at least one path, so a missing object never passes.
-pub open spec fn isolated(observed: Map<Object, Seq<Option<Permission>>>) -> bool {
-    forall|object: Object| observed.contains_key(object)
-        && (object != Object::Transcripts ==> observed[object].len() > 0)
-        && forall|path_index: int| 0 <= path_index < observed[object].len()
-            ==> observed[object][path_index] == Some(policy(User::agent, object))
+/// user is one the policy confines when the host has `slots` check slots:
+/// agent, or the user of a slot below slots.
+pub open spec fn confined(user: User, slots: nat) -> bool {
+    match user { User::engineer => false, User::agent => true, User::check(slot) => slot < slots }
 }
 
-/// An object not observed, or with a missing path, is never isolated; nor is
-/// one observed on no path, unless it is the transcripts.
-pub proof fn missing_is_not_isolated(observed: Map<Object, Seq<Option<Permission>>>, object: Object)
+/// object is one the policy names when the host has `slots` check slots:
+/// the build directory of a slot below slots, or any other object.
+pub open spec fn named(object: Object, slots: nat) -> bool {
+    match object { Object::BuildDirectory(slot) => slot < slots, _ => true }
+}
+
+/// The host has at least one check slot, and every confined user's
+/// permissions, as trusted code observed them, match the policy. Each user's
+/// permissions on each object are observed path by path: its permissions on a
+/// path, or None where the path does not exist. Every path observed exists and
+/// matches the policy, and every object but the transcripts, which a
+/// repository may not have, is observed on at least one path for every
+/// confined user, so a missing user, object or slot never passes.
+pub open spec fn isolated(observed: IMap<(User, Object), Seq<Option<Permission>>>, slots: nat) -> bool {
+    slots > 0
+    && forall|user: User, object: Object| #![trigger confined(user, slots), named(object, slots)]
+        confined(user, slots) && named(object, slots) ==> {
+            &&& observed.contains_key((user, object))
+            &&& (object != Object::Transcripts ==> observed[(user, object)].len() > 0)
+            &&& forall|path_index: int| 0 <= path_index < observed[(user, object)].len()
+                ==> observed[(user, object)][path_index] == Some(policy(user, object))
+        }
+}
+
+/// No check slot, or a confined user not observed on an object the policy
+/// names, or observed on a missing path, is never isolated; nor is one
+/// observed on no path, unless the object is the transcripts.
+pub proof fn missing_is_not_isolated(observed: IMap<(User, Object), Seq<Option<Permission>>>, slots: nat, user: User, object: Object)
     requires
-        !observed.contains_key(object) || observed[object].contains(None)
-        || (object != Object::Transcripts && observed[object].len() == 0),
-    ensures !isolated(observed),
+        slots == 0 || (confined(user, slots) && named(object, slots) && (!observed.contains_key((user, object))
+            || observed[(user, object)].contains(None)
+            || (object != Object::Transcripts && observed[(user, object)].len() == 0))),
+    ensures !isolated(observed, slots),
 {
-    if isolated(observed) {
-        assert(observed.contains_key(object));
-        if observed[object].contains(None) {
-            let path_index = choose|path_index: int| 0 <= path_index < observed[object].len() && observed[object][path_index] == None::<Permission>;
-            assert(observed[object][path_index] == Some(policy(User::agent, object)));
+    if isolated(observed, slots) && slots > 0 {
+        assert(confined(user, slots) && named(object, slots));
+        assert(observed.contains_key((user, object)));
+        if observed[(user, object)].contains(None) {
+            let path_index = choose|path_index: int| 0 <= path_index < observed[(user, object)].len() && observed[(user, object)][path_index] == None::<Permission>;
+            assert(observed[(user, object)][path_index] == Some(policy(user, object)));
         }
     }
+}
+
+/// What an isolated host lets each confined user touch, on every path
+/// observed: agent writes only its working directory, and check slot `slot`'s
+/// user only its own build directory, never another slot's; none writes the
+/// checks, the toolchain or trunk's kept builds; and none reads, writes or
+/// searches bon's state or the repository.
+pub proof fn isolated_confines(observed: IMap<(User, Object), Seq<Option<Permission>>>, slots: nat, user: User, object: Object, path_index: int)
+    requires
+        isolated(observed, slots), confined(user, slots), named(object, slots),
+        0 <= path_index < observed[(user, object)].len(),
+    ensures
+        observed[(user, object)][path_index] is Some,
+        observed[(user, object)][path_index]->Some_0.write == match (user, object) {
+            (User::agent, Object::WorkingDirectory) => true,
+            (User::check(slot), Object::BuildDirectory(other)) => slot == other,
+            _ => false,
+        },
+        object == Object::State || object == Object::Repository ==> {
+            let permission = observed[(user, object)][path_index]->Some_0;
+            !permission.read && !permission.write && !permission.execute
+        },
+{
+    assert(observed[(user, object)][path_index] == Some(policy(user, object)));
 }
 
 /// The candidate at index i of search. Meaningful only when one exists.
@@ -749,8 +821,8 @@ tokenized_state_machine!{ bon {
     /// compaction and a counterexample on trunk, on one they accept. A
     /// counterexample on a candidate is granted on a selected one, or on the
     /// first verified one of a search whose verified candidates disagree.
-    transition!{ grant(kind: Kind, n: nat, agent_process_limit: nat, observed: Map<Object, Seq<Option<Permission>>>, checks_accept: bool) {
-        require isolated(observed);
+    transition!{ grant(kind: Kind, n: nat, agent_process_limit: nat, observed: IMap<(User, Object), Seq<Option<Permission>>>, slots: nat, checks_accept: bool) {
+        require isolated(observed, slots);
         require forall|search_index: int| 0 <= search_index < pre.searches.len() ==> complete(#[trigger] pre.searches[search_index]);
         require pre.spent + pre.reserved + agent_process_limit * n <= pre.limit;
         require kind matches Kind::Code { goal } ==> goal == pre.trunk.last();
@@ -902,7 +974,7 @@ tokenized_state_machine!{ bon {
     fn advance_inductive(pre: Self, post: Self, commit: Commit, checks: Set<Path>, tests: Set<Path>, trusted: Set<Path>) {}
 
     #[inductive(grant)]
-    fn grant_inductive(pre: Self, post: Self, kind: Kind, n: nat, agent_process_limit: nat, observed: Map<Object, Seq<Option<Permission>>>, checks_accept: bool) {
+    fn grant_inductive(pre: Self, post: Self, kind: Kind, n: nat, agent_process_limit: nat, observed: IMap<(User, Object), Seq<Option<Permission>>>, slots: nat, checks_accept: bool) {
         let search_index = pre.searches.len() as int;
         let processes = agent_processes(search_index, n);
         // Every earlier search is complete, so no capability is outstanding.

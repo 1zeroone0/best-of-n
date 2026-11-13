@@ -61,6 +61,8 @@ fn main() {
     // Trunk is the remote's: what the last fetch or push left in its ref.
     let trunk = || best_of_n::trusted::head(&root).map(|h| h.iter().collect::<String>()).unwrap_or_default();
     let before = trunk();
+    // On the user layer's process list until it ends (`end` takes it off).
+    best_of_n::trusted::enter(Path::new(&root));
     let result = checked.and_then(|_| dispatch(&root, &args));
     // A push or a landed test moved trunk: the cost file follows it, as its own commit.
     if result.is_ok() && trunk() != before {
@@ -293,11 +295,10 @@ fn counterexample(root: &str) -> Result<(), String> {
 /// only on spare capacity. Staleness is trunk commits since that kind last ran.
 fn background(root: &str) -> Result<(), String> {
     let r = Path::new(root);
-    // Spare capacity: no bon command running here, and load below half the cores.
-    // A bon process is running while its pid, which names its traces, is alive.
-    let traces = r.join(".bon/traces");
-    let busy = std::fs::read_dir(&traces).into_iter().flatten().flatten()
-        .any(|e| best_of_n::trusted::trace_running(&traces, &e.file_name().to_string_lossy()));
+    // Spare capacity: no other bon command running here, by the process list,
+    // and load below half the cores.
+    let busy = best_of_n::trusted::processes().iter()
+        .any(|p| p["repository"].as_str() == Some(root) && p["pid"].as_u64() != Some(u64::from(std::process::id())));
     if busy { println!("busy: a bon command is running here"); return Ok(()); }
     let half = std::thread::available_parallelism().map_or(1.0, |n| (n.get() / 2).max(1) as f64);
     let load: f64 = Command::new("sysctl").args(["-n", "vm.loadavg"]).output().ok()
@@ -595,10 +596,12 @@ fn timestamp(ms: u64) -> String {
     format!("{:02}:{:02}:{:02}.{:03}", ms / 3_600_000, ms / 60_000 % 60, ms / 1000 % 60, ms % 1000)
 }
 
-/// Create user agent and group bon, put engineer and agent in bon, let
-/// engineer run commands as agent (never as root) with no password, and install
-/// the toolchain checks judge with under /opt/bon. Each step runs with sudo and
-/// is printed first.
+/// Create user agent, a user per check slot (`check0`, `check1`, …, as many
+/// as the host's check_processes) and group bon, put engineer, agent and
+/// each slot's user in bon, let engineer run commands as agent and as each
+/// slot's user (never as root) with no password, install the toolchain
+/// checks judge with under /opt/bon, its dependency sources engineer's, and
+/// write the host file. Each step runs with sudo and is printed first.
 fn setup(dry_run: bool, user: Option<String>) -> Result<(), String> {
     let runner = std::env::var("USER").map_err(|_| "USER is not set")?;
     let me = user.unwrap_or(runner.clone());
@@ -620,17 +623,39 @@ fn setup(dry_run: bool, user: Option<String>) -> Result<(), String> {
     steps.push(s(&["dseditgroup", "-o", "edit", "-a", "agent", "-t", "user", "bon"]));
     // agent's primary group is bon, not staff: staff can read engineer's home.
     steps.push(s(&["sh", "-c", "dscl . -create /Users/agent PrimaryGroupID \"$(dscl . -read /Groups/bon PrimaryGroupID | awk '{print $2}')\""]));
+    // Each check slot's user: a check that holds slot k runs as check<k>, so it
+    // writes only its own build directory. Hidden, never logged in to, its home
+    // one it cannot write, its primary group bon (it reads what bon makes for
+    // the checks); as many as the host's check_processes, or as many as it may
+    // come to by default on this machine.
+    let slots = best_of_n::trusted::check_slots();
+    for k in 0..slots {
+        let u = format!("check{k}");
+        if !exists("Users", &u) {
+            let out = Command::new("openssl").args(["rand", "-base64", "32"]).output().map_err(|e| e.to_string())?;
+            let password = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if password.len() < 40 { return Err("could not make a password".into()); }
+            steps.push(vec!["sysadminctl".into(), "-addUser".into(), u.clone(), "-fullName".into(), format!("bon check {k}"),
+                            "-shell".into(), "/bin/zsh".into(), "-home".into(), "/var/empty".into(), "-password".into(), password]);
+            steps.push(s(&["dscl", ".", "create", &format!("/Users/{u}"), "IsHidden", "1"]));
+        }
+        steps.push(vec!["sh".into(), "-c".into(), format!("dscl . -create /Users/{u} PrimaryGroupID \"$(dscl . -read /Groups/bon PrimaryGroupID | awk '{{print $2}}')\"")]);
+        steps.push(s(&["dseditgroup", "-o", "edit", "-a", &u, "-t", "user", "bon"]));
+    }
     steps.push(s(&["dseditgroup", "-o", "edit", "-a", &me, "-t", "user", "bon"]));
+    let runs_as: Vec<String> = std::iter::once("agent".to_string()).chain((0..slots).map(|k| format!("check{k}"))).collect();
     steps.push(vec!["sh".into(), "-c".into(), format!(
-        "f=$(mktemp) && printf '%s ALL=(agent) NOPASSWD: ALL\\n' {me} > \"$f\" && visudo -cf \"$f\" && install -m 0440 -o root -g wheel \"$f\" /etc/sudoers.d/bon; r=$?; rm -f \"$f\"; exit $r")]);
+        "f=$(mktemp) && printf '%s ALL=(%s) NOPASSWD: ALL\\n' {me} '{}' > \"$f\" && visudo -cf \"$f\" && install -m 0440 -o root -g wheel \"$f\" /etc/sudoers.d/bon; r=$?; rm -f \"$f\"; exit $r",
+        runs_as.join(", "))]);
     // The directory holding every working directory: the owner's, mode 0711, so
     // agent may pass through to a path it was given but not list or add to it.
     // bon remakes it after a reboot clears /tmp.
     steps.push(vec!["sh".into(), "-c".into(), format!(
         "mkdir -p {d} && chown {me} {d} && chmod 0711 {d}", d = best_of_n::trusted::WORKING_DIRECTORIES)]);
-    // The toolchain checks judge with, where no agent process can write it: a copy
-    // of the one this user runs (rustup's home, cargo's proxies, Verus), root's all
-    // the way up, with a cargo home whose root is root's and only its caches agent's.
+    // The toolchain checks judge with, where no agent process and no check can
+    // write it: a copy of the one this user runs (rustup's home, cargo's
+    // proxies, Verus), root's all the way up, with a cargo home whose root is
+    // root's and whose dependency sources are this user's.
     if !std::path::Path::new("/opt/bon").exists() {
         let home = std::env::var("HOME").map_err(|_| "HOME is not set")?;
         let rustup = std::env::var("RUSTUP_HOME").unwrap_or(format!("{home}/.rustup"));
@@ -643,13 +668,23 @@ fn setup(dry_run: bool, user: Option<String>) -> Result<(), String> {
              cp -cR {rustup}/settings.toml {rustup}/toolchains {rustup}/update-hashes /opt/bon/rustup/; \
              mkdir -p /opt/bon/rustup/downloads /opt/bon/rustup/tmp; cp -cR {cargo}/bin/. /opt/bon/cargo/bin/; cp -cR {verus}/. /opt/bon/verus/; \
              touch /opt/bon/cargo-home/.global-cache /opt/bon/cargo-home/.package-cache /opt/bon/cargo-home/.package-cache-mutate; \
-             chown -R root:wheel /opt/bon; chmod -R go-w,a+rX /opt/bon; \
-             chown -R agent:bon /opt/bon/cargo-home/registry /opt/bon/cargo-home/git /opt/bon/cargo-home/.global-cache /opt/bon/cargo-home/.package-cache /opt/bon/cargo-home/.package-cache-mutate")]);
+             chown -R root:wheel /opt/bon; chmod -R go-w,a+rX /opt/bon")]);
     }
-    // The host file: written once, then edited by hand (with sudo) as models and prices change.
+    // The dependency sources the checks compile, and cargo's caches and locks
+    // beside them: this user's, writable by no one else, so no agent process
+    // and no check changes what a check compiles. Cargo writes nothing there to
+    // build from sources already unpacked: they are fetched as this user.
+    steps.push(vec!["sh".into(), "-c".into(), format!(
+        "set -e; c=/opt/bon/cargo-home; for p in $c/registry $c/git $c/.global-cache $c/.package-cache $c/.package-cache-mutate; do [ -e $p ] && chown -R {me}:bon $p; done; \
+         chmod -R go-w,a+rX $c/registry $c/git")]);
+    // The host file: written once, then edited by hand (with sudo) as models and
+    // prices change. Its user layer is the directory holding the repository
+    // setup runs in (`user`): edit it to name another.
     if !std::path::Path::new(best_of_n::trusted::HOST).exists() {
         let draft = std::env::temp_dir().join(format!("bon-host-{}.toml", std::process::id()));
-        if !dry_run { std::fs::write(&draft, HOST_TEMPLATE).map_err(|e| e.to_string())?; }
+        let layer = std::fs::canonicalize(".").ok().and_then(|d| d.parent().map(Path::to_path_buf))
+            .ok_or("the user layer: run bon setup in a repository, whose directory's parent is the user layer's root")?;
+        if !dry_run { std::fs::write(&draft, HOST_TEMPLATE.replace("@USER@", &layer.to_string_lossy())).map_err(|e| e.to_string())?; }
         steps.push(vec!["sh".into(), "-c".into(), format!(
             "mkdir -p /etc/bon && install -m 0644 -o root -g wheel {} {}", draft.display(), best_of_n::trusted::HOST)]);
     }
@@ -669,6 +704,7 @@ fn setup(dry_run: bool, user: Option<String>) -> Result<(), String> {
     }
     println!("done. Group membership takes effect in a new login session.");
     println!("Then log the clients your roles name in as agent: sudo -u agent -i claude, and sudo -u agent -i codex login");
+    println!("A repository's dependencies are fetched as {me}, never by a check: in it, CARGO_HOME=/opt/bon/cargo-home cargo fetch");
     Ok(())
 }
 
@@ -687,14 +723,19 @@ const HOST_TEMPLATE: &str = r#"# bon's host file: facts about this host, not abo
 # per core among them, since a check computes only part of its time (it also
 # starts processes, links, writes files, and on macOS waits while the system
 # scans each new binary); the cores are shared among the checks that compute,
-# not divided. check_threads: threads one check may use (default 2).
-# verdicts: the verdict cache's directory (default /tmp/bon/verdicts). cleanup:
-# "own" removes only a bon process's own working directories when it ends.
-# Another host file (a benchmark's, sized as another machine) is named by
-# BON_HOST: it must be writable by its owner alone, root or the user bon runs as.
+# not divided. check_threads: threads one check may use (default 2). Each
+# check runs as its slot's user, check0, check1, …: bon setup makes as many
+# as check_processes. Another host file (a benchmark's, sized as another
+# machine) is named by BON_HOST: it must be writable by its owner alone, root
+# or the user bon runs as.
 # agent_processes = 64
 # check_processes = 14
 # check_threads = 2
+
+# The user layer's root, between this host and its repositories: bon's state
+# that outlives a bon process (the verdict cache, the process list) is in its
+# .bon, engineer's alone.
+user = "@USER@"
 
 # PATH for agent processes and checks. Nothing else is inherited. Checks drop
 # every entry under agent's home: they run only what no agent process can write.
@@ -1042,10 +1083,15 @@ mod tests {
         // queue 53, 54: the template is the new shape, its roles those bon's own manifest names.
         assert_eq!(best_of_n::trusted::host_shape(HOST_TEMPLATE), Ok(()));
         let host: toml::Value = toml::from_str(HOST_TEMPLATE).unwrap();
+        // queue 56: one key names the user layer's root; setup fills it in.
+        assert_eq!(host["user"].as_str(), Some("@USER@"));
         assert!(host["roles"].get("wide").is_some() && host["roles"].get("deep").is_some());
         assert_eq!(host["prices"]["claude-haiku-5-5"]["tier"]["above"].as_integer(), Some(100_000));
         // The old shape is refused, naming what replaced it.
         assert!(best_of_n::trusted::host_shape("generation = 8\npath = []").unwrap_err().contains("agent_processes"));
+        // queue 56, 58: the verdict cache's place and cleanup are no host keys now.
+        assert!(best_of_n::trusted::host_shape("verdicts = \"/v\"\npath = []").unwrap_err().contains("user"));
+        assert!(best_of_n::trusted::host_shape("cleanup = \"own\"\npath = []").unwrap_err().contains("process list"));
     }
 
     #[test]

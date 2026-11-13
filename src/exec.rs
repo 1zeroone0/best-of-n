@@ -54,40 +54,152 @@ fn permissions_match(entries: &Vec<Option<Permission>>, read: bool, write: bool,
     true
 }
 
-proof fn isolated_permissions(o: Map<Object, Seq<Option<Permission>>>, f: Object)
-    requires spec::isolated(o),
-    ensures (f != Object::Transcripts ==> o[f].len() > 0),
-        forall|i: int| 0 <= i < o[f].len() ==> o[f][i] == Some(spec::policy(User::agent, f)),
-{
-    assert(o.contains_key(f));
+/// observation, user's, says of every object the policy names with `slots`
+/// slots what the policy gives user, on every path, and on a path at least
+/// but for the transcripts.
+pub open spec fn fits(observation: Observation, user: User, slots: nat) -> bool {
+    forall|object: Object| #![trigger spec::named(object, slots)] spec::named(object, slots) ==> fits_on(on(observation, object), user, object)
 }
 
-pub fn isolated(checks: &Vec<Option<Permission>>, transcripts: &Vec<Option<Permission>>, working_directory: &Vec<Option<Permission>>,
-    repository: &Vec<Option<Permission>>, working_directories: &Vec<Option<Permission>>, toolchain: &Vec<Option<Permission>>) -> (r: bool)
-    ensures r == spec::isolated(observed(checks@, transcripts@, working_directory@, repository@, working_directories@, toolchain@)),
+/// paths, user's observation of object, are each the policy's permission, and
+/// there is one at least, but for the transcripts.
+pub open spec fn fits_on(paths: Seq<Option<Permission>>, user: User, object: Object) -> bool {
+    (object != Object::Transcripts ==> paths.len() > 0)
+    && forall|i: int| 0 <= i < paths.len() ==> paths[i] == Some(spec::policy(user, object))
+}
+
+/// The observation of user: agent's, or check slot `slot`'s user's.
+pub open spec fn user_of(slot: Option<usize>) -> User {
+    match slot { Some(k) => User::check(k as nat), None => User::agent }
+}
+
+/// Whether observation fits the policy for agent (slot None) or check slot
+/// `slot`'s user, with `slots` slots.
+fn fits_policy(o: &Observation, slot: Option<usize>, slots: usize) -> (r: bool)
+    ensures r == fits(*o, user_of(slot), slots as nat),
 {
-    let r = permissions_match(checks, true, false, true, false)
-        && permissions_match(transcripts, true, false, true, true)
-        && permissions_match(working_directory, true, true, true, false)
-        && permissions_match(repository, false, false, false, false)
-        && permissions_match(working_directories, false, false, true, false)
-        && permissions_match(toolchain, true, false, true, false);
-    let ghost o = observed(checks@, transcripts@, working_directory@, repository@, working_directories@, toolchain@);
-    assert forall|f: Object| o.contains_key(f) && (r ==> (f != Object::Transcripts ==> o[f].len() > 0)
-        && forall|i: int| 0 <= i < o[f].len() ==> o[f][i] == Some(spec::policy(User::agent, f))) by {
-        match f { Object::Checks => {}, Object::Transcripts => {}, Object::WorkingDirectory => {}, Object::Repository => {}, Object::WorkingDirectories => {}, Object::Toolchain => {} }
-    }
+    let ghost user = user_of(slot);
+    let ghost s = slots as nat;
+    let agent = slot.is_none();
+    let fixed = permissions_match(&o.checks, true, false, true, false)
+        && permissions_match(&o.transcripts, true, false, true, true)
+        && permissions_match(&o.working_directory, agent, agent, agent, false)
+        && permissions_match(&o.repository, false, false, false, false)
+        && permissions_match(&o.working_directories, false, false, true, false)
+        && permissions_match(&o.toolchain, true, false, true, false)
+        && permissions_match(&o.builds, true, false, true, false)
+        && permissions_match(&o.state, false, false, false, false);
+    // The objects that are no slot's build directory: fixed says exactly whether they fit.
     proof {
-        if spec::isolated(o) {
-            isolated_permissions(o, Object::Checks);
-            isolated_permissions(o, Object::Transcripts);
-            isolated_permissions(o, Object::WorkingDirectory);
-            isolated_permissions(o, Object::Repository);
-            isolated_permissions(o, Object::WorkingDirectories);
-            isolated_permissions(o, Object::Toolchain);
+        assert(spec::policy(user, Object::WorkingDirectory) == Permission { read: agent, write: agent, execute: agent });
+        if fits(*o, user, s) {
+            assert(spec::named(Object::Checks, s));
+            assert(spec::named(Object::Transcripts, s));
+            assert(spec::named(Object::WorkingDirectory, s));
+            assert(spec::named(Object::Repository, s));
+            assert(spec::named(Object::WorkingDirectories, s));
+            assert(spec::named(Object::Toolchain, s));
+            assert(spec::named(Object::Builds, s));
+            assert(spec::named(Object::State, s));
         }
     }
-    r
+    if !fixed { return false; }
+    if o.build_directories.len() < slots {
+        proof {
+            let missing = Object::BuildDirectory(o.build_directories.len() as nat);
+            assert(spec::named(missing, s));
+            assert(on(*o, missing).len() == 0);
+        }
+        return false;
+    }
+    let mut j: usize = 0;
+    while j < slots
+        invariant
+            0 <= j <= slots, o.build_directories.len() >= slots, fixed,
+            user == user_of(slot), s == slots as nat,
+            forall|k: nat| k < j ==> fits_on(on(*o, Object::BuildDirectory(k)), user, Object::BuildDirectory(k)),
+        decreases slots - j,
+    {
+        let own = match slot { Some(k) => k == j, None => false };
+        let ghost object = Object::BuildDirectory(j as nat);
+        assert(spec::policy(user, object) == Permission { read: own, write: own, execute: own });
+        assert(on(*o, object) == o.build_directories[j as int]@);
+        if !permissions_match(&o.build_directories[j], own, own, own, false) {
+            proof { if fits(*o, user, s) { assert(spec::named(object, s)); } }
+            return false;
+        }
+        j += 1;
+    }
+    proof {
+        assert forall|object: Object| spec::named(object, s) implies fits_on(on(*o, object), user, object) by {
+            match object { Object::BuildDirectory(k) => { assert(k < j); }, _ => {} }
+        }
+    }
+    true
+}
+
+/// The observed map is isolated exactly when there is a slot and agent's
+/// observation and each slot's user's fit the policy.
+proof fn isolated_fits(agent: Observation, slots: Seq<Observation>)
+    ensures spec::isolated(observed(agent, slots), slots.len()) == (slots.len() > 0 && fits(agent, User::agent, slots.len())
+        && forall|k: int| 0 <= k < slots.len() ==> fits(slots[k], User::check(k as nat), slots.len())),
+{
+    let o = observed(agent, slots);
+    let s = slots.len();
+    let domain = ISet::new(|key: (User, Object)| spec::confined(key.0, s));
+    // What the map says of a confined user is what that user's observation says.
+    assert forall|user: User, object: Object| spec::confined(user, s) implies
+        o.contains_key((user, object)) && o[(user, object)] == on(match user { User::check(slot) => slots[slot as int], _ => agent }, object) by {
+        assert(domain.contains((user, object)));
+    }
+    if spec::isolated(o, s) {
+        assert forall|object: Object| spec::named(object, s) implies fits_on(on(agent, object), User::agent, object) by {
+            assert(spec::confined(User::agent, s));
+        }
+        assert forall|k: int| 0 <= k < s implies fits(slots[k], User::check(k as nat), s) by {
+            assert forall|object: Object| spec::named(object, s) implies fits_on(on(slots[k], object), User::check(k as nat), object) by {
+                assert(spec::confined(User::check(k as nat), s));
+            }
+        }
+    }
+    if s > 0 && fits(agent, User::agent, s) && forall|k: int| 0 <= k < s ==> fits(slots[k], User::check(k as nat), s) {
+        assert forall|user: User, object: Object| spec::confined(user, s) && spec::named(object, s) implies {
+            &&& o.contains_key((user, object))
+            &&& (object != Object::Transcripts ==> o[(user, object)].len() > 0)
+            &&& forall|path_index: int| 0 <= path_index < o[(user, object)].len() ==> o[(user, object)][path_index] == Some(spec::policy(user, object))
+        } by {
+            match user {
+                User::check(slot) => { assert(fits(slots[slot as int], User::check(slot), s)); }
+                _ => {}
+            }
+        }
+    }
+}
+
+pub fn isolated(agent: &Observation, slots: &Vec<Observation>) -> (r: bool)
+    ensures r == spec::isolated(observed(*agent, slots@), slots.len() as nat),
+{
+    proof { isolated_fits(*agent, slots@); }
+    let n = slots.len();
+    if n == 0 { return false; }
+    if !fits_policy(agent, None, n) { return false; }
+    let mut k: usize = 0;
+    while k < n
+        invariant 0 <= k <= n, n == slots.len(), fits(*agent, User::agent, n as nat),
+            forall|j: int| 0 <= j < k ==> fits(slots@[j], User::check(j as nat), n as nat),
+        decreases n - k,
+    {
+        if !fits_policy(&slots[k], Some(k), n) {
+            proof {
+                isolated_fits(*agent, slots@);
+                assert(!fits(slots@[k as int], User::check(k as nat), slots@.len()));
+            }
+            return false;
+        }
+        k += 1;
+    }
+    proof { isolated_fits(*agent, slots@); }
+    true
 }
 
 // ── verified ────────────────────────────────────────────
@@ -1448,9 +1560,7 @@ pub struct Kernel;
 
 impl Gates for Kernel {
     fn blocked(t: &Search, x: Option<&Search>, f: Option<&Search>) -> (r: Option<spec::Blocked>) { blocked(t, x, f) }
-    fn isolated(checks: &Vec<Option<Permission>>, transcripts: &Vec<Option<Permission>>, working_directory: &Vec<Option<Permission>>, repository: &Vec<Option<Permission>>, working_directories: &Vec<Option<Permission>>, toolchain: &Vec<Option<Permission>>) -> (r: bool) {
-        isolated(checks, transcripts, working_directory, repository, working_directories, toolchain)
-    }
+    fn isolated(agent: &Observation, slots: &Vec<Observation>) -> (r: bool) { isolated(agent, slots) }
     fn verified(s: &Search, c: &Candidate) -> (r: bool) { verified(s, c) }
     fn selected(s: &Search) -> (r: Option<usize>) { selected(s) }
     fn first_verified(s: &Search) -> (r: Option<usize>) { first_verified(s) }
