@@ -2469,18 +2469,6 @@
     },
     {
       "group": "tcb",
-      "name": "claude",
-      "type": "application",
-      "version": "absent"
-    },
-    {
-      "group": "tcb",
-      "name": "codex",
-      "type": "application",
-      "version": "codex-cli 0.166.0"
-    },
-    {
-      "group": "tcb",
       "name": "git",
       "type": "application",
       "version": "git version 2.50.1 (Apple Git-155)"
