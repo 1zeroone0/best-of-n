@@ -63,7 +63,7 @@ fn the_version_is_one_line_in_either_spelling() {
 #[test]
 fn a_mistake_is_one_line_on_stderr_and_exit_1() {
     let d = Scratch::new("mistakes");
-    let cases: [(&[&str], &str); 10] = [
+    let cases: [(&[&str], &str); 11] = [
         (&["frobnicate"], "bon: unknown command frobnicate; bon help lists every command\n"),
         (&["--bogus"], "bon: --bogus is not an option of bon; bon --help shows its usage\n"),
         (&["--since"], "bon: --since needs YYYY-MM-DD; bon --help shows its usage\n"),
@@ -74,6 +74,7 @@ fn a_mistake_is_one_line_on_stderr_and_exit_1() {
         (&["code", "now"],"bon: now is not an argument of code; bon code --help shows its usage\n"),
         (&["view", "--frame"], "bon: --frame needs WxH; bon view --help shows its usage\n"),
         // Outside a repository, before anything is read (bare bon, view and pending show the host there).
+        (&["--find", "x"], "bon: --since, --until and --find narrow a repository's bon processes; run bon in one\n"),
         (&["spec"], "bon: not in a git repository; run bon in one, or start one with bon new <name>\n"),
     ];
     for (args, said) in cases {

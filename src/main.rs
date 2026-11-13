@@ -161,12 +161,18 @@ fn main() {
     let parsed = parse(command, rest).unwrap_or_else(|e| fail(&e));
     // What the arguments say is refused before anything else is said or read.
     let filter = view::Filter::new(parsed.value("--since").as_deref(), parsed.value("--until").as_deref(), parsed.value("--find")).unwrap_or_else(|e| fail(&e));
+    let narrowed = filter.since.is_some() || filter.until.is_some() || filter.find.is_some();
     let root = match git(Path::new("."), &["rev-parse", "--show-toplevel"]) {
         Ok(r) => r,
         // These read no repository: account and types run in a checkout without .git (checks).
         Err(_) if matches!(name, "new" | "setup") || (matches!(name, "account" | "types") && Path::new(".bon/bon.toml").is_file()) => ".".into(),
         // Outside every repository, the view and bon pending show the host: no root.
-        Err(_) if matches!(name, "" | "view" | "pending") => String::new(),
+        // Outside every repository, the view and bon pending show the host: no root; it has one tab, and no range to narrow.
+        Err(_) if matches!(name, "" | "view" | "pending") => {
+            if narrowed { fail("--since, --until and --find narrow a repository's bon processes; run bon in one"); }
+            if parsed.value("--tab").is_some_and(|t| t != "1") { fail("outside every repository the view is the host, one tab; give no --tab"); }
+            String::new()
+        }
         Err(_) => fail("not in a git repository; run bon in one, or start one with bon new <name>"),
     };
     // What a command reads its settings from: trunk's manifest, or the working tree's.

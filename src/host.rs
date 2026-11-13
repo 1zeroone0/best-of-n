@@ -77,7 +77,8 @@ fn money(d: f64) -> String { crate::view::money(d) }
 /// What a bon process's attempts did that the journal tells: each push, each
 /// block, each counterexample's test landed, at when its trace says it happened.
 fn events_of(repository: &str, p: &Value, out: &mut Vec<Value>) {
-    let (kind, title) = (p["kind"].as_str().unwrap_or(""), p["title"].as_str().unwrap_or(""));
+    // A kind shown as a value, as everywhere: its first letter upper case.
+    let (kind, title) = (crate::view::cap(p["kind"].as_str().unwrap_or("")), p["title"].as_str().unwrap_or(""));
     let searches: Vec<&Value> = p["searches"].as_array().into_iter().flatten().collect();
     let last = searches.iter().filter_map(|s| s["time"].as_i64()).max().unwrap_or(p["time"].as_i64().unwrap_or(0));
     let event = |time: i64, what: &str, text: String| json!({ "time": time, "repository": repository, "kind": what, "text": text });
@@ -256,7 +257,7 @@ pub fn text(h: &Value) -> String {
     out += &wrap(&format!("{} · {}{}", pool("agent_processes", &p.agent_processes), pool("check_processes", &p.check_processes),
         p.check_threads.map_or(String::new(), |t| format!(" · {t} threads each"))), 2, 4);
     if h.memory.total > 0.0 {
-        out += &wrap(&format!("Memory {:.1} of {:.1} GB free{}", h.memory.free, h.memory.total, if h.trees.is_empty() { String::new() } else { format!(" · bon {}", size(h.memory.bon)) }), 2, 4);
+        out += &wrap(&format!("Memory {:.1} of {:.1} GB in use{}", h.memory.total - h.memory.free, h.memory.total, if h.trees.is_empty() { String::new() } else { format!(" · bon {}", size(h.memory.bon)) }), 2, 4);
     }
     let n: usize = h.trees.iter().map(|g| g.processes.len()).sum();
     out += &format!("\nbon Processes{}\n", if n > 0 { format!("  {n}") } else { String::new() });
@@ -277,9 +278,14 @@ pub fn text(h: &Value) -> String {
     }
     out += "\nJournal\n";
     if h.journal.is_empty() { out += "  No push, block or interrupt yet\n"; }
+    // As Traces: a heading for each day, then each event's time.
     let off = offset();
+    let mut last_day = None;
     for e in h.journal.iter().rev().take(JOURNAL_LINES).rev() {
-        out += &wrap(&format!("{} {:<9} {}{}", local(e.time, off), cap(&e.kind), if e.repository.is_empty() { String::new() } else { format!("{} · ", e.repository) }, e.text), 2, 4);
+        let day = local(e.time, off);
+        let (date, time) = day.split_once(' ').unwrap_or((&day, ""));
+        if last_day.as_deref() != Some(date) { out += &format!("  {date}\n"); last_day = Some(date.to_string()); }
+        out += &wrap(&format!("{time}  {:<9} {}{}", cap(&e.kind), if e.repository.is_empty() { String::new() } else { format!("{} · ", e.repository) }, e.text), 2, 4);
     }
     out += &format!("\nRepositories{}\n", if h.repositories.is_empty() { String::new() } else { format!("  {}", h.repositories.len()) });
     if h.repositories.is_empty() {

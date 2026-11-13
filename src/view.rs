@@ -1175,7 +1175,7 @@ pub fn per_verified_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
 /// tier threshold and what they cost beyond the base price.
 pub fn over_tier_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
     if t.over_tier.is_empty() { return Vec::new(); }
-    let mut out = vec![["Over tier", "Requests over", "Beyond base", "Agent processes"].map(String::from).to_vec()];
+    let mut out = vec![["Over Tier", "Requests over", "Beyond base", "Agent processes"].map(String::from).to_vec()];
     for r in &t.over_tier {
         let measured = if r.measured == r.agent_processes { r.agent_processes.to_string() } else { format!("{} of {}", r.measured, r.agent_processes) };
         out.push(vec![format!("{} · {} · {}", cap(&r.kind), r.role, r.model), r.requests.to_string(), money(r.beyond), measured]);
@@ -1466,7 +1466,9 @@ pub fn text(s: &Value) -> String {
         let traced: crate::projection::GoalTrace = serde_json::from_value(g.clone()).unwrap_or_default();
         for search in traced.processes.iter().flat_map(|p| &p.searches).filter(|x| x.blocked.is_some()) {
             if let Some((files, diff)) = crate::tui::needed(search, &protected) {
-                out += &wrap(&format!("every accepted, proved candidate changed protected {}: {diff}", files.join(", ")), 6, 8);
+                // The command whole on its own line, so it runs as copied.
+                out += &wrap(&format!("every accepted, proved candidate changed protected {}:", files.join(", ")), 6, 8);
+                out += &format!("        {diff}\n");
             }
         }
     }

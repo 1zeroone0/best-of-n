@@ -243,6 +243,7 @@ struct App {
     body_h: u16,
     /// The first row of the key reference shown, where it does not fit.
     keys_top: usize,
+    keys_page: usize,
     /// Whether the list was last scrolled through its rows rather than moved between items.
     scrolled: bool,
     overlay_rows: usize,
@@ -255,7 +256,7 @@ impl App {
         let dark = std::env::var("BON_THEME").map_or(true, |t| t != "light");
         App { p: Projection::default(), loaded: None, host: Default::default(), root: ".".into(), overlay: Overlay::None, input: None, range: 0, filter: Default::default(),
               error: None, tab: Tab::Traces, held: Default::default(), focus: [0; 4], top: [0; 4], detail_top: 0, detail_open: false,
-              keys: false, palette: if dark { DARK } else { LIGHT }, dark, off: local_offset(), list_w: 200, list_h: 20, detail_h: 20, detail_shown: false, detail_page: 18, body_h: 20, keys_top: 0, scrolled: false, overlay_rows: 0, split: false }
+              keys: false, palette: if dark { DARK } else { LIGHT }, dark, off: local_offset(), list_w: 200, list_h: 20, detail_h: 20, detail_shown: false, detail_page: 18, body_h: 20, keys_top: 0, keys_page: 1, scrolled: false, overlay_rows: 0, split: false }
     }
     fn ti(&self) -> usize { TABS.iter().position(|t| *t == self.tab).unwrap_or(0) }
     /// Focus row `i` of `list`, and its item; a new focus opens its detail at the top.
@@ -930,7 +931,8 @@ fn pending_rows(pal: &Palette, pending: &[&projection::Interrupt], now: i64, her
         for line in &i.what { labeled(&mut out, Vec::new(), line, pal.muted()); }
         for c in &i.choices {
             labeled(&mut out, vec![Span::styled(format!("    {}", cap(&c.choice)), pal.ink())], &c.cost, pal.ink());
-            labeled(&mut out, Vec::new(), &c.how, pal.faint());
+            // How it is made is what the owner does: a label's weight, not a location's.
+            labeled(&mut out, Vec::new(), &c.how, pal.muted());
         }
     }
     out
@@ -989,7 +991,8 @@ fn host_now(app: &App, w: usize, whole: bool) -> Vec<Row> {
         if wt.host > wt.searches && !whole { v.push(muted(&format!(" · {} on the host", wt.host))); }
         out.push(line("You wait on", v));
     }
-    out.push(line("Your time today", vec![ink(money(Some(wt.today)))]));
+    // The host's header says it already; a repository's header says its own cost, so here it is the host's.
+    if !whole { out.push(line("Your time today", vec![ink(money(Some(wt.today)))])); }
     // A gauge where the line has room for one of at least 8 cells, up to 16.
     let gw = match w.saturating_sub(3 + lw + 2 + 32) { n if n >= 8 => n.min(16), _ => 0 };
     for (name, s, what) in [("agent_processes", &h.pools.agent_processes, "in flight"), ("check_processes", &h.pools.check_processes, "in checks")] {
@@ -1009,7 +1012,8 @@ fn host_now(app: &App, w: usize, whole: bool) -> Vec<Row> {
     if m.total > 0.0 {
         let mut v = Vec::new();
         if gw > 0 { v.extend(gauge(pal, m.total - m.free, m.total, gw)); v.push(Span::raw("  ")); }
-        v.push(ink(format!("{:.1} of {:.1} GB free", m.free, m.total)));
+        // The bar is what is in use; so are the words.
+        v.push(ink(format!("{:.1} of {:.1} GB in use", m.total - m.free, m.total)));
         if !h.trees.is_empty() { v.push(muted(" · bon ")); v.push(ink(size(m.bon))); }
         out.push(line("Memory", v));
     }
@@ -1664,7 +1668,7 @@ fn hanging(text: &str, indent: usize, width: usize, style: Style) -> Vec<Line<'s
 /// key bar's words. Each works everywhere its heading says.
 const KEYS: [(&str, &[(&str, &str)]); 4] = [
     ("Everywhere", &[("↑ ↓   j k", "Move; scroll where nothing is focused"), ("g  G", "First, last"), ("⇧↑ ⇧↓  PgUp PgDn", "Scroll"),
-        ("⇥  ⇧⇥  1–4", "Tab"), ("t", "Light or dark"), ("?", "Keys"), ("q  ⌃C", "Quit")]),
+        ("⇥  ⇧⇥  1–4", "Tab, in a repository"), ("t", "Light or dark"), ("?", "Keys"), ("q  ⌃C", "Quit")]),
     ("Spec and Traces", &[("⏎", "Open, under 100 columns"), ("esc", "Close")]),
     ("Project and Traces", &[("/", "Find"), ("r", "Range")]),
     ("Traces", &[("l", "Logs"), ("d", "Compare two behaviors")]),
@@ -2005,7 +2009,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             let rows = rows_of(lines, text.width.saturating_sub(2) as usize);
             *top = (*top).min(rows.len().saturating_sub(text.height as usize));
             app.overlay_rows = rows.len().saturating_sub(text.height as usize) + 1;
-            let at = vec![Span::styled(format!("Row {} of {} ", *top + 1, rows.len()), pal.muted())];
+            let at = vec![Span::styled(if rows.is_empty() { "Empty ".to_string() } else { format!("Row {} of {} ", *top + 1, rows.len()) }, pal.muted())];
             f.render_widget(Paragraph::new(spread(vec![Span::styled(format!(" {}", fit(title, bw.saturating_sub(width_of(&at) + 2))), pal.strong())], at, bw)), head);
             let shown: Vec<Line> = rows.into_iter().skip(*top).take(text.height as usize).map(|l| Line::from(Span::styled(l, pal.ink()))).collect();
             f.render_widget(Paragraph::new(shown), Rect { x: text.x + 1, width: text.width.saturating_sub(2), ..text });
@@ -2044,7 +2048,7 @@ fn draw(f: &mut Frame, app: &mut App) {
         let items: Vec<(&str, String, u8)> = match &app.overlay {
             Overlay::Logs { items, .. } => { let mut v = vec![("⏎", "Open".into(), 3), ("esc", "Close".into(), 3)]; if items.len() > 1 { v.insert(0, ("↑↓", "Move".into(), 3)); } v }
             Overlay::Text { .. } | Overlay::Compare { .. } => vec![("↑↓ PgUp PgDn", "Scroll".into(), 3), ("esc", "Close".into(), 3)],
-            Overlay::None if !loaded => vec![("⇥", "Tab".into(), 3), ("?", "Keys".into(), 6), ("q", "Quit".into(), 9)],
+            Overlay::None if !loaded => { let mut v = vec![("?", "Keys".into(), 6), ("q", "Quit".into(), 9)]; if app.tab != Tab::Host { v.insert(0, ("⇥", "Tab".into(), 3)); } v }
             Overlay::None => {
                 let goal_now = (app.tab == Tab::Traces).then(|| focused(app).and_then(|k| goal(&app.p, &k))).flatten();
                 // Narrow, what the open detail binds outranks what ? lists anyway.
@@ -2095,6 +2099,7 @@ fn draw(f: &mut Frame, app: &mut App) {
         let inner = h.saturating_sub(2) as usize;
         app.keys_top = app.keys_top.min(last_top(all.len(), inner));
         let (up, avail) = more(all.len(), inner, app.keys_top);
+        app.keys_page = avail.max(1);
         let down = app.keys_top + avail < all.len();
         let mut shown: Vec<Line> = all.into_iter().skip(app.keys_top).take(avail).collect();
         if up { shown.insert(0, more_line(&pal, true)); }
@@ -2200,8 +2205,8 @@ fn key(app: &mut App, k: KeyEvent) -> bool {
         match k.code {
             KeyCode::Up | KeyCode::Char('k') => app.keys_top = app.keys_top.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => app.keys_top += 1,
-            KeyCode::PageUp => app.keys_top = app.keys_top.saturating_sub(app.body_h as usize / 2),
-            KeyCode::PageDown => app.keys_top += app.body_h as usize / 2,
+            KeyCode::PageUp => app.keys_top = app.keys_top.saturating_sub(app.keys_page),
+            KeyCode::PageDown => app.keys_top += app.keys_page,
             KeyCode::Char('g') => app.keys_top = 0,
             KeyCode::Char('G') => app.keys_top = usize::MAX,
             KeyCode::Char('q') => return false,
