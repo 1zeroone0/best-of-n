@@ -16,7 +16,7 @@ const USAGE: &str = "usage:
                           what is running, what was pushed, the queue, and what it cost, over that range
   bon code                search for code that trunk's checks accept; push it
   bon compaction          search for code and tests with what is stale removed or written cleaner; push it
-  bon counterexample      search trunk for a behavior the spec forbids; if found, a code search carries its test
+  bon counterexample      search trunk for what the spec forbids; if found, a code search carries its test
   bon init                create a manifest and queue in this git repository
   bon queue               turn each new transcript into a proposal for the queue
   bon view                the same in the terminal view, as `bon` opens it in a terminal
@@ -307,7 +307,7 @@ fn commit_file(root: &Path, parent: &str, path: &str, text: &str, message: &str)
     run(&["commit-tree", &tree?, "-p", parent, "-m", message], None, None)
 }
 
-/// bon counterexample: if trunk shows a behavior the spec forbids, the test that
+/// bon counterexample: if trunk does what the spec forbids, the test that
 /// shows it lands on trunk, and trunk's checks reject trunk until bon code.
 fn counterexample(root: &str) -> Result<(), String> {
     if process::counterexample(root)? {

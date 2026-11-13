@@ -270,6 +270,33 @@ fn changed_within_authority(s: &Search, c: &Candidate) -> (r: bool)
 
 // ── selected ────────────────────────────────────────────
 
+/// The first verified candidate of a complete search, if it has one.
+pub fn first_verified(s: &Search) -> (r: Option<usize>)
+    requires s.results.len() == s.n,
+    ensures (match r { Some(i) => Some(i as int), None => None }) == spec::first_verified(s@),
+{
+    let v = verified_each(s);
+    let mut i = 0;
+    while i < v.len()
+        invariant v.len() == s.n, 0 <= i <= v.len(),
+            forall|j: int| 0 <= j < s.n ==> v[j] == spec::verified_at(s@, j),
+            forall|j: int| 0 <= j < i ==> !spec::verified_at(s@, j),
+        decreases v.len() - i,
+    {
+        if v[i] {
+            proof {
+                let c = choose|c: int| spec::verified_at(s@, c) && forall|j: int| 0 <= j < c ==> !spec::verified_at(s@, j);
+                assert(spec::verified_at(s@, i as int));
+                if c < i { assert(!spec::verified_at(s@, c)); }
+                if c > i { assert(!spec::verified_at(s@, i as int)); }
+            }
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Whether each index of a complete search is verified.
 pub fn verified_each(s: &Search) -> (v: Vec<bool>)
     requires s.results.len() == s.n,
@@ -805,9 +832,9 @@ fn disagree(s: &Search) -> (r: bool)
 /// Whether at least two verified tests of x judge every member of t.
 // The first such test, f, is read only by the proof, which cargo erases.
 #[allow(unused_variables)]
-fn two_judge(x: &Search, t: &Search) -> (r: bool)
+fn judged(x: &Search, t: &Search) -> (r: bool)
     requires x.results.len() == x.n, t.results.len() == t.n,
-    ensures r == spec::two_judge(x@, t@),
+    ensures r == spec::judged(x@, t@),
 {
     hide(first_by_key);
     hide(spec::verified);
@@ -838,7 +865,7 @@ fn two_judge(x: &Search, t: &Search) -> (r: bool)
         i += 1;
     }
     proof {
-        if spec::two_judge(x@, t@) {
+        if spec::judged(x@, t@) {
             let (a, b) = choose|a: int, b: int| a != b
                 && spec::verified_at(x@, a) && spec::judges(spec::at(x@, a), t@)
                 && spec::verified_at(x@, b) && spec::judges(spec::at(x@, b), t@);
@@ -876,7 +903,7 @@ pub fn blocked(t: &Search, counterexample: Option<&Search>, f: Option<&Search>) 
         Some(x) => {
             proof { complete(x); }
             if landing(x, t).is_some() { return None; }
-            if !two_verified(x) || (disagree(t) && !two_judge(x, t)) { return Some(spec::Blocked::TooFewTests); }
+            if !two_verified(x) || (disagree(t) && !judged(x, t)) { return Some(spec::Blocked::TooFewTests); }
             let vx = verified_each(x);
             let vt = verified_each(t);
             let mut i = 0;
@@ -884,7 +911,7 @@ pub fn blocked(t: &Search, counterexample: Option<&Search>, f: Option<&Search>) 
                 invariant
                     x.results.len() == x.n, t.results.len() == t.n,
                     counterexample matches Some(c) && c@ == x@,
-                    spec::complete(x@), !spec::found(x@, t@), spec::two_verified(x@), !(spec::disagree(t@) && !spec::two_judge(x@, t@)),
+                    spec::complete(x@), !spec::found(x@, t@), spec::two_verified(x@), !(spec::disagree(t@) && !spec::judged(x@, t@)),
                     vx.len() == x.n, vt.len() == t.n, 0 <= i <= vx.len(),
                     forall|j: int| 0 <= j < x.n ==> vx[j] == spec::verified_at(x@, j),
                     forall|j: int| 0 <= j < t.n ==> vt[j] == spec::verified_at(t@, j),
@@ -1426,6 +1453,7 @@ impl Gates for Kernel {
     }
     fn verified(s: &Search, c: &Candidate) -> (r: bool) { verified(s, c) }
     fn selected(s: &Search) -> (r: Option<usize>) { selected(s) }
+    fn first_verified(s: &Search) -> (r: Option<usize>) { first_verified(s) }
     fn not_found(x: &Search, t: &Search, f: &Search) -> (r: bool) { not_found(x, t, f) }
     fn found_on_trunk(x: &Search) -> (r: Option<usize>) { found_on_trunk(x) }
     fn lands_on(x: &Search, t: &Search) -> (r: Option<usize>) { landing(x, t) }

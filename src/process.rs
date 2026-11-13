@@ -96,7 +96,7 @@ fn search(
         kind@ matches spec::Kind::Counterexample { goal: Some(p) } ==>
             0 <= p.search < old(t).searches.value().len()
             && (spec::selected(old(t).searches.value()[p.search], p.index)
-                || (spec::disagree(old(t).searches.value()[p.search]) && spec::verified_at(old(t).searches.value()[p.search], p.index)))
+                || (spec::disagree(old(t).searches.value()[p.search]) && spec::first_verified(old(t).searches.value()[p.search]) == Some(p.index)))
             && old(t).searches.value()[p.search].base == old(t).trunk.value().last(),
         kind@ matches spec::Kind::Foil { goal: p, changed } ==>
             0 <= p.search < old(t).searches.value().len()
@@ -175,7 +175,7 @@ fn search(
         decreases n - i,
     {
         let (r, measured) = results.remove(0);
-        // A harness that cannot be stopped mid-turn (codex) may overrun its limit;
+        // A program that cannot be stopped mid-turn (codex) may overrun its limit;
         // it is charged at its limit and the overrun is in its facts.json. (TCB)
         let generation = if measured > l { trusted::record_over_limit(m); l } else { measured };
         match &r {
@@ -394,29 +394,8 @@ fn attempt(
     }
 }
 
-/// The first verified candidate of a complete search, if it has one.
-fn first_verified(s: &Search) -> (r: Option<usize>)
-    requires s.results.len() == s.n,
-    ensures
-        r matches Some(i) ==> i < s.n && spec::verified_at(s@, i as int),
-        r is None ==> forall|i: int| !spec::verified_at(s@, i),
-{
-    let v = verified_each(s);
-    let mut i = 0;
-    while i < v.len()
-        invariant v.len() == s.n, 0 <= i <= v.len(),
-            forall|j: int| 0 <= j < s.n ==> v[j] == spec::verified_at(s@, j),
-            forall|j: int| 0 <= j < i ==> !spec::verified_at(s@, j),
-        decreases v.len() - i,
-    {
-        if v[i] { return Some(i); }
-        i += 1;
-    }
-    None
-}
-
 /// The rest of an attempt whose search s0, at index, disagrees: a
-/// counterexample search on it, its tests built on s0's verified candidate f,
+/// counterexample search on it, its tests built on s0's first verified candidate f,
 /// then a landing, or a block. Nothing of s0 is pushed.
 fn on_disagreement(
     m: &trusted::Manifest, head: &mut Commit, s0: &Search, f: usize, a: usize, index: usize,
@@ -430,7 +409,7 @@ fn on_disagreement(
         s0.results.len() == s0.n,
         s0@.base == old(head)@,
         spec::disagree(s0@),
-        spec::verified_at(s0@, f as int),
+        spec::first_verified(s0@) == Some(f as int),
     ensures
         r matches Ok(Some(next)) ==> next <= index + 3
             && between(*final(t), observed, next as int, *final(spent), final(head)@, paths(checks@), paths(tests@), paths(trusted@), limit),
@@ -444,6 +423,7 @@ fn on_disagreement(
     hide(spec::disagree);
     hide(spec::splits);
     hide(spec::beats);
+    hide(spec::first_verified);
     trusted::record_disagreed(m, f);
     let ghost before = t.searches.value();
     let s1 = search(m, index + 1, a, Kind::Counterexample { goal: Some(AgentProcess { search: index, index: f }) },
@@ -604,7 +584,7 @@ fn conclude(
 }
 
 /// bon counterexample: tests written from the spec, never the implementation,
-/// looking for a behavior on trunk the spec forbids. When at least two verified
+/// looking for what the spec forbids on trunk. When at least two verified
 /// tests reject trunk, the best lands on trunk, whose checks then reject it
 /// (Ok(true)); otherwise Ok(false), and nothing lands: a test that accepts
 /// trunk shows nothing.

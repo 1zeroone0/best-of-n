@@ -58,12 +58,12 @@ fn main() {
         println!("found on trunk: {:?}", back.as_ref().map(|b| Kernel::found_on_trunk(b)));
     }
     // A code search whose two verified candidates show two behaviors (out 7 and 8):
-    // nothing is selected and nothing blocks yet; a counterexample search on it decides.
+    // nothing is selected and nothing blocks yet; a counterexample search on its first verified candidate decides.
     let search = |kind: Kind, results: Vec<Option<Candidate>>| Search {
         kind, base: t("b0"), n: results.len(), checks: vec![t("src/spec.rs")], tests: vec![t("tests/")], trusted: vec![t("src/trusted.rs")], limit: 9, results,
     };
     let tested = search(Kind::Code { goal: t("c0ffee") }, vec![Some(candidate("x1", 7, 1)), None, Some(candidate("y2", 8, -2))]);
-    println!("disagree: selected {:?}, blocked {}", Kernel::selected(&tested), word(Kernel::blocked(&tested, None, None)));
+    println!("disagree: selected {:?}, first verified {:?}, blocked {}", Kernel::selected(&tested), Kernel::first_verified(&tested), word(Kernel::blocked(&tested, None, None)));
     let on = || Kind::Counterexample { goal: Some(AgentProcess { search: 0, index: 0 }) };
     let cases = [
         ("a test splits them", vec![Some(test("s1", vec![(0, true), (2, false)])), Some(test("s2", vec![(0, true), (2, true)]))]),

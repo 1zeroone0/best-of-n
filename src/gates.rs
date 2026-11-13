@@ -437,6 +437,12 @@ pub trait Gates {
             r matches Some(i) ==> spec::selected(search@, i as int),
             r is None ==> forall|i: int| !spec::selected(search@, i);
 
+    /// The first verified candidate, if the search has one: the goal of the
+    /// counterexample search on candidates that disagree.
+    fn first_verified(search: &Search) -> (r: Option<usize>)
+        requires search.results.len() == search.n,
+        ensures (match r { Some(i) => Some(i as int), None => None }) == spec::first_verified(search@);
+
     /// Two verified tests of counterexample reject a foil, and none splits
     /// tested or rejects every member of it.
     fn not_found(counterexample: &Search, tested: &Search, foils: &Search) -> (r: bool)

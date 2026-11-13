@@ -1,12 +1,20 @@
 //! bon's spec: types, predicates, then the state machine (state, init,
-//! transitions, properties, invariants, proofs). Every term is from OSTEP,
-//! object capabilities, Verus or Rust, or a TCB component's own terms (git,
-//! WebVTT); bon's own nouns are intent, queue, transcript, candidate, check,
-//! test, search, counterexample, proposal and generation.
+//! transitions, properties, invariants, proofs). Every term is from OSTEP or
+//! object capabilities, the core of every project; from lambda calculus or
+//! randomized algorithms, bon's project references; from Verus or Rust; or a
+//! TCB component's own terms (git, WebVTT). bon's own nouns are intent, queue,
+//! transcript, candidate, check, test, search, goal, attempt, behavior,
+//! member, counterexample, foil, proposal and generation.
 //!
 //! A candidate is rejected or accepted by the tests; an accepted candidate is
 //! verified when Verus verifies it within its authority; a verified candidate
 //! may be selected; a selected one may be pushed to trunk.
+//!
+//! An attempt is a code or compaction search and the searches on it: on its
+//! selection, a foil search and a counterexample search; or, when its verified
+//! candidates disagree, a counterexample search on its first verified one.
+//! Attempt a runs each search at the a-th width of the manifest's width lists,
+//! and a command makes attempts until one pushes or the longest list runs out.
 
 use vstd::prelude::*;
 use verus_state_machines_macros::tokenized_state_machine;
@@ -46,8 +54,10 @@ pub enum Object {
     /// The git repository: history and refs. Owner: engineer.
     Repository,
     /// The directory holding every working directory. agent may search it (pass
-    /// through to the path it was given) but not list it or add to it, so an
-    /// agent process reaches only its own working directory. Owner: engineer.
+    /// through to a path it is given) but not list it or add to it. Every agent
+    /// process and every check runs as the one user agent, so they are not
+    /// isolated from each other: one that knows another's path reaches it.
+    /// Owner: engineer.
     WorkingDirectories,
     /// The toolchain the checks run with: rustup's home, cargo's home, and every
     /// directory on the checks' PATH, as the host file names them. Owner: root
@@ -75,14 +85,13 @@ pub enum Kind {
     /// write them cleaner, without changing behavior. `out` is the goal's
     /// agree-check outputs, as trusted code observed them. Ends in push.
     Compaction { goal: Commit, out: Seq<nat> },
-    /// Candidates write a test from the spec, never from code, looking for a
-    /// behavior the spec forbids. The goal is a candidate of a code or
-    /// compaction search, whose tree the test builds on: the selected one,
-    /// whose push it clears or blocks; or, when that search's verified
-    /// candidates disagree, a verified one, and the test decides between their
-    /// behaviors. When None,
-    /// the goal is trunk's head. A test that shows the behavior lands on trunk
-    /// (`land`).
+    /// Candidates write a test from the spec, never from code, looking for
+    /// what the spec forbids. The goal is a candidate of a code or compaction
+    /// search, whose tree the test builds on: the selected one, whose push it
+    /// clears or blocks; or, when that search's verified candidates disagree,
+    /// its first verified one, and the test decides between their behaviors.
+    /// When None, the goal is trunk's head. A test that shows what the spec
+    /// forbids lands on trunk (`land`).
     Counterexample { goal: Option<AgentProcess> },
     /// The goal is the selected candidate of a code or compaction search:
     /// candidates change it into a program trunk's tests accept and Verus
@@ -131,7 +140,9 @@ pub struct Capability {
     pub base: Commit,
     /// The paths it may change, attenuated by the search's kind at grant.
     pub authority: ISet<Path>,
-    /// The generation it may spend, reserved from the bon process's limit at grant.
+    /// The generation it may spend, reserved from the bon process's limit at
+    /// grant and charged at wait. Nothing enforces it while the agent process
+    /// runs: the model's key is ambient authority to agent. (TCB: trusted code)
     pub limit: nat,
 }
 
@@ -238,9 +249,6 @@ pub open spec fn at(search: Search, i: int) -> Candidate { search.results[i]->So
 /// Every test accepted candidate.
 pub open spec fn accepted(candidate: Candidate) -> bool { candidate.accepted }
 
-/// Some test rejected candidate.
-pub open spec fn rejected(candidate: Candidate) -> bool { !candidate.accepted }
-
 /// Passed the vertical bottleneck: accepted, Verus verified it, and every
 /// changed path is within the search's authority. A counterexample's
 /// candidate is a test, which Verus says nothing about: it starts from
@@ -271,6 +279,8 @@ pub open spec fn complete(search: Search) -> bool {
 /// At least two verified candidates, and every verified pair prints the same.
 /// Compaction also measures them against its goal: every verified candidate
 /// prints the same as the goal. The goal never votes; it is measured.
+/// Agreement counts independent agent processes, not distinct trees: two
+/// agent processes that return the same tree are two.
 pub open spec fn agree(search: Search) -> bool {
     complete(search) && match search.kind {
         Kind::Code { .. } =>
@@ -295,6 +305,15 @@ pub open spec fn behaviors(search: Search) -> ISet<Seq<nat>> {
 /// Code or compaction: at least two candidates are verified and they do not agree.
 pub open spec fn disagree(search: Search) -> bool {
     complete(search) && (search.kind is Code || search.kind is Compaction) && two_verified(search) && !agree(search)
+}
+
+/// The lowest index of search whose candidate is verified; None when none is.
+pub open spec fn first_verified(search: Search) -> Option<int> {
+    if exists|i: int| verified_at(search, i) {
+        Some(choose|i: int| verified_at(search, i) && forall|j: int| 0 <= j < i ==> !verified_at(search, j))
+    } else {
+        None
+    }
 }
 
 /// Candidate i of the tested search may be pushed: a counterexample search on
@@ -331,7 +350,7 @@ pub open spec fn member(tested: Search, j: int) -> bool {
 }
 
 /// Counterexample: candidate, a test, splits the members of tested: it accepts
-/// one and rejects another, so one shows a behavior the spec forbids. A test
+/// one and rejects another, so one does what the spec forbids. A test
 /// with no result on a member (it did not build there, or timed out) says
 /// nothing about it: no result never splits.
 pub open spec fn splits(candidate: Candidate, tested: Search) -> bool {
@@ -353,7 +372,7 @@ pub open spec fn rejects_every(candidate: Candidate, tested: Search) -> bool {
 }
 
 /// Foil: index j of foils holds a program trunk's tests accept and Verus
-/// rejects, within the search's authority: a behavior the spec forbids that
+/// rejects, within the search's authority: what the spec forbids, which
 /// trunk's tests miss.
 pub open spec fn foil(foils: Search, j: int) -> bool {
     0 <= j < foils.n && foils.results.contains_key(j) && foils.results[j] is Some
@@ -395,7 +414,7 @@ pub open spec fn rejects_trunk(counterexample: Search, i: int) -> bool {
 }
 
 /// Counterexample on trunk: at least two verified tests reject trunk's head, so
-/// trunk shows a behavior the spec forbids. Test i, of those that reject trunk
+/// trunk does what the spec forbids. Test i, of those that reject trunk
 /// the highest rank, is the one that lands.
 pub open spec fn found_on_trunk(counterexample: Search, i: int) -> bool {
     complete(counterexample) && rejects_trunk(counterexample, i)
@@ -464,7 +483,7 @@ pub open spec fn two_verified(search: Search) -> bool {
 }
 
 /// At least two verified tests of counterexample judge every member of tested.
-pub open spec fn two_judge(counterexample: Search, tested: Search) -> bool {
+pub open spec fn judged(counterexample: Search, tested: Search) -> bool {
     exists|i: int, j: int| i != j
         && verified_at(counterexample, i) && judges(at(counterexample, i), tested)
         && verified_at(counterexample, j) && judges(at(counterexample, j), tested)
@@ -481,7 +500,7 @@ pub open spec fn allowed(tested: Search, i: int, counterexample: Search, foils: 
 /// trusted code observed it. Only the git reasons depend on remote.
 pub open spec fn blocked(reason: Blocked, tested: Search, counterexample: Search, foils: Search, remote: Commit) -> bool {
     let checked = complete(counterexample) && !found(counterexample, tested);
-    let enough = two_verified(counterexample) && (disagree(tested) ==> two_judge(counterexample, tested));
+    let enough = two_verified(counterexample) && (disagree(tested) ==> judged(counterexample, tested));
     match reason {
         Blocked::TooFewVerified => complete(tested) && !two_verified(tested),
         Blocked::TooFewTests => checked && !enough,
@@ -515,7 +534,7 @@ pub open spec fn reason(tested: Search, counterexample: Option<Search>, foils: O
             else { None },
         Some(counterexample) =>
             if !(complete(counterexample) && !found(counterexample, tested)) { None }
-            else if !two_verified(counterexample) || (disagree(tested) && !two_judge(counterexample, tested)) { Some(Blocked::TooFewTests) }
+            else if !two_verified(counterexample) || (disagree(tested) && !judged(counterexample, tested)) { Some(Blocked::TooFewTests) }
             else if exists|i: int| verified_at(counterexample, i) && rejects_every(at(counterexample, i), tested) { Some(Blocked::RejectsEvery) }
             else {
                 match foils {
@@ -728,8 +747,8 @@ tokenized_state_machine!{ bon {
     /// checks accept its head, as trusted code observed it: every test check
     /// and verify check accepted it. Code is granted on a trunk they reject;
     /// compaction and a counterexample on trunk, on one they accept. A
-    /// counterexample on a candidate is granted on a selected one, or on a
-    /// verified one of a search whose verified candidates disagree.
+    /// counterexample on a candidate is granted on a selected one, or on the
+    /// first verified one of a search whose verified candidates disagree.
     transition!{ grant(kind: Kind, n: nat, agent_process_limit: nat, observed: Map<Object, Seq<Option<Permission>>>, checks_accept: bool) {
         require isolated(observed);
         require forall|search_index: int| 0 <= search_index < pre.searches.len() ==> complete(#[trigger] pre.searches[search_index]);
@@ -741,7 +760,7 @@ tokenized_state_machine!{ bon {
         require kind matches Kind::Counterexample { goal: Some(agent_process) } ==>
             0 <= agent_process.search < pre.searches.len()
             && (selected(pre.searches[agent_process.search], agent_process.index)
-                || (disagree(pre.searches[agent_process.search]) && verified_at(pre.searches[agent_process.search], agent_process.index)))
+                || (disagree(pre.searches[agent_process.search]) && first_verified(pre.searches[agent_process.search]) == Some(agent_process.index)))
             && pre.searches[agent_process.search].base == pre.trunk.last();
         require kind matches Kind::Foil { goal: agent_process, changed } ==>
             0 <= agent_process.search < pre.searches.len()
@@ -763,10 +782,9 @@ tokenized_state_machine!{ bon {
     /// its generation, consuming its capability and settling its limit. Generation is
     /// what the agent process's tokens cost at the host file's prices, as measured
     /// (TCB: trusted code counted it). What it is charged, and spends against its
-    /// limit, is its generation up to its limit. A harness that cannot be stopped mid-turn may
-    /// run past its limit; the overrun is in generation, never in spent. A search's
-    /// cost is its generation plus time: the rate in bon.toml times its wall time.
-    /// (OSTEP: wait)
+    /// limit, is its generation up to its limit. A program that cannot be stopped
+    /// mid-turn may run past its limit; the overrun is in generation, never in
+    /// spent. (OSTEP: wait)
     transition!{ wait(agent_process: AgentProcess, held: Capability, result: Option<Candidate>, generation: nat) {
         remove capability -= [agent_process => held];
         require result matches Some(candidate) ==> candidate.base == held.base;
@@ -791,7 +809,7 @@ tokenized_state_machine!{ bon {
         update authors = pre.authors.push(User::agent);
     }}
 
-    /// Counterexample: its test that shows a behavior the spec forbids lands on
+    /// Counterexample: its test that shows what the spec forbids lands on
     /// trunk by itself, if trunk hasn't moved. Trunk's checks then reject trunk
     /// until a code search writes code they accept. (git: push)
     transition!{ land(counterexample_index: int, i: int) {
