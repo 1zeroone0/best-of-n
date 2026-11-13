@@ -966,7 +966,7 @@ fn host_rows(app: &App, w: usize, whole: bool) -> Vec<Row> {
 fn host_record(app: &App, w: usize, whole: bool) -> Vec<Row> {
     let mut out: Vec<Line<'static>> = Vec::new();
     if app.loaded.is_none() { return Vec::new(); }
-    host_journal(app, whole, &mut out);
+    host_journal(app, whole, w, &mut out);
     if whole { host_repositories(app, w, &mut out); }
     out.into_iter().map(|l| Row::text(clip(l, w))).collect()
 }
@@ -1052,7 +1052,7 @@ fn host_now(app: &App, w: usize, whole: bool) -> Vec<Row> {
 }
 
 /// The journal: what happened, in the order it happened, by day; the latest.
-fn host_journal(app: &App, whole: bool, out: &mut Vec<Line<'static>>) {
+fn host_journal(app: &App, whole: bool, w: usize, out: &mut Vec<Line<'static>>) {
     let (pal, h) = (&app.palette, &app.host);
     out.push(section(pal, 1, "Journal", None));
     let take = if whole { JOURNAL_HOST } else { JOURNAL_HERE };
@@ -1066,8 +1066,13 @@ fn host_journal(app: &App, whole: bool, out: &mut Vec<Line<'static>>) {
         let tone = match e.kind.as_str() { "pushed" => pal.tone(Tone::Violet), "blocked" => pal.tone(Tone::Yellow), _ => pal.ink() };
         let mut v = vec![Span::styled(format!("   {}  ", clock(e.time, app.off)), pal.muted()), Span::styled(fit(&cap(&e.kind), 10), tone)];
         if whole && !e.repository.is_empty() { v.push(Span::styled(format!("{} · ", e.repository), pal.muted())); }
-        v.push(Span::styled(e.text.clone(), pal.ink()));
-        out.push(Line::from(v));
+        // What happened wraps under itself, after its time and kind.
+        let at = width_of(&v);
+        for (k, l) in hanging(&e.text, at, w.max(at + 12), pal.ink()).into_iter().enumerate() {
+            let body: String = l.spans[0].content.chars().skip(at).collect();
+            if k == 0 { v.push(Span::styled(body, pal.ink())); out.push(Line::from(std::mem::take(&mut v))); }
+            else { out.push(Line::from(vec![Span::raw(" ".repeat(at)), Span::styled(body, pal.ink())])); }
+        }
     }
 }
 
@@ -2457,7 +2462,7 @@ mod tests {
 
     #[test]
     fn the_host_draws_at_every_width_with_nothing_past_its_pane() {
-        for (w, h) in [(60, 24), (80, 40), (100, 30), (120, 12), (200, 50), (60, 8)] {
+        for (w, h) in [(60, 24), (80, 50), (100, 30), (120, 12), (200, 50), (60, 8)] {
             let mut app = App::new();
             app.host = host(); app.tab = Tab::Host; app.loaded = Some(Instant::now());
             let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();

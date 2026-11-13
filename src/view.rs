@@ -1499,7 +1499,8 @@ pub fn wrap(text: &str, first: usize, rest: usize) -> String {
     let mut out = String::new();
     let mut line = " ".repeat(first);
     let mut empty = true;
-    for word in text.split_whitespace() {
+    // Words between single spaces: a run of spaces that aligns a column stays as it is.
+    for word in text.trim().split(' ') {
         if !empty && line.chars().count() + 1 + word.chars().count() > REPORT_W {
             out += &line; out.push('\n');
             line = " ".repeat(rest);
