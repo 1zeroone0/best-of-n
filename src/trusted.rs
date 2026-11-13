@@ -780,12 +780,13 @@ fn wait_warm(config: &Config) -> Option<PathBuf> {
 const TRUNK_BUILDS: usize = 3;
 
 /// What trunk's build is a function of: trunk's tree, the commands that build
-/// it (the test and verify checks), and the checks' toolchain and environment
-/// (`identity`, as the verdict cache keys them). None when git names no tree.
+/// it (the test and verify checks), and the checks' toolchain: their PATH and
+/// homes, the tools' versions and bon's cargo (`toolchain_identity`). None
+/// when git names no tree.
 fn trunk_key(config: &Config, tree: &str) -> Option<String> {
     if tree.is_empty() || is_agent() { return None; }
     let mut h = Sha256::new();
-    let id = identity(config);
+    let id = toolchain_identity(config).1;
     let parts = [id.as_str(), tree, "test"].into_iter().chain(config.checks.test.iter().map(String::as_str))
         .chain(["verify"]).chain(config.checks.verify.iter().map(String::as_str));
     for part in parts { h.update(part.as_bytes()); h.update([0u8]); }
@@ -1312,8 +1313,13 @@ fn cache_dir() -> Option<PathBuf> {
 
 /// The toolchain as the checks see it: the host file, their PATH and homes, the
 /// versions of rustc, cargo and Verus, and bon's cargo. Computed once per PATH.
-fn identity(config: &Config) -> String {
-    static MEMO: std::sync::Mutex<Option<HashMap<String, String>>> = std::sync::Mutex::new(None);
+fn identity(config: &Config) -> String { toolchain_identity(config).0 }
+
+/// (identity, the same without the host file): what a build is a function of
+/// besides its sources is the second; the host file's other facts (prices,
+/// pools, the verdict cache's place) change no build.
+fn toolchain_identity(config: &Config) -> (String, String) {
+    static MEMO: std::sync::Mutex<Option<HashMap<String, (String, String)>>> = std::sync::Mutex::new(None);
     let path = checks_path(config).join(":");
     let id = format!("{path}\0{:?}", config.toolchain);
     let mut memo = MEMO.lock().unwrap_or_else(|e| e.into_inner());
@@ -1322,7 +1328,9 @@ fn identity(config: &Config) -> String {
             .envs(config.toolchain.iter().map(|(k, v)| (k.as_str(), v.as_str()))).stdin(Stdio::null()).output()
             .map_or_else(|e| e.to_string(), |o| String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr));
         let host = host_file().ok().and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
-        format!("{id}\0{}\0{}\0{}\0{}\0{}", String::from_utf8_lossy(&host), version("rustc"), version("cargo"), version("verus"), cargo_text())
+        let (rustc, cargo, verus) = (version("rustc"), version("cargo"), version("verus"));
+        (format!("{id}\0{}\0{rustc}\0{cargo}\0{verus}\0{}", String::from_utf8_lossy(&host), cargo_text()),
+         format!("{id}\0{rustc}\0{cargo}\0{verus}\0{}", cargo_text()))
     }).clone()
 }
 
