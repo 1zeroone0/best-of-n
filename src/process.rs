@@ -73,39 +73,86 @@ fn none() -> (r: Vec<Commit>)
     r
 }
 
-/// commit is goal, for code, or a candidate of previous, a search of this
-/// kind on goal.
-pub open spec fn carried_from(goal: spec::Commit, compaction: bool, previous: Option<&Search>, commit: spec::Commit) -> bool {
-    (!compaction && commit == goal)
-    || (previous matches Some(p) && spec::candidate_commit(p@, commit)
-        && (compaction ==> (p@.kind matches spec::Kind::Compaction { goal: other, .. } && other == goal))
-        && (!compaction ==> p@.kind == (spec::Kind::Code { goal })))
+/// earlier is a search kind with kind's goal, of the same kind: what kind
+/// may carry the candidates of (spec::carries).
+pub open spec fn same_goal(earlier: spec::Kind, kind: spec::Kind) -> bool {
+    match kind {
+        spec::Kind::Code { goal } => earlier == (spec::Kind::Code { goal }),
+        spec::Kind::Compaction { goal, .. } => earlier matches spec::Kind::Compaction { goal: other, .. } && other == goal,
+        spec::Kind::Spec { goal, .. } => earlier matches spec::Kind::Spec { goal: other, .. } && other == goal,
+        _ => false,
+    }
 }
 
-/// What an attempt on goal carries: a code search, goal itself (its checks
+/// commit is a code search's goal, or a candidate of previous, a search of
+/// kind's kind on its goal.
+pub open spec fn carried_from(kind: spec::Kind, previous: Option<&Search>, commit: spec::Commit) -> bool {
+    (kind matches spec::Kind::Code { goal } && commit == goal)
+    || (previous matches Some(p) && spec::candidate_commit(p@, commit) && same_goal(p@.kind, kind))
+}
+
+/// What carried returns, the kind may carry, previous being the search at
+/// previous_index.
+proof fn carried_carries(searches: Seq<spec::Search>, kind: spec::Kind, previous: Option<&Search>, previous_index: int, commit: spec::Commit)
+    requires
+        carried_from(kind, previous, commit),
+        previous matches Some(p) ==> 0 <= previous_index < searches.len() && searches[previous_index] == p@,
+    ensures spec::carries(searches, kind, commit),
+{
+    if !(kind matches spec::Kind::Code { goal } && commit == goal) {
+        let p = previous->Some_0;
+        assert(searches[previous_index] == p@);
+        match kind {
+            spec::Kind::Code { goal } => {
+                assert(0 <= previous_index < searches.len() && searches[previous_index].kind == (spec::Kind::Code { goal })
+                    && spec::candidate_commit(searches[previous_index], commit));
+            }
+            spec::Kind::Compaction { goal, .. } => {
+                assert(0 <= previous_index < searches.len()
+                    && (searches[previous_index].kind matches spec::Kind::Compaction { goal: other, .. } && other == goal)
+                    && spec::candidate_commit(searches[previous_index], commit));
+            }
+            spec::Kind::Spec { goal, .. } => {
+                assert(0 <= previous_index < searches.len()
+                    && (searches[previous_index].kind matches spec::Kind::Spec { goal: other, .. } && other == goal)
+                    && spec::candidate_commit(searches[previous_index], commit));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Exec: previous has kind's goal, of kind's kind.
+fn has_same_goal(earlier: &Kind, kind: &Kind) -> (r: bool)
+    ensures r ==> same_goal(earlier@, kind@),
+{
+    match (earlier, kind) {
+        (Kind::Code { goal: a }, Kind::Code { goal: b }) => eq(&a.0, &b.0),
+        (Kind::Compaction { goal: a, .. }, Kind::Compaction { goal: b, .. }) => eq(&a.0, &b.0),
+        (Kind::Spec { goal: a, .. }, Kind::Spec { goal: b, .. }) => eq(&a.0, &b.0),
+        _ => false,
+    }
+}
+
+/// What an attempt of kind carries: a code search, its goal (its checks
 /// reject it); and every unverified candidate of the previous attempt's
-/// search, when that search was of this attempt's kind on this goal.
-fn carried(goal: &Commit, compaction: bool, previous: Option<&Search>) -> (r: Vec<Commit>)
-    ensures forall|commit: spec::Commit| #[trigger] commits(r@).contains(commit) ==> carried_from(goal@, compaction, previous, commit),
+/// search, when that search was of this kind on this goal.
+fn carried(kind: &Kind, previous: Option<&Search>) -> (r: Vec<Commit>)
+    ensures forall|commit: spec::Commit| #[trigger] commits(r@).contains(commit) ==> carried_from(kind@, previous, commit),
 {
     let mut r: Vec<Commit> = Vec::new();
-    if !compaction { r.push(Commit(goal.0.clone())); }
-    proof { if !compaction { assert(r@[0]@ == goal@); } }
-    assert(forall|j: int| 0 <= j < r.len() ==> carried_from(goal@, compaction, previous, #[trigger] r@[j]@));
+    if let Kind::Code { goal } = kind {
+        r.push(Commit(goal.0.clone()));
+        proof { assert(r@[0]@ == goal@); }
+    }
+    assert(forall|j: int| 0 <= j < r.len() ==> carried_from(kind@, previous, #[trigger] r@[j]@));
     if let Some(p) = previous {
-        let same = match &p.kind {
-            Kind::Code { goal: other } => !compaction && eq(&other.0, &goal.0),
-            Kind::Compaction { goal: other, .. } => compaction && eq(&other.0, &goal.0),
-            _ => false,
-        };
-        if same {
+        if has_same_goal(&p.kind, kind) {
             let mut i = 0;
             while i < p.results.len()
                 invariant
-                    0 <= i <= p.results.len(), same, previous == Some(p),
-                    compaction ==> (p@.kind matches spec::Kind::Compaction { goal: other, .. } && other == goal@),
-                    !compaction ==> p@.kind == (spec::Kind::Code { goal: goal@ }),
-                    forall|j: int| 0 <= j < r.len() ==> carried_from(goal@, compaction, previous, #[trigger] r@[j]@),
+                    0 <= i <= p.results.len(), previous == Some(p), same_goal(p@.kind, kind@),
+                    forall|j: int| 0 <= j < r.len() ==> carried_from(kind@, previous, #[trigger] r@[j]@),
                 decreases p.results.len() - i,
             {
                 if let Some(c) = &p.results[i] {
@@ -114,7 +161,7 @@ fn carried(goal: &Commit, compaction: bool, previous: Option<&Search>) -> (r: Ve
                             assert(p@.results.contains_key(i as int) && p@.results[i as int] == Some(c@));
                             assert(spec::at(p@, i as int).commit == c.commit@);
                             assert(spec::candidate_commit(p@, c.commit@));
-                            assert(carried_from(goal@, compaction, previous, c.commit@));
+                            assert(carried_from(kind@, previous, c.commit@));
                         }
                         let ghost before = r@;
                         r.push(Commit(c.commit.0.clone()));
@@ -126,7 +173,7 @@ fn carried(goal: &Commit, compaction: bool, previous: Option<&Search>) -> (r: Ve
         }
     }
     proof {
-        assert forall|commit: spec::Commit| #[trigger] commits(r@).contains(commit) implies carried_from(goal@, compaction, previous, commit) by {
+        assert forall|commit: spec::Commit| #[trigger] commits(r@).contains(commit) implies carried_from(kind@, previous, commit) by {
             let seen = r@.map_values(|c: Commit| c@);
             let j = choose|j: int| 0 <= j < seen.len() && #[trigger] seen[j] == commit;
             assert(seen[j] == r@[j]@);
@@ -460,24 +507,11 @@ fn attempt(
     };
     // What it carries: the goal's verdicts, and the previous attempt's
     // unverified candidates' when trunk has not moved since.
-    let context = carried(head, compaction, previous);
+    let context = carried(&kind, previous);
     let ghost before = t.searches.value();
     proof {
         assert forall|commit: spec::Commit| #[trigger] commits(context@).contains(commit) implies spec::carries(before, kind@, commit) by {
-            assert(carried_from(head@, compaction, previous, commit));
-            if !(!compaction && commit == head@) {
-                let p = previous->Some_0;
-                assert(before[previous_index] == p@);
-                if compaction {
-                    assert(0 <= previous_index < before.len()
-                        && (before[previous_index].kind matches spec::Kind::Compaction { goal: other, .. } && other == head@)
-                        && spec::candidate_commit(before[previous_index], commit));
-                } else {
-                    assert(0 <= previous_index < before.len()
-                        && before[previous_index].kind == (spec::Kind::Code { goal: head@ })
-                        && spec::candidate_commit(before[previous_index], commit));
-                }
-            }
+            carried_carries(before, kind@, previous, previous_index, commit);
         }
     }
     let s0 = search(m, index, a, kind, Commit(head.0.clone()), checks, tests, trusted, l, limit, spent, None, None, context,
@@ -754,6 +788,93 @@ pub fn counterexample(root: &str) -> (r: Result<bool, String>) {
             Ok(false)
         }
     }
+}
+
+/// bon spec <queue id>: spec searches for an accepted intent, goal, queue line
+/// id. Its spec's files must stand alone on trunk, or nothing is reserved.
+/// Attempts run along the spec search's width list until one has a verified
+/// candidate, each carrying the previous attempt's unverified ones; that
+/// search's proposal is written for engineer. Nothing is pushed: no
+/// transition takes a spec candidate to trunk (spec::proposals_never_reach_trunk).
+/// Ok: the proposal's path.
+pub fn spec(root: &str, id: u64, goal: Intent) -> (r: Result<String, String>) {
+    hide(spec::isolated);
+    let head = trusted::head(root)?;
+    let m = trusted::manifest(root, &head)?;
+    trusted::on_trunk(&m)?;
+    let checks = trusted::checks(&m);
+    let tests = trusted::tests(&m);
+    let trusted = trusted::trusted(&m);
+    let limit = trusted::limit(&m);
+    let l = trusted::agent_process_limit(&m);
+    let files = trusted::spec_files(&m, &head)?;
+    let (agent, observations) = trusted::observe(&m, &head)?;
+    if !isolated(&agent, &observations) {
+        return Err("agent or a check slot's user is not isolated: their permissions differ from the policy; run bon setup".into());
+    }
+    let ghost observed = observed(agent, observations@);
+    let ghost slots = observations.len() as nat;
+    let tracked (Tracked(instance), Tracked(checks_t), Tracked(tests_t), Tracked(trusted_t), Tracked(trunk), Tracked(authors),
+                 Tracked(searches), Tracked(limit_t), Tracked(spent_t), Tracked(reserved), Tracked(generation), Tracked(capability))
+        = spec::bon::Instance::initialize(head@, paths(checks@), paths(tests@), paths(trusted@), limit as nat);
+    let tracked mut t = Tokens { instance, checks: checks_t, tests: tests_t, trusted: trusted_t, trunk, authors, searches, limit: limit_t, spent: spent_t, reserved, generation };
+    let mut spent: u64 = 0;
+    trusted::record_initialize(&m, &head, limit);
+    let attempts = trusted::attempts_of(&m, &Kind::Spec { goal: Intent(goal.0.clone()), files: clone_paths(&files) });
+    let mut previous: Option<Search> = None;
+    let ghost mut previous_index: int = 0;
+    let mut a: usize = 0;
+    while a < attempts
+        invariant
+            t.wf(),
+            spec::isolated(observed, slots),
+            t.searches.value().len() == a as int,
+            forall|j: int| 0 <= j < t.searches.value().len() ==> spec::complete(#[trigger] t.searches.value()[j]),
+            t.reserved.value() == 0,
+            t.spent.value() == spent as nat,
+            t.trunk.value() == Seq::<spec::Commit>::empty().push(head@),
+            t.checks.value() == paths(checks@),
+            t.tests.value() == paths(tests@),
+            t.trusted.value() == paths(trusted@),
+            t.limit.value() == limit as nat,
+            previous matches Some(p) ==> 0 <= previous_index < a && t.searches.value()[previous_index] == p@,
+        decreases attempts - a,
+    {
+        let kind = Kind::Spec { goal: Intent(goal.0.clone()), files: clone_paths(&files) };
+        let prev = previous.as_ref();
+        let context = carried(&kind, prev);
+        let ghost before = t.searches.value();
+        proof {
+            assert forall|commit: spec::Commit| #[trigger] commits(context@).contains(commit) implies spec::carries(before, kind@, commit) by {
+                carried_carries(before, kind@, prev, previous_index, commit);
+            }
+        }
+        let s = search(&m, a, a, kind, Commit(head.0.clone()), &checks, &tests, &trusted, l, limit, &mut spent,
+                       None, None, context, Ghost(false), Ghost(observed), Ghost(slots), Tracked(&mut t))?;
+        proof {
+            assert forall|j: int| 0 <= j < t.searches.value().len() implies spec::complete(#[trigger] t.searches.value()[j]) by {
+                if j < a { assert(t.searches.value()[j] == before[j]); }
+            }
+        }
+        let v = verified_each(&s);
+        let mut any = false;
+        let mut j = 0;
+        while j < v.len()
+            invariant 0 <= j <= v.len(),
+            decreases v.len() - j,
+        {
+            if v[j] { any = true; }
+            j += 1;
+        }
+        if any {
+            trusted::record_proposal(&m);
+            return trusted::spec_proposal(&m, &s, id);
+        }
+        proof { previous_index = a as int; }
+        previous = Some(s);
+        a = a + 1;
+    }
+    Err("no spec candidate verified: every attempt's spec changes failed Verus alone, or changed more than the spec's files; see .bon/traces".into())
 }
 
 /// bon queue: one queue search per transcript, all in one run of the bon

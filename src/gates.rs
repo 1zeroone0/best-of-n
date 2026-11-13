@@ -62,6 +62,7 @@ pub enum Kind {
     Compaction { goal: Commit, out: Vec<Hash> },
     Counterexample { goal: Option<AgentProcess> },
     Foil { goal: AgentProcess, changed: Vec<Path> },
+    Spec { goal: Intent, files: Vec<Path> },
 }
 
 impl View for Kind {
@@ -74,6 +75,7 @@ impl View for Kind {
             Kind::Counterexample { goal } => spec::Kind::Counterexample {
                 goal: match goal { Some(agent_process) => Some(agent_process@), None => None } },
             Kind::Foil { goal, changed } => spec::Kind::Foil { goal: goal@, changed: paths(changed@) },
+            Kind::Spec { goal, files } => spec::Kind::Spec { goal: goal@, files: paths(files@) },
         }
     }
 }
@@ -258,9 +260,10 @@ pub open spec fn commit_texts(list: Seq<Commit>) -> Seq<u64> {
     seq![list.len() as u64] + list.map_values(|commit: Commit| text(commit.0@)).flatten()
 }
 
-/// A kind: a tag (0 queue, 1 code, 2 compaction, 3 counterexample, 4 foil),
-/// then its fields; a counterexample's goal is 0 for trunk, or 1 and the agent
-/// process; a foil's, the agent process and the paths it changed.
+/// A kind: a tag (0 queue, 1 code, 2 compaction, 3 counterexample, 4 foil,
+/// 5 spec), then its fields; a counterexample's goal is 0 for trunk, or 1 and
+/// the agent process; a foil's, the agent process and the paths it changed; a
+/// spec search's, the intent and the spec's files.
 pub open spec fn kind_words(kind: Kind) -> Seq<u64> {
     match kind {
         Kind::Queue { goal } => seq![0u64] + text(goal.0.0@),
@@ -271,6 +274,7 @@ pub open spec fn kind_words(kind: Kind) -> Seq<u64> {
             None => seq![3u64, 0u64],
         },
         Kind::Foil { goal, changed } => seq![4u64, goal.search as u64, goal.index as u64] + texts(changed@),
+        Kind::Spec { goal, files } => seq![5u64] + text(goal.0@) + texts(files@),
     }
 }
 
@@ -394,6 +398,8 @@ pub open spec fn kind_json(kind: Kind) -> Seq<char> {
         Kind::Foil { goal, changed } => object(seq![field("foil"@, object(seq![field("goal"@,
             object(seq![field("search"@, decimal(goal.search as nat)), field("index"@, decimal(goal.index as nat))])),
             field("changed"@, strings(changed@))]))]),
+        Kind::Spec { goal, files } => object(seq![field("spec"@, object(seq![
+            field("goal"@, string(goal.0@)), field("files"@, strings(files@))]))]),
     }
 }
 
@@ -535,9 +541,3 @@ pub trait Gates {
 }
 
 } // verus!
-
-/// The kernel implements every gate and the encoding; a build without either fails.
-#[allow(dead_code)]
-fn kernel<K: Gates + Encoding>() {}
-#[allow(dead_code)]
-fn kernel_is_complete() { kernel::<crate::exec::Kernel>(); }

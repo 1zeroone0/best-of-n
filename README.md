@@ -45,6 +45,7 @@ bon
 | `bon queue` | turn each new transcript into a proposal for the queue |
 | `bon background` | the stalest of compaction and counterexample, on spare capacity |
 | `bon spec [NAME]` | the spec's vocabulary and how it reaches the code, or one item |
+| `bon spec <queue id>` | a search, so it spends: agent processes each propose a spec change that states that queue line; never pushed, it ends in a proposal you read as new words, decisions, reach and scenarios, and apply one of, or none |
 | `bon types [--check]` | the types programs are built on, in TypeScript, Go and Python |
 | `bon account [--check]` | write what is proven, trusted, configured and tested, as OSCAL with its SBOM, or fail if it is stale |
 | `bon check` | every check on the working tree, as candidates are judged; whose fix a failure is; each file that breaks a rule on what a search may write |
@@ -129,6 +130,13 @@ once per user layer).
   processes read it in their prompt (a search's context): it reaches the
   generators, never how anything is judged or selected, and never a
   counterexample's or a foil's writer (the spec's `blind`).
+- **Trusted: what "the spec stands alone" means.** For a spec search, bon
+  makes, from git objects alone, a crate of the spec's files (the check
+  paths that are Rust with a `verus!` block) with the manifest's package,
+  dependencies, lints and lockfile, and a `lib.rs` declaring those files and
+  nothing else; Verus on that crate is what proves a spec candidate. The same
+  files make the same crate, and a trunk whose spec does not verify in it is
+  refused before anything is reserved.
 - **Next to Rust's types:** types keep a commit from passing as a path; Verus proves
   what a type cannot say, such as "this is the one candidate the spec selects".
 - **Next to Lean:** Lean checks a proof term in a small kernel, about a model of the

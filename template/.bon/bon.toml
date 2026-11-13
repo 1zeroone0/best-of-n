@@ -31,6 +31,8 @@ compaction = { role = "wide", n = [8, 12] }
 queue = { role = "wide", n = [8, 12] }
 counterexample = { role = "deep", n = [2] }
 foil = { role = "deep", n = [2] }
+# A spec search ends in a proposal you select from; none is pushed.
+spec = { role = "deep", n = [4, 6] }
 
 [counterexample]
 # Where an agent process writes its test, and how it builds and runs.

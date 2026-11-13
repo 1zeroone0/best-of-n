@@ -9,6 +9,9 @@
 #   BENCH          where sandboxes and results go [$TMPDIR/bon-bench]
 #   BON            the bon binary [target/debug/bon, built first]
 #   CX_WIDTH       counterexample and foil searches' width [4]
+#   SPEC_WIDTH     spec searches' width [4]
+#   SPEC           kernel: 1, run `bon spec 1` on the queue line the sandbox
+#                  commits, after the code and counterexample runs [0]
 #   SLEEP          seconds each stub waits, modelling the model [30]
 #   K              times each stub runs the checks itself [1]
 #   VARIANTS       distinct code edits; the rest are byte-identical [4]
@@ -42,6 +45,7 @@ TAG=${2:-w$WIDTH}
 REPO=$(cd "$(dirname "$0")/.." && pwd)
 BENCH=${BENCH:-${TMPDIR:-/tmp}/bon-bench}
 CX_WIDTH=${CX_WIDTH:-4}
+SPEC_WIDTH=${SPEC_WIDTH:-4}
 SLEEP=${SLEEP:-30}
 K=${K:-1}
 VARIANTS=${VARIANTS:-4}
@@ -99,7 +103,7 @@ esac
 cp "$REPO/bench/stub.sh" "$WORK/.bon/stub.sh"
 printf 'PROJECT=%s\nSLEEP=%s\nK=%s\nVARIANTS=%s\nTEST_VARIANTS=%s\nBEHAVIORS=%s\nCX_MODE=%s\nFEEDBACK=%s\n' "$PROJECT" "$SLEEP" "$K" "$VARIANTS" "$TEST_VARIANTS" "$BEHAVIORS" "$CX_MODE" "$FEEDBACK" > "$WORK/.bon/stub.env"
 printf '/target\n/.bon/traces/\n' > "$WORK/.gitignore"
-printf 'id\tintent\n' > "$WORK/.bon/queue.tsv"
+printf 'id\tintent\n1\tThe spec says when a is at least b.\n' > "$WORK/.bon/queue.tsv"
 cat > "$WORK/.bon/bon.toml" <<EOF
 # The benchmark's sandbox: stub agents, a local bare origin, no traces remote.
 limit = 1000.0
@@ -123,6 +127,7 @@ compaction = { role = "code", n = [$NS] }
 queue = { role = "code", n = [$NS] }
 counterexample = { role = "test", n = [$CX_WIDTH] }
 foil = { role = "test", n = [$CX_WIDTH] }
+spec = { role = "test", n = [$SPEC_WIDTH] }
 
 [counterexample]
 path = "tests/counterexample.rs"
@@ -194,4 +199,8 @@ run code code
 mv "$WORK/.bon/traces" "$OUT/traces-code" 2>/dev/null || true
 run counterexample counterexample
 mv "$WORK/.bon/traces" "$OUT/traces-counterexample" 2>/dev/null || true
+if [ "${SPEC:-0}" = 1 ]; then
+  run spec spec 1
+  mv "$WORK/.bon/traces" "$OUT/traces-spec" 2>/dev/null || true
+fi
 echo "results: $OUT"

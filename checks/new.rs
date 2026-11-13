@@ -1,6 +1,6 @@
 //! `bon new`: the same name gives the same bytes, and the project it sets up
 //! passes its own checks as created (Verus verifies it, its tests pass), its
-//! types emit, and its account generates.
+//! spec stands alone, its types emit, and its account generates.
 
 use std::path::Path;
 use std::process::Command;
@@ -45,6 +45,21 @@ fn a_new_project_is_the_same_bytes_and_passes_its_checks() {
                 .env("CARGO_TARGET_DIR", tmp.join("bon-new-target")).env("CARGO_NET_OFFLINE", "true").output().unwrap();
             ok(&o, c);
         }
+    }
+    // Its spec stands alone, as bon spec <queue id> requires: Verus on the crate of its spec's files alone.
+    let paths: Vec<String> = checks["paths"].as_array().unwrap().iter().filter_map(|c| c.as_str().map(String::from)).collect();
+    let alone = best_of_n::trusted::spec_alone_commit(&p, &paths, "HEAD").unwrap();
+    let a = d.join("alone");
+    std::fs::create_dir_all(&a).unwrap();
+    let archive = Command::new("git").args(["archive", &alone]).current_dir(&p).output().unwrap();
+    let mut tar = Command::new("tar").args(["-x", "-C"]).arg(&a).stdin(std::process::Stdio::piped()).spawn().unwrap();
+    std::io::Write::write_all(tar.stdin.as_mut().unwrap(), &archive.stdout).unwrap();
+    assert!(tar.wait().unwrap().success());
+    assert_eq!(std::fs::read_to_string(a.join("src/lib.rs")).unwrap(), "pub mod gates;\npub mod spec;\n");
+    for c in checks["verify"].as_array().unwrap().iter().filter_map(|c| c.as_str()) {
+        let o = Command::new("sh").args(["-c", c]).current_dir(&a)
+            .env("CARGO_TARGET_DIR", tmp.join("bon-new-target")).env("CARGO_NET_OFFLINE", "true").output().unwrap();
+        ok(&o, &format!("{c}, the spec alone"));
     }
     ok(&bon(&p, &["types", "--check"]), "bon types --check");
     ok(&bon(&p, &["account"]), "bon account");

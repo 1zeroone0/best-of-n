@@ -15,6 +15,8 @@
 //! candidates disagree, a counterexample search on its first verified one.
 //! Attempt a runs each search at the a-th width of the manifest's width lists,
 //! and a command makes attempts until one pushes or the longest list runs out.
+//! A spec search's attempts are spec searches alone, made until one has a
+//! verified candidate: it ends in a proposal, never a push.
 
 use vstd::prelude::*;
 use verus_state_machines_macros::tokenized_state_machine;
@@ -113,6 +115,12 @@ pub enum Kind {
     /// when it rejects a foil. `changed` is the paths the goal changed: a foil
     /// may change only those, so it breaks what this push adds. Never pushed.
     Foil { goal: AgentProcess, changed: Set<Path> },
+    /// The goal is an accepted intent: candidates change the spec so that it
+    /// states the intent. `files` is the spec's files: the check paths Verus
+    /// reads, as trusted code found them; a candidate may change only those.
+    /// Ends in a proposal to engineer, who applies one candidate's change or
+    /// none. Never pushed.
+    Spec { goal: Intent, files: Set<Path> },
 }
 
 /// One generated change, as trusted code observed it after its agent process exited.
@@ -125,7 +133,9 @@ pub struct Candidate {
     pub proved: bool,
     /// The paths the diff changed, as git reports them.
     pub changed: Set<Path>,
-    /// Code: a hash of each agree check's output, in manifest order.
+    /// Code: a hash of each agree check's output, in manifest order. Spec: a
+    /// hash of each surface item it adds, removes or changes, with how, in
+    /// name order.
     pub out: Seq<nat>,
     /// Queue: each new intent, by the cue it cites.
     pub intents: Map<Cue, Intent>,
@@ -216,7 +226,20 @@ pub open spec fn authority(kind: Kind, checks: Set<Path>, tests: Set<Path>, trus
         Kind::Foil { changed, .. } => ISet::new(|path: Path| !protected(checks, trusted, path) && !under(tests, path) && changed.contains(path)),
         Kind::Compaction { .. } => ISet::new(|path: Path| !protected(checks, trusted, path)),
         Kind::Counterexample { .. } => ISet::new(|path: Path| !protected(checks, trusted, path) && under(tests, path)),
+        Kind::Spec { files, .. } => ISet::new(|path: Path| files.contains(path) && under(checks, path)
+            && !under(trusted, path) && !bon_path().0.is_prefix_of(path.0)),
     }
+}
+
+/// A spec search writes only under the checks, and no other search but a
+/// queue search does: the opposite of a code search's authority, and never
+/// bon's directory or trusted code.
+pub proof fn spec_writes_only_checks(kind: Kind, checks: Set<Path>, tests: Set<Path>, trusted: Set<Path>, path: Path)
+    requires authority(kind, checks, tests, trusted).contains(path),
+    ensures
+        kind is Spec ==> under(checks, path) && !under(trusted, path) && !bon_path().0.is_prefix_of(path.0),
+        !(kind is Spec) && !(kind is Queue) ==> !under(checks, path),
+{
 }
 
 /// Who may do what. Check slot `slot`'s user may do what agent may, but reach
@@ -333,13 +356,31 @@ pub open spec fn accepted(candidate: Candidate) -> bool { candidate.accepted }
 /// without `proved`, and accepted when it builds on the tree it tests; it is
 /// exactly one new test, the one that runs, so nothing lands that did not. A
 /// code or compaction candidate's agree and rank were measured. A compaction's
-/// candidate also keeps rejecting every counterexample.
+/// candidate also keeps rejecting every counterexample. A spec candidate is a
+/// change to the spec, which the tests say nothing about until code follows
+/// it, and which the kernel's proofs may not yet meet: it is verified when it
+/// changes something, Verus verifies the spec alone (`proved`), and its
+/// surface was read (`measured`), without `accepted`.
 pub open spec fn verified(search: Search, candidate: Candidate) -> bool {
-    accepted(candidate) && (candidate.proved || search.kind is Counterexample)
+    (accepted(candidate) || search.kind is Spec) && (candidate.proved || search.kind is Counterexample)
     && (forall|path: Path| candidate.changed.contains(path) ==> search.authority.contains(path))
     && (search.kind is Compaction ==> candidate.rejects_counterexamples)
-    && ((search.kind is Code || search.kind is Compaction) ==> candidate.measured)
+    && ((search.kind is Code || search.kind is Compaction || search.kind is Spec) ==> candidate.measured)
+    && (search.kind is Spec ==> candidate.changed != Set::<Path>::empty())
     && (search.kind is Counterexample ==> exists|path: Path| candidate.changed == set![path] && candidate.added.contains(path))
+}
+
+/// For every kind but a spec search, `verified` is what it was before the
+/// spec search: the body below is its definition as it stood, word for word.
+pub proof fn verified_unchanged_but_for_spec(search: Search, candidate: Candidate)
+    requires !(search.kind is Spec),
+    ensures verified(search, candidate) == (
+        accepted(candidate) && (candidate.proved || search.kind is Counterexample)
+        && (forall|path: Path| candidate.changed.contains(path) ==> search.authority.contains(path))
+        && (search.kind is Compaction ==> candidate.rejects_counterexamples)
+        && ((search.kind is Code || search.kind is Compaction) ==> candidate.measured)
+        && (search.kind is Counterexample ==> exists|path: Path| candidate.changed == set![path] && candidate.added.contains(path))),
+{
 }
 
 /// Index i of search has a candidate, and it is verified.
@@ -438,8 +479,8 @@ pub open spec fn candidate_commit(search: Search, commit: Commit) -> bool {
 
 /// A search of kind may carry commit's verdicts in its context, the searches
 /// before it being searches: a code search, its goal, whose checks reject it,
-/// and the candidates of earlier code searches on that goal; a compaction,
-/// the candidates of earlier compactions on its goal. A queue,
+/// and the candidates of earlier code searches on that goal; a compaction or
+/// spec search, the candidates of earlier searches of its kind on its goal. A queue,
 /// counterexample or foil search carries none: a test or a foil is written
 /// without sight of any check's output on the code it is judged with.
 pub open spec fn carries(searches: Seq<Search>, kind: Kind, commit: Commit) -> bool {
@@ -448,6 +489,9 @@ pub open spec fn carries(searches: Seq<Search>, kind: Kind, commit: Commit) -> b
             && searches[search_index].kind == (Kind::Code { goal }) && candidate_commit(searches[search_index], commit),
         Kind::Compaction { goal, .. } => exists|search_index: int| 0 <= search_index < searches.len()
             && (searches[search_index].kind matches Kind::Compaction { goal: other, .. } && other == goal)
+            && candidate_commit(searches[search_index], commit),
+        Kind::Spec { goal, .. } => exists|search_index: int| 0 <= search_index < searches.len()
+            && (searches[search_index].kind matches Kind::Spec { goal: other, .. } && other == goal)
             && candidate_commit(searches[search_index], commit),
         _ => false,
     }
@@ -777,6 +821,20 @@ pub open spec fn proposed(search: Search, cue: Cue, intent: Intent) -> bool {
     && exists|i: int| cites(search, i, cue) && at(search, i).intents[cue] == intent
         && forall|j: int| cites(search, j, cue) ==>
             intent.0.len() < at(search, j).intents[cue].0.len() || (intent.0.len() == at(search, j).intents[cue].0.len() && i <= j)
+}
+
+/// A queue or spec search's candidate is never selected and never lands: push
+/// takes a selected candidate, which only a code or compaction search has,
+/// and land a counterexample's test. So no transition takes it to trunk; a
+/// proposal reaches trunk only as engineer's own commit (`advance`).
+pub proof fn proposals_never_reach_trunk(searches: Seq<Search>, search_index: int, i: int)
+    requires
+        0 <= search_index < searches.len(),
+        searches[search_index].kind is Spec || searches[search_index].kind is Queue,
+    ensures
+        !selected(searches[search_index], i),
+        !lands(searches, search_index, i),
+{
 }
 
 /// The agent processes of the search at search_index: one per index.

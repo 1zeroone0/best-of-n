@@ -56,6 +56,12 @@ return the smaller, which a test rejects; the second attempt's prompt
 carries those candidates' failing test (the search's context), and a stub
 that sees it writes the fix: the case of feeding a failed check's output back.
 
+With `SPEC=1`, the run ends with `bon spec 1` on the queue line the sandbox
+commits: four spec stubs add a predicate, two in other words (a doc and a
+layout: one behavior), one with its body the other way round (a second
+behavior, the same words: a decision that may mean the same), one that does
+not verify alone. The proposal is in the run's `traces-spec/proposals/`.
+
 A code or foil stub then runs `cargo test` and `cargo verus verify` itself `K`
 times, as an agent iterating does.
 

@@ -7,6 +7,10 @@
 //!   wrote it; resolved by the first commit on trunk's history that cites its
 //!   transcript (`Source:`), as bon queue reads it: one that adds to the queue
 //!   accepts it, one that does not rejects it.
+//!   A spec search's proposal (bon spec <queue id>) is the same kind: its
+//!   source is `queue <id>`; resolved by the first commit after it on
+//!   trunk's history with the trailer `Source: queue <id>`: one that changes
+//!   a spec file accepts it, one that does not rejects it.
 //! - `blocked`: an attempt blocked with its width list spent (its bon process
 //!   ended blocked) or its limit spent (it exited when what it had left of its
 //!   limit could not reserve its last search again). Resolved by the first of:
@@ -305,6 +309,8 @@ fn of(root: &Path, state: &Value) -> Vec<Value> {
         out.push(i);
     }
 
+    out.extend(spec_proposals(root, &cites, &base));
+
     // Transcripts routed nowhere (queue 80's routes.jsonl), each resolved by a later route of the same hash.
     let routes: Vec<Value> = std::fs::read_dir(root.join(".bon/traces")).into_iter().flatten().flatten()
         .flat_map(|e| std::fs::read_to_string(e.path().join("routes.jsonl")).unwrap_or_default().lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).collect::<Vec<_>>()).collect();
@@ -328,6 +334,44 @@ fn of(root: &Path, state: &Value) -> Vec<Value> {
         i["transcript"] = d["transcript"].clone();
     }
     out
+}
+
+/// Spec searches' proposals (`spec-<id>/proposal.json` beside the queue's),
+/// each resolved by the first commit after it that cites `Source: queue <id>`.
+fn spec_proposals(root: &Path, cites: &[(String, i64, String, Vec<String>)], base: &dyn Fn(&str, String, String, i64) -> Value) -> Vec<Value> {
+    let dir = root.join(".bon/traces/proposals");
+    let mut found: Vec<Value> = std::fs::read_dir(&dir).into_iter().flatten().flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("spec-"))
+        .filter_map(|e| serde_json::from_str::<Value>(&std::fs::read_to_string(e.path().join("proposal.json")).ok()?).ok()).collect();
+    found.sort_by_key(|p| p["raised"].as_i64());
+    found.into_iter().map(|p| {
+        let (source, raised) = (p["source"].as_str().unwrap_or("").to_string(), p["raised"].as_i64().unwrap_or(0));
+        let id = source.trim_start_matches("queue ").to_string();
+        let behaviors: Vec<&Value> = p["behaviors"].as_array().into_iter().flatten().collect();
+        let mut i = base("proposal", format!("proposal {source}"), source.clone(), raised);
+        i["what"] = json!([
+            format!("bon spec proposes {} spec change{} for {source}: {} of {} agent processes verified, {} decision{}",
+                behaviors.len(), if behaviors.len() == 1 { "" } else { "s" }, p["verified"], p["agent_processes"],
+                p["decisions"], if p["decisions"] == 1 { "" } else { "s" }),
+            p["intent"].as_str().unwrap_or("").to_string(),
+            format!("read {}", p["review"].as_str().unwrap_or("")),
+        ]);
+        let mut choices: Vec<Value> = behaviors.iter().enumerate().map(|(k, b)| json!({
+            "choice": format!("accept behavior {}", k + 1),
+            "how": format!("git apply {} && delete line {id} of .bon/queue.tsv && git commit -am 'spec: …' -m 'Source: {source}'", b["patch"].as_str().unwrap_or("")),
+            "cost": "nothing now; then a code search makes the code follow it",
+        })).collect();
+        choices.push(json!({ "choice": "reject", "how": format!("git commit --allow-empty -m 'spec: not {source}' -m 'Source: {source}'"), "cost": "nothing; the intent stays on the queue" }));
+        i["choices"] = json!(choices);
+        let files: Vec<&str> = p["files"].as_array().into_iter().flatten().filter_map(|f| f.as_str()).collect();
+        if let Some((hash, time, subject, _)) = cites.iter().find(|(_, t, _, s)| *t >= raised && s.iter().any(|s| *s == source)) {
+            let changed = git(root, &["diff-tree", "--no-commit-id", "--name-only", "-r", hash]);
+            let choice = if changed.lines().any(|f| files.contains(&f)) { "accept" } else { "reject" };
+            i["resolved"] = json!(time);
+            i["answer"] = json!({ "commit": hash, "subject": subject, "choice": choice });
+        }
+        i
+    }).collect()
 }
 
 /// What an interrupt showed, as one text: what happened, then each choice with its cost.

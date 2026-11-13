@@ -329,14 +329,27 @@ fn authority_contains(kind: &Kind, checks: &Vec<Path>, tests: &Vec<Path>, truste
         Kind::Foil { changed, .. } => !protected(checks, trusted, p) && !under(tests, p) && contains_path(changed, p),
         Kind::Compaction { .. } => !protected(checks, trusted, p),
         Kind::Counterexample { .. } => !protected(checks, trusted, p) && under(tests, p),
+        Kind::Spec { files, .. } => contains_path(files, p) && under(checks, p) && !under(trusted, p) && !is_prefix_of(&bon_path(), &p.0),
     }
 }
 
 pub fn verified(s: &Search, c: &Candidate) -> (r: bool)
     ensures r == spec::verified(s@, c@),
 {
-    if !c.accepted || (!c.proved && !matches!(&s.kind, Kind::Counterexample { .. })) { return false; }
+    let spec = matches!(&s.kind, Kind::Spec { .. });
+    if (!c.accepted && !spec) || (!c.proved && !matches!(&s.kind, Kind::Counterexample { .. })) { return false; }
     match &s.kind {
+        Kind::Spec { .. } => {
+            if !c.measured { return false; }
+            if c.changed.len() == 0 {
+                proof { assert(c@.changed =~= Set::<spec::Path>::empty()); }
+                return false;
+            }
+            proof {
+                assert(c.changed@.map_values(|q: Path| q@)[0] == c.changed@[0]@);
+                assert(c@.changed.contains(c.changed@[0]@));
+            }
+        },
         Kind::Compaction { .. } => { if !c.rejects_counterexamples || !c.measured { return false; } },
         Kind::Code { .. } => { if !c.measured { return false; } },
         Kind::Counterexample { .. } => { if !one_added(c) { return false; } },
@@ -1572,3 +1585,10 @@ impl Gates for Kernel {
 }
 
 } // verus!
+
+/// The kernel implements every gate and the encoding; a build without either
+/// fails. Here, not in gates.rs, so the spec's files stand alone.
+#[allow(dead_code)]
+fn kernel<K: crate::gates::Gates + crate::gates::Encoding>() {}
+#[allow(dead_code)]
+fn kernel_is_complete() { kernel::<Kernel>(); }

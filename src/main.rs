@@ -33,6 +33,8 @@ const USAGE: &str = "usage:
                           what only you can answer, oldest first: what happened, the choices and what each costs
   bon types [--check]     write the types programs are built on, or fail if one is stale
   bon spec [NAME]         the spec's vocabulary and how it reaches the code, or one item
+  bon spec <queue id>     search for spec changes that state that queue line, and propose them to you; this one
+                          spends money, as a search does (bon spec and bon spec NAME only read)
   bon check               every check on the working tree, as a check slot's user, the way candidates are judged
   bon cost                write .bon/cost.toml, what reaching trunk cost (bon does after each push)";
 
@@ -58,7 +60,9 @@ fn main() {
             eprintln!("bon: this bon was built from another kernel than trunk's ({}); reinstall: cargo install --path . --locked", differ.join(", "));
         }
     }
-    if !SEARCHES.contains(&command) {
+    // bon spec reads, but bon spec <queue id> searches.
+    let searching = SEARCHES.contains(&command) || (command == "spec" && args.get(1).is_some_and(|a| a.parse::<u64>().is_ok()));
+    if !searching {
         if let Err(e) = dispatch(&root, &args) { fail(&e) }
         return;
     }
@@ -125,6 +129,7 @@ fn dispatch(root: &str, args: &[String]) -> Result<(), String> {
             Some(other) => Err(format!("bon account takes --check, not {other}")),
         },
         Some("types") => types::run(&root, args.get(1).map(String::as_str) == Some("--check")),
+        Some("spec") if args.get(1).is_some_and(|a| a.parse::<u64>().is_ok()) => spec_search(&root, args[1].parse().unwrap_or(0)),
         Some("spec") => { print!("{}", tui::spec_text(&root, args.get(1).map(String::as_str), 100)?); Ok(()) }
         Some("check") => check(&root),
         Some("pending") => interrupt::run(&root, args),
@@ -514,6 +519,17 @@ fn commit_file(root: &Path, parent: &str, path: &str, text: &str, message: &str)
 
 /// bon counterexample: if trunk does what the spec forbids, the test that
 /// shows it lands on trunk, and trunk's checks reject trunk until bon code.
+/// bon spec <queue id>: the spec search for trunk's queue line id.
+fn spec_search(root: &str, id: u64) -> Result<(), String> {
+    let head: String = best_of_n::trusted::head(root)?.iter().collect();
+    let queue = git(Path::new(root), &["show", &format!("{head}:.bon/queue.tsv")]).map_err(|_| "no .bon/queue.tsv at trunk's head")?;
+    let intent = queue.lines().find_map(|l| { let (n, rest) = l.split_once('\t')?; (n.parse::<u64>().ok()? == id).then(|| rest.split('\t').next().unwrap_or("").to_string()) })
+        .ok_or_else(|| format!("no line {id} in trunk's queue"))?;
+    let review = process::spec(root, id, best_of_n::gates::Intent(intent.chars().collect()))?;
+    println!("proposed: read {review}; accept one behavior with the git apply it names, or none");
+    Ok(())
+}
+
 fn counterexample(root: &str) -> Result<(), String> {
     if process::counterexample(root)? {
         println!("found: verified tests reject trunk; the best landed on trunk, so trunk's checks reject it: run bon code");

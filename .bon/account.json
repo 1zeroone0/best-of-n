@@ -16,7 +16,7 @@
               "hashes": [
                 {
                   "algorithm": "SHA-256",
-                  "value": "72c46e3f083360701913f520ab70c91b16b33cc738631dbf3b8619430cababff"
+                  "value": "b640dd111658172412c9a439c762c1fdacca059e485b5b4e5695f54d1d67be61"
                 }
               ],
               "href": "sbom.json",
@@ -238,7 +238,7 @@
               },
               {
                 "control-id": "sa-10",
-                "description": "Every commit agent authors on trunk is exactly a selected, pushable candidate of a search on the previous head, or a counterexample's test that landed on it. No search may change bon's directory, the checks or the trusted code.",
+                "description": "Every commit agent authors on trunk is exactly a selected, pushable candidate of a search on the previous head, or a counterexample's test that landed on it. No search may change bon's directory or the trusted code, and none but a spec search the checks: its candidates change the spec's files alone and never reach trunk; the owner applies one himself.",
                 "props": [
                   {
                     "class": "claim",
@@ -269,6 +269,18 @@
                     "name": "proven",
                     "ns": "https://github.com/1zeroone0/best-of-n/account",
                     "value": "protected"
+                  },
+                  {
+                    "class": "predicate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "authority"
+                  },
+                  {
+                    "class": "gate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "selected"
                   },
                   {
                     "class": "manifest-key",
@@ -810,12 +822,12 @@
       }
     ],
     "metadata": {
-      "last-modified": "2026-11-13T08:44:35Z",
+      "last-modified": "2026-11-13T09:17:52Z",
       "oscal-version": "1.2.3",
       "remarks": "proven: in the kernel, verified by Verus. trusted: reviewed by the owner, not verified. configured: a fact of the manifest. tested: program code and every other file, judged by the checks. Every control claim is proposed and awaits GRC review.",
       "title": "best-of-n",
-      "version": "87505d58b2cb"
+      "version": "a237c0e5414a"
     },
-    "uuid": "894acba0-981a-4e04-887b-e1fea097cb38"
+    "uuid": "9f8986af-4f03-4515-a84e-0074bb6875bf"
   }
 }

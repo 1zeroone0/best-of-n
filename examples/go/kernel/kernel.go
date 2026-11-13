@@ -44,6 +44,7 @@ type Kind struct {
 	Compaction     *KindCompaction     `json:"compaction,omitempty"`
 	Counterexample *KindCounterexample `json:"counterexample,omitempty"`
 	Foil           *KindFoil           `json:"foil,omitempty"`
+	Spec           *KindSpec           `json:"spec,omitempty"`
 }
 
 type KindQueue struct {
@@ -66,6 +67,11 @@ type KindCounterexample struct {
 type KindFoil struct {
 	Goal    AgentProcess `json:"goal"`
 	Changed []Path       `json:"changed"`
+}
+
+type KindSpec struct {
+	Goal  Intent `json:"goal"`
+	Files []Path `json:"files"`
 }
 
 // One generated change, as trusted code observed it.

@@ -500,6 +500,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
                 "queue" => "the queue",
                 "counterexample" => "the counterexamples' tests",
                 "compaction" => "everything but the checks and .bon/",
+                "spec" => "the spec's files",
                 _ => "everything but the checks, .bon/ and the counterexamples' tests",
             };
             searches.push(json!({

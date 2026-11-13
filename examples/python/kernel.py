@@ -51,8 +51,12 @@ class KindFoil(TypedDict):
     goal: AgentProcess
     changed: list[Path]
 
+class KindSpec(TypedDict):
+    goal: Intent
+    files: list[Path]
+
 # One key: its variant.
-Kind = TypedDict("Kind", {"queue": KindQueue, "code": KindCode, "compaction": KindCompaction, "counterexample": KindCounterexample, "foil": KindFoil}, total=False)
+Kind = TypedDict("Kind", {"queue": KindQueue, "code": KindCode, "compaction": KindCompaction, "counterexample": KindCounterexample, "foil": KindFoil, "spec": KindSpec}, total=False)
 
 # One generated change, as trusted code observed it.
 class Candidate(TypedDict):

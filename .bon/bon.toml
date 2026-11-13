@@ -29,6 +29,8 @@ compaction = { role = "wide", n = [8, 12] }
 queue = { role = "wide", n = [8, 12] }
 counterexample = { role = "deep", n = [2] }
 foil = { role = "deep", n = [2] }
+# A spec search ends in a proposal you select from; none is pushed.
+spec = { role = "deep", n = [4, 6] }
 
 [counterexample]
 # Where an agent process writes its test, and how it builds and runs.
@@ -78,8 +80,8 @@ claim = "This document and its SBOM list every dependency the lockfiles pin, wit
 configured = ["account.tools", "checks.test"]
 
 [account.controls.sa-10]
-claim = "Every commit agent authors on trunk is exactly a selected, pushable candidate of a search on the previous head, or a counterexample's test that landed on it. No search may change bon's directory, the checks or the trusted code."
-proven = ["trunk_exact", "pushed", "landed", "protected"]
+claim = "Every commit agent authors on trunk is exactly a selected, pushable candidate of a search on the previous head, or a counterexample's test that landed on it. No search may change bon's directory or the trusted code, and none but a spec search the checks: its candidates change the spec's files alone and never reach trunk; the owner applies one himself."
+proven = ["trunk_exact", "pushed", "landed", "protected", "authority", "selected"]
 configured = ["checks.paths", "account.trusted"]
 
 [account.controls.sa-11]

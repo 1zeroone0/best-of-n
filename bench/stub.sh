@@ -34,6 +34,7 @@ case "$prompt" in
   *"does something the spec forbids"*) kind=foil ;;
   *"Trunk's checks reject this code"*) kind=code ;;
   *"Write one test, at"*) kind=counterexample ;;
+  *"engineer accepted this intent"*) kind=spec ;;
   *) kind=other ;;
 esac
 # Its reply begins at once (a model's first token), then takes SLEEP: bon
@@ -89,6 +90,19 @@ case "$kind" in
   foil)
     # Every foil is the same wrong reading: the tests miss it, Verus does not.
     sed -i '' "s/^    if .* else .*\$/$wrong/" src/lib.rs
+    ;;
+  spec)
+    # Index mod 4: 0 and 1 add one predicate in other words (a doc and a
+    # layout: one behavior); 2 writes its body the other way round (a second
+    # behavior, the same words); 3 writes one that does not verify.
+    case $((index % 4)) in
+      0) new='/// a is at least b.\npub open spec fn at_least(a: u64, b: u64) -> bool { a >= b }' ;;
+      1) new='/// Whether a is no smaller than b.\npub open spec fn at_least(a: u64, b: u64) -> bool {\n    a >= b\n}' ;;
+      2) new='/// a is at least b.\npub open spec fn at_least(a: u64, b: u64) -> bool { b <= a }' ;;
+      *) new='/// a is at least b.\npub open spec fn at_least(a: u64) -> bool { a >= b }' ;;
+    esac
+    new=$(printf "%b" "$new")
+    NEW="$new" perl -0pi -e 's/\n\} \/\/ verus!\n/\n$ENV{NEW}\n\n} \/\/ verus!\n/' src/spec.rs
     ;;
   counterexample)
     v=$((index % TEST_VARIANTS))

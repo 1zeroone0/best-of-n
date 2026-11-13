@@ -343,6 +343,7 @@ enum KindModel {
     Compaction { goal: Seq<char>, out: Seq<Hash> },
     Counterexample { goal: Option<(usize, usize)> },
     Foil { goal: (usize, usize), changed: Seq<Seq<char>> },
+    Spec { goal: Seq<char>, files: Seq<Seq<char>> },
 }
 
 type AgentProcessWire = (usize, usize);
@@ -366,6 +367,7 @@ impl Wire for Kind {
         Kind::Compaction { goal, out } => KindModel::Compaction { goal: goal.model(), out: out.model() },
         Kind::Counterexample { goal } => KindModel::Counterexample { goal: goal.model() },
         Kind::Foil { goal, changed } => KindModel::Foil { goal: goal.model(), changed: changed.model() },
+        Kind::Spec { goal, files } => KindModel::Spec { goal: goal.model(), files: files.model() },
     } }
     spec fn valid_model(m: Self::Model) -> bool { match m {
         KindModel::Queue { goal } => <Vec<char> as Wire>::valid_model(goal),
@@ -373,6 +375,7 @@ impl Wire for Kind {
         KindModel::Compaction { goal, out } => <(Vec<char>, Vec<Hash>) as Wire>::valid_model((goal, out)),
         KindModel::Counterexample { goal } => <Option<AgentProcess> as Wire>::valid_model(goal),
         KindModel::Foil { goal, changed } => <(AgentProcess, Vec<Path>) as Wire>::valid_model((goal, changed)),
+        KindModel::Spec { goal, files } => <(Intent, Vec<Path>) as Wire>::valid_model((goal, files)),
     } }
     proof fn valid(&self) { match self {
         Kind::Queue { goal } => { goal.valid(); },
@@ -380,6 +383,7 @@ impl Wire for Kind {
         Kind::Compaction { goal, out } => { goal.valid(); out.valid(); },
         Kind::Counterexample { goal } => { goal.valid(); },
         Kind::Foil { goal, changed } => { goal.valid(); changed.valid(); },
+        Kind::Spec { goal, files } => { goal.valid(); files.valid(); },
     } }
     spec fn words(m: Self::Model) -> Seq<u64> { match m {
         KindModel::Queue { goal } => seq![0u64] + <Vec<char> as Wire>::words(goal),
@@ -387,6 +391,7 @@ impl Wire for Kind {
         KindModel::Compaction { goal, out } => seq![2u64] + <(Vec<char>, Vec<Hash>) as Wire>::words((goal, out)),
         KindModel::Counterexample { goal } => seq![3u64] + <Option<AgentProcess> as Wire>::words(goal),
         KindModel::Foil { goal, changed } => seq![4u64] + <(AgentProcess, Vec<Path>) as Wire>::words((goal, changed)),
+        KindModel::Spec { goal, files } => seq![5u64] + <(Intent, Vec<Path>) as Wire>::words((goal, files)),
     } }
     spec fn parse(w: Seq<u64>) -> Option<(Self::Model, Seq<u64>)> { if w.len() == 0 { None } else { match w[0] {
         0 => match <Vec<char> as Wire>::parse(w.skip(1)) { Some((goal, tail)) => Some((KindModel::Queue { goal }, tail)), None => None },
@@ -394,6 +399,7 @@ impl Wire for Kind {
         2 => match <(Vec<char>, Vec<Hash>) as Wire>::parse(w.skip(1)) { Some(((goal, out), tail)) => Some((KindModel::Compaction { goal, out }, tail)), None => None },
         3 => match <Option<AgentProcess> as Wire>::parse(w.skip(1)) { Some((goal, tail)) => Some((KindModel::Counterexample { goal }, tail)), None => None },
         4 => match <(AgentProcess, Vec<Path>) as Wire>::parse(w.skip(1)) { Some(((goal, changed), tail)) => Some((KindModel::Foil { goal, changed }, tail)), None => None },
+        5 => match <(Intent, Vec<Path>) as Wire>::parse(w.skip(1)) { Some(((goal, files), tail)) => Some((KindModel::Spec { goal, files }, tail)), None => None },
         _ => None,
     } } }
     proof fn roundtrip(m: Self::Model, tail: Seq<u64>) {
@@ -404,6 +410,7 @@ impl Wire for Kind {
         KindModel::Compaction { goal, out } => { <(Vec<char>, Vec<Hash>) as Wire>::roundtrip((goal, out), tail); },
         KindModel::Counterexample { goal } => { <Option<AgentProcess> as Wire>::roundtrip(goal, tail); },
         KindModel::Foil { goal, changed } => { <(AgentProcess, Vec<Path>) as Wire>::roundtrip((goal, changed), tail); },
+        KindModel::Spec { goal, files } => { <(Intent, Vec<Path>) as Wire>::roundtrip((goal, files), tail); },
     } }
     fn write(&self) -> (r: Vec<u64>) { match self {
         Kind::Queue { goal } => { let mut r = vec![0u64]; append(&mut r, &goal.write()); r },
@@ -411,6 +418,7 @@ impl Wire for Kind {
         Kind::Compaction { goal, out } => { let mut r = vec![2u64]; append(&mut r, &goal.write()); append(&mut r, &out.write()); r },
         Kind::Counterexample { goal } => { let mut r = vec![3u64]; append(&mut r, &goal.write()); r },
         Kind::Foil { goal, changed } => { let mut r = vec![4u64]; append(&mut r, &goal.write()); append(&mut r, &changed.write()); r },
+        Kind::Spec { goal, files } => { let mut r = vec![5u64]; append(&mut r, &goal.write()); append(&mut r, &files.write()); r },
     } }
     fn read(w: &Vec<u64>) -> (r: Option<(Self, Vec<u64>)>) { if w.len() == 0 { return None; } let t = suffix(w, 1); match w[0] {
         0 => match <Vec<char> as Wire>::read(&t) { Some((goal, tail)) => Some((Kind::Queue { goal: Transcript(Path(goal)) }, tail)), None => None },
@@ -418,6 +426,7 @@ impl Wire for Kind {
         2 => match <(Vec<char>, Vec<Hash>) as Wire>::read(&t) { Some(((goal, out), tail)) => Some((Kind::Compaction { goal: Commit(goal), out }, tail)), None => None },
         3 => match <Option<AgentProcess> as Wire>::read(&t) { Some((goal, tail)) => Some((Kind::Counterexample { goal }, tail)), None => None },
         4 => match <(AgentProcess, Vec<Path>) as Wire>::read(&t) { Some(((goal, changed), tail)) => Some((Kind::Foil { goal, changed }, tail)), None => None },
+        5 => match <(Intent, Vec<Path>) as Wire>::read(&t) { Some(((goal, files), tail)) => Some((Kind::Spec { goal, files }, tail)), None => None },
         _ => None,
     } }
 }
@@ -521,6 +530,7 @@ proof fn kind_correct(k: Kind)
         Kind::Counterexample { goal } => {},
         Kind::Foil { changed, .. } => { texts_words(changed); },
         Kind::Compaction { goal, out } => { text_words(goal.0); hashes_words(out); },
+        Kind::Spec { goal, files } => { text_words(goal.0); texts_words(files); },
     }
 }
 proof fn intents_words(xs: Vec<(u64,Intent)>)
@@ -654,6 +664,7 @@ proof fn kind_model(a: Kind, b: Kind)
             assert(x.model() == y.model()); assert(x.model() =~= x@); assert(y.model() =~= y@); assert(x@ =~= y@);
         },
         (Kind::Foil { changed: a, .. }, Kind::Foil { changed: b, .. }) => { text_list_model(a, b); },
+        (Kind::Spec { goal: a, files: x }, Kind::Spec { goal: b, files: y }) => { text_model(a.0); text_model(b.0); text_list_model(x, y); },
         _ => {},
     }
 }
@@ -937,6 +948,17 @@ object(&fields) },
     let value = object(&fields);
     let fields = vec![field("foil", &value)];
     proof { assert(fields@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::field("foil"@, value@)]); }
+    object(&fields)
+},
+        Kind::Spec { goal, files } => {
+    let value0 = goal.emit();
+    let value1 = emit_array(files);
+    proof { assert(files@.map_values(|x: Path| x.json()) =~= files@.map_values(|x: Path| string(x.0@))); }
+    let fields = vec![field("goal", &value0), field("files", &value1)];
+    proof { assert(fields@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::field("goal"@, string(goal.0@)), crate::gates::field("files"@, strings(files@))]); }
+    let value = object(&fields);
+    let fields = vec![field("spec", &value)];
+    proof { assert(fields@.map_values(|x: Vec<char>| x@) =~= seq![crate::gates::field("spec"@, value@)]); }
     object(&fields)
 },
     } }

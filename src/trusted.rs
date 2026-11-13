@@ -324,13 +324,22 @@ pub struct Searches {
     pub queue: PerKind,
     pub counterexample: PerKind,
     pub foil: PerKind,
+    /// The spec search's, which a manifest may leave out: then `bon spec
+    /// <queue id>` says to add it.
+    #[serde(default)]
+    pub spec: Option<PerKind>,
 }
+
+/// A kind with no entry: no role, no width.
+static UNSET: std::sync::LazyLock<PerKind> = std::sync::LazyLock::new(|| PerKind { role: String::new(), n: Vec::new() });
 
 impl Searches {
     /// Every kind's entry, by the kind's name.
-    fn all(&self) -> [(&'static str, &PerKind); 5] {
-        [("code", &self.code), ("compaction", &self.compaction), ("queue", &self.queue),
-         ("counterexample", &self.counterexample), ("foil", &self.foil)]
+    fn all(&self) -> Vec<(&'static str, &PerKind)> {
+        let mut all = vec![("code", &self.code), ("compaction", &self.compaction), ("queue", &self.queue),
+            ("counterexample", &self.counterexample), ("foil", &self.foil)];
+        if let Some(spec) = &self.spec { all.push(("spec", spec)); }
+        all
     }
 
     /// The entry of a search of this kind.
@@ -341,6 +350,7 @@ impl Searches {
             Kind::Queue { .. } => &self.queue,
             Kind::Counterexample { .. } => &self.counterexample,
             Kind::Foil { .. } => &self.foil,
+            Kind::Spec { .. } => self.spec.as_ref().unwrap_or(&UNSET),
         }
     }
 }
@@ -748,13 +758,13 @@ fn extract(root: &std::path::Path, commit: &str, paths: &[&str], dir: &std::path
 /// write everything except the check paths, the transcripts and `.bon/`, which
 /// it may read and execute but not write, rename or delete. (TCB: POSIX ACLs)
 fn working_directory(root: &std::path::Path, config: &Config, commit: &str, dir: &std::path::Path) -> Result<(), String> {
-    working_directory_except(root, config, commit, dir, None, &[])
+    working_directory_except(root, config, commit, dir, &[], &[])
 }
 
 /// A working directory whose protected paths exclude `writable` (the queue, for
-/// a queue search) and also include `more` (the tests, for a code search).
+/// a queue search; the spec's files, for a spec search) and also include `more` (the tests, for a code search).
 fn working_directory_except(root: &std::path::Path, config: &Config, commit: &str, dir: &std::path::Path,
-                            writable: Option<&str>, more: &[String]) -> Result<(), String> {
+                            writable: &[String], more: &[String]) -> Result<(), String> {
     materialize(root, commit, dir)?;
     // Its owner's directory is agent's alone: no check slot's user reaches it.
     if let Some(owner) = dir.parent() { agents_alone(owner)?; }
@@ -766,7 +776,7 @@ fn working_directory_except(root: &std::path::Path, config: &Config, commit: &st
     // Every protected path at once: one chmod each, not one per path.
     let (mut targets, mut ancestors): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
     for p in config.checks.paths.iter().chain(fixed.iter()).chain(more.iter()) {
-        if writable.is_some_and(|w| w.starts_with(p.trim_end_matches('/'))) { continue; }
+        if writable.iter().any(|w| w.starts_with(p.trim_end_matches('/'))) { continue; }
         let target = dir.join(p.trim_end_matches('/'));
         if !target.exists() { continue; }
         targets.push(target.to_string_lossy().to_string());
@@ -826,6 +836,7 @@ fn label(kind: &Kind) -> (String, String) {
         Kind::Counterexample { goal: Some(p) } => ("counterexample".into(), format!("search {} candidate {}", p.search, p.index)),
         Kind::Counterexample { goal: None } => ("counterexample".into(), "trunk".into()),
         Kind::Foil { goal: p, .. } => ("foil".into(), format!("search {} candidate {}", p.search, p.index)),
+        Kind::Spec { goal, .. } => ("spec".into(), text(goal)),
     }
 }
 static WARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -2278,7 +2289,7 @@ fn aim(m: &Manifest, kind: &Kind, target: Option<&Search>, start: &str, context:
         // Which check rejects trunk and why, and the previous attempt's
         // candidates: each command and its errors, exactly the search's
         // context, so the agent process knows what fails before it reads a file.
-        Kind::Code { .. } | Kind::Compaction { .. } => rendered(m, kind, start, context),
+        Kind::Code { .. } | Kind::Compaction { .. } | Kind::Spec { .. } => rendered(m, kind, start, context),
         _ => String::new(),
     }
 }
@@ -2320,14 +2331,26 @@ fn prompt(kind: &Kind, config: &Config, aim: &str) -> String {
             "Read the transcript at {} and append to {QUEUE} one line per need it voices that the spec does \
              not state yet: a tab, the intent in the speaker's words, a tab, then the transcript path, '#', \
              and the cue's start time.\n", goal.iter().collect::<String>()),
+        Kind::Spec { goal, files } => format!(
+            "engineer accepted this intent, which the spec does not state yet: \"{}\". Change the spec so that \
+             it states it: you may change {:?} alone, the spec's files. Give each new type, field, variant, \
+             predicate, transition or gate a /// sentence saying what it is. The spec must verify by itself \
+             (Verus on those files alone); the code need not follow yet. Nothing you write is pushed: engineer \
+             reads every agent process's change side by side and applies one.\n",
+            goal.iter().collect::<String>(), files.iter().map(|f| f.iter().collect::<String>()).collect::<Vec<_>>()),
+    };
+    // A spec search writes some of the checks: the spec's files.
+    let checks = match kind {
+        Kind::Spec { .. } => format!("The other checks are {:?}: read and run them, never change them; you cannot.", config.checks.paths),
+        _ => format!("The checks are {:?}: read and run them, never change them; you cannot.", config.checks.paths),
     };
     format!(
         "You are working in a copy of a repository, with no git. {goal}{aim}\n\
-         The checks are {paths:?}: read and run them, never change them; you cannot.\n\
+         {checks}\n\
          Never change {fixed:?} either: a change to any of them is refused or rejected.\n\
          The tests run with: {test:?}. Verus runs with: {verify:?}.{staged}\n\
          {scope} Reply with one line saying what you changed.",
-        paths = config.checks.paths, test = config.checks.test, verify = config.checks.verify, fixed = fixed(kind, config),
+        test = config.checks.test, verify = config.checks.verify, fixed = fixed(kind, config),
         staged = if config.checks.staged.is_empty() { String::new() } else { format!(" Before a push, the selected candidate must also pass: {:?}.", config.checks.staged) },
         // Smallest change is right for every kind but compaction, whose goal is to remove.
         scope = if matches!(kind, Kind::Compaction { .. }) { "" } else { "Make the smallest change that does this." })
@@ -2438,6 +2461,10 @@ pub fn programs_logged_in(m: &Manifest) -> (r: Result<(), String>) {
 pub fn width(m: &Manifest, kind: &Kind, a: usize) -> usize {
     at(&m.config.searches.of(kind).n, a)
 }
+
+/// How many attempts a command of one kind makes: its width list's length.
+#[verifier::external_body]
+pub fn attempts_of(m: &Manifest, kind: &Kind) -> usize { m.config.searches.of(kind).n.len() }
 
 /// How many attempts a command makes: the longest width list.
 #[verifier::external_body]
@@ -3244,12 +3271,14 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, p: &Pro
     let session = Slot::agent_process(config);
     let dir = scratch(&format!("{search}.{index}/{}", repository_name(&m.root)));
     // What each kind may not write, made structural: code, the counterexamples' tests.
+    // A queue search writes the queue, and a spec search the spec's files, among what is protected.
     let (writable, more) = match kind {
-        Kind::Queue { .. } => (Some(QUEUE), Vec::new()),
-        Kind::Code { .. } | Kind::Foil { .. } => (None, config.counterexample.tests.clone()),
-        _ => (None, Vec::new()),
+        Kind::Queue { .. } => (vec![QUEUE.to_string()], Vec::new()),
+        Kind::Spec { files, .. } => (files.iter().map(|f| f.iter().collect()).collect(), Vec::new()),
+        Kind::Code { .. } | Kind::Foil { .. } => (Vec::new(), config.counterexample.tests.clone()),
+        _ => (Vec::new(), Vec::new()),
     };
-    if let Err(e) = working_directory_except(&m.root, config, start, &dir, writable, &more) {
+    if let Err(e) = working_directory_except(&m.root, config, start, &dir, &writable, &more) {
         write_trace(&trace.join("error"), e);
         return (None, 0);
     }
@@ -3328,7 +3357,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, p: &Pro
             "intents": c.intents.iter().map(|(q, i)| (q, text(i))).collect::<Vec<_>>(),
         })),
     });
-    let facts = agent_process_record(facts, candidate.as_ref(), context);
+    let facts = agent_process_record(facts, candidate.as_ref(), context, matches!(kind, Kind::Spec { .. }));
     write_trace(&trace.join("facts.json"), serde_json::to_string_pretty(&facts).unwrap_or_default());
     (candidate, spent)
 }
@@ -3345,8 +3374,9 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, p: &Pro
 /// whose verdicts the prompt carries, `prompt + <commit> …`), the commit it returned
 /// (`output`), what its checks said (`verdict`: proved, accepted, rejected; none
 /// when it returned no candidate) and its agree outputs' hashes (`behavior`).
-fn agent_process_record(mut facts: serde_json::Value, candidate: Option<&Candidate>, context: &[String]) -> serde_json::Value {
-    let verdict = candidate.map(|c| if !c.accepted { "rejected" } else if c.proved { "proved" } else { "accepted" });
+fn agent_process_record(mut facts: serde_json::Value, candidate: Option<&Candidate>, context: &[String], spec: bool) -> serde_json::Value {
+    // A spec candidate runs no tests: proved when its spec verifies alone.
+    let verdict = candidate.map(|c| if spec { if c.proved { "proved" } else { "rejected" } } else if !c.accepted { "rejected" } else if c.proved { "proved" } else { "accepted" });
     let behavior = candidate.filter(|c| !c.out.is_empty()).map(|c| c.out.iter().map(|h| h.0.to_string()).collect::<Vec<_>>().join(","));
     facts["context"] = if context.is_empty() { "prompt".to_string() } else { format!("prompt + {}", context.join(" ")) }.into();
     facts["output"] = candidate.map(|c| c.commit.iter().collect::<String>()).into();
@@ -3522,6 +3552,16 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
                 }
             }
         }
+        Kind::Spec { files, .. } => {
+            let files: Vec<String> = files.iter().map(|f| f.iter().collect()).collect();
+            // Verus on the spec's files alone: what proves a spec candidate.
+            proved = stands_alone(m, &commit, &files, &format!("{search}.{index}"), trace).is_ok();
+            // The whole kernel's verify, as information for the proposal: what still proves with it.
+            holding(|| for (k, v) in config.checks.verify.iter().enumerate() { run_check(config, &on, &cdir, build, v, &trace.join(format!("kernel-{k}"))); });
+            accepted = false;
+            out = surface_hashes(&surface_change(root, start, &commit, &files));
+            measured = true;
+        }
         Kind::Queue { .. } => {
             // Only the queue changed: trunk's verdicts stand; the lines must parse.
             accepted = queue_accepted(root, start, &commit);
@@ -3568,6 +3608,303 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
         diff,
     })
 }
+
+// ── the spec search ─────────────────────────────────────
+
+/// The spec's files at commit: the files under the check paths that are Rust
+/// with a `verus!` block (as `bon account` calls a file proven), sorted.
+fn spec_files_at(root: &std::path::Path, paths: &[String], commit: &str) -> Vec<String> {
+    let mut args = vec!["ls-tree", "-r", "--name-only", commit, "--"];
+    args.extend(paths.iter().map(|p| p.as_str()));
+    let mut files: Vec<String> = git(root, &args).unwrap_or_default().lines().filter(|f| f.ends_with(".rs"))
+        .filter(|f| git(root, &["show", &format!("{commit}:{f}")]).is_ok_and(|t| t.lines().any(|l| l.trim_start().starts_with("verus!"))))
+        .map(String::from).collect();
+    files.sort();
+    files.dedup();
+    files
+}
+
+/// The crate in which the spec stands alone, as a commit made of git objects
+/// alone, so the same files make the same bytes: commit's Cargo.toml reduced
+/// to its package's name, version, edition and metadata, its dependencies
+/// (all three kinds), lints and patches, so its Cargo.lock still holds;
+/// that Cargo.lock; and a src/lib.rs that declares the spec's files and
+/// nothing else, each src/<name>.rs as commit holds it.
+fn alone_commit(root: &std::path::Path, commit: &str, files: &[String]) -> Result<String, String> {
+    let run = |args: &[&str], input: Option<&str>| -> Result<String, String> {
+        let mut c = Command::new("git").args(args).current_dir(root)
+            .env("GIT_AUTHOR_NAME", "bon").env("GIT_AUTHOR_EMAIL", "bon@localhost").env("GIT_AUTHOR_DATE", "1970-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_NAME", "bon").env("GIT_COMMITTER_EMAIL", "bon@localhost").env("GIT_COMMITTER_DATE", "1970-01-01T00:00:00Z")
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+        c.stdin.take().ok_or("git: no stdin")?.write_all(input.unwrap_or("").as_bytes()).map_err(|e| e.to_string())?;
+        let out = c.wait_with_output().map_err(|e| e.to_string())?;
+        if !out.status.success() { return Err(format!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim())); }
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let blob = |text: &str| run(&["hash-object", "-w", "--stdin"], Some(text));
+    // The blob commit holds at path, if any.
+    let held = |path: &str| git(root, &["rev-parse", &format!("{commit}:{path}")]).ok();
+    let manifest: toml::Table = toml::from_str(&git(root, &["show", &format!("{commit}:Cargo.toml")])?).map_err(|e| format!("Cargo.toml: {e}"))?;
+    let mut package = toml::Table::new();
+    for key in ["name", "version", "edition", "metadata"] {
+        if let Some(v) = manifest.get("package").and_then(|p| p.get(key)) { package.insert(key.into(), v.clone()); }
+    }
+    let mut alone = toml::Table::new();
+    alone.insert("package".into(), toml::Value::Table(package));
+    for key in ["dependencies", "dev-dependencies", "build-dependencies", "lints", "patch"] {
+        if let Some(v) = manifest.get(key) { alone.insert(key.into(), v.clone()); }
+    }
+    let cargo = toml::to_string(&alone).map_err(|e| e.to_string())?;
+    let (mut lib, mut src) = (String::new(), Vec::new());
+    for f in files {
+        let name = f.strip_prefix("src/").and_then(|n| n.strip_suffix(".rs")).filter(|n| !n.contains('/') && !["lib", "main"].contains(n))
+            .ok_or_else(|| format!("{f}: each of the spec's files must be src/<name>.rs, a module of the crate's lib"))?;
+        lib.push_str(&format!("pub mod {name};\n"));
+        src.push(format!("100644 blob {}\t{name}.rs", held(f).ok_or_else(|| format!("{f}: not in {commit}"))?));
+    }
+    src.push(format!("100644 blob {}\tlib.rs", blob(&lib)?));
+    src.sort_by(|a, b| a.split('\t').nth(1).cmp(&b.split('\t').nth(1)));
+    let src = run(&["mktree"], Some(&(src.join("\n") + "\n")))?;
+    let mut top = vec![format!("100644 blob {}\tCargo.toml", blob(&cargo)?)];
+    if let Some(lock) = held("Cargo.lock") { top.insert(0, format!("100644 blob {lock}\tCargo.lock")); }
+    top.push(format!("040000 tree {src}\tsrc"));
+    let tree = run(&["mktree"], Some(&(top.join("\n") + "\n")))?;
+    run(&["commit-tree", &tree, "-m", "the spec alone"], None)
+}
+
+/// The crate in which commit's spec stands alone (`alone_commit`), its spec's
+/// files found under paths, the check paths: for a check that a project's
+/// spec does.
+pub fn spec_alone_commit(root: &std::path::Path, paths: &[String], commit: &str) -> Result<String, String> {
+    alone_commit(root, commit, &spec_files_at(root, paths, commit))
+}
+
+/// Whether the spec's files verify alone at commit: each `checks.verify`
+/// command in the crate `alone_commit` makes, as a check slot's user, in a
+/// clone of trunk's build, each logged as `verify-K` under logs. Err names
+/// the file and the first error when one does not.
+fn stands_alone(m: &Manifest, commit: &str, files: &[String], name: &str, logs: &std::path::Path) -> Result<(), String> {
+    let (config, root) = (&m.config, &m.root);
+    let alone = alone_commit(root, commit, files)?;
+    let dir = scratch(&format!("{name}.alone/{}", repository_name(root)));
+    check_directory(root, &alone, &dir)?;
+    let build = named_build(&format!("{name}.alone.build/build"), Start::Trunk);
+    let on = On::commit(root, &alone);
+    traced(logs, std::fs::create_dir_all(logs));
+    let failed = holding(|| config.checks.verify.iter().enumerate().find_map(|(k, v)| {
+        let log = logs.join(format!("verify-{k}"));
+        (!run_check(config, &on, &dir, &build, v, &log).0).then(|| (v.clone(), std::fs::read_to_string(&log).unwrap_or_default()))
+    }));
+    remove_build(config, &build);
+    let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
+    let _ = std::fs::remove_dir_all(&dir);
+    let Some((command, log)) = failed else { return Ok(()) };
+    let lines: Vec<&str> = log.lines().collect();
+    let at = lines.iter().position(|l| l.starts_with("error"));
+    let error = at.map_or("it did not finish", |k| lines[k]);
+    let file = at.and_then(|k| lines[k..].iter().find_map(|l| l.trim_start().strip_prefix("--> ")))
+        .map(|w| w.split(':').next().unwrap_or(w).to_string()).unwrap_or_else(|| files.join(", "));
+    Err(format!("{file}: does not verify alone ({command}): {error}"))
+}
+
+/// One surface item of a spec file: its kind and name, its text as written
+/// (its /// lines first), its text as compared (no comments, no layout; a
+/// proof's contract without its body), and its first doc sentence.
+#[derive(Clone)]
+struct Item { kind: &'static str, name: String, written: String, compared: String, doc: String }
+
+/// Brackets opened minus closed on a line ({, ( and [), outside strings,
+/// chars and a trailing comment.
+fn braces(line: &str) -> i32 {
+    let (mut depth, mut chars) = (0, line.chars().peekable());
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => { while let Some(d) = chars.next() { if d == '\\' { chars.next(); } else if d == '"' { break; } } }
+            '\'' => {
+                // A char literal ('x' or '\x'); a lifetime has no closing quote.
+                let rest: Vec<char> = chars.clone().take(3).collect();
+                if rest.get(1) == Some(&'\'') { chars.next(); chars.next(); }
+                else if rest.first() == Some(&'\\') && rest.get(2) == Some(&'\'') { chars.next(); chars.next(); chars.next(); }
+            }
+            '/' if chars.peek() == Some(&'/') => break,
+            '{' | '(' | '[' => depth += 1,
+            '}' | ')' | ']' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth
+}
+
+/// A doc's first sentence.
+fn sentence(doc: &str) -> String {
+    match doc.find(". ") { Some(k) => doc[..=k].to_string(), None => doc.to_string() }
+}
+
+/// The surface items of a spec file, as Verus expresses them: types (with
+/// their fields and variants), predicates, proofs (their contracts),
+/// transitions, init, properties, invariants, the state's fields, and the
+/// methods of a trait (the gates). Proof bodies and impl blocks are not
+/// surface: they are an agent's own words.
+fn surface(text: &str) -> Vec<Item> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut items = Vec::new();
+    let (mut doc, mut invariant) = (Vec::<String>::new(), false);
+    let (mut trait_depth, mut fields_depth) = (None::<i32>, None::<i32>);
+    let (mut depth, mut i) = (0i32, 0usize);
+    let word = |rest: &str| rest.trim_start().split(|c: char| !(c.is_alphanumeric() || c == '_')).next().unwrap_or("").to_string();
+    let after = |t: &str, key: &str| word(t.split(key).nth(1).unwrap_or(""));
+    while i < lines.len() {
+        let t = lines[i].trim();
+        if trait_depth.is_some_and(|d| depth <= d) { trait_depth = None; }
+        if fields_depth.is_some_and(|d| depth <= d) { fields_depth = None; }
+        if let Some(d) = t.strip_prefix("///") { doc.push(d.trim().to_string()); i += 1; continue; }
+        if t == "#[invariant]" { invariant = true; i += 1; continue; }
+        // An inductive proof or an impl block: skipped whole.
+        if t.starts_with("#[inductive") || t.starts_with("impl ") || t.starts_with("impl<") {
+            let (start, mut j, mut opened) = (depth, i, false);
+            if t.starts_with("#[") { j += 1; }
+            while j < lines.len() {
+                depth += braces(lines[j]);
+                opened |= lines[j].contains('{');
+                if opened && depth <= start { break; }
+                j += 1;
+            }
+            depth = start;
+            doc.clear(); invariant = false; i = j + 1;
+            continue;
+        }
+        let item: Option<(&'static str, String)> = if fields_depth.is_some() {
+            t.split("pub ").nth(1).filter(|r| r.contains(':')).map(|r| ("field", word(r)))
+        } else if t.starts_with("#[") {
+            i += 1; continue;
+        } else if let Some(r) = ["pub struct ", "pub enum ", "pub type "].iter().find_map(|k| t.strip_prefix(k)) {
+            Some(("type", word(r)))
+        } else if t.contains("spec fn ") && ["pub", "spec", "open", "closed"].iter().any(|k| t.starts_with(k)) {
+            Some(("predicate", after(t, "spec fn ")))
+        } else if trait_depth.is_some() && (t.starts_with("fn ") || t.starts_with("proof fn ")) {
+            Some(("gate", after(t, "fn ")))
+        } else if t.contains("proof fn ") && (t.starts_with("pub") || t.starts_with("proof")) {
+            Some(("proof", after(t, "proof fn ")))
+        } else if let Some(k) = ["transition!{", "init!{", "property!{"].iter().find(|k| t.starts_with(**k)) {
+            Some((match *k { "transition!{" => "transition", "init!{" => "init", _ => "property" }, word(&t[k.len()..])))
+        } else if invariant && t.contains("fn ") {
+            Some(("invariant", after(t, "fn ")))
+        } else { None };
+        let Some((kind, name)) = item else {
+            if t.starts_with("pub trait ") { trait_depth = Some(depth); }
+            if t.starts_with("fields") && t.contains('{') { fields_depth = Some(depth); }
+            depth += braces(lines[i]);
+            if !t.is_empty() { doc.clear(); }
+            invariant = false;
+            i += 1;
+            continue;
+        };
+        // The item: to where its brackets close, past an opened body or at its ; or ,.
+        let (start, mut j, mut opened) = (depth, i, false);
+        loop {
+            depth += braces(lines[j]);
+            opened |= lines[j].contains('{');
+            let end = lines[j].trim_end();
+            if kind == "field" || (depth <= start && (opened || end.ends_with(';') || end.ends_with(','))) { break; }
+            if j + 1 >= lines.len() { break; }
+            j += 1;
+        }
+        depth = start;
+        let body: Vec<&str> = lines[i..=j].iter().copied().filter(|l| !l.trim_start().starts_with("//")).collect();
+        let mut compared = body.join(" ").split_whitespace().collect::<Vec<_>>().join(" ");
+        if kind == "proof" { if let Some(k) = compared.find('{') { compared.truncate(k); } }
+        let written = doc.iter().map(|d| format!("/// {d}")).chain(lines[i..=j].iter().map(|l| l.to_string())).collect::<Vec<_>>().join("\n");
+        items.push(Item { kind, name, written, compared: compared.trim().to_string(), doc: sentence(&doc.join(" ")) });
+        doc.clear();
+        invariant = false;
+        i = j + 1;
+    }
+    items
+}
+
+/// The named members of a type item: each field and variant, with its doc's first sentence.
+fn members(item: &Item) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut doc = Vec::new();
+    for l in item.written.lines().skip_while(|l| l.trim_start().starts_with("///")).skip(1) {
+        let t = l.trim();
+        if let Some(d) = t.strip_prefix("///") { doc.push(d.trim().to_string()); continue; }
+        let name: String = t.trim_start_matches("pub ").chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+        if !name.is_empty() && !t.starts_with('}') { out.push((name, sentence(&doc.join(" ")))); }
+        doc.clear();
+    }
+    out
+}
+
+/// What a spec candidate changed at the surface: each item, by its file,
+/// kind and name, that it adds, removes or changes, with its two versions as
+/// compared and as written (None where absent), in key order.
+fn surface_change(root: &std::path::Path, base: &str, commit: &str, files: &[String]) -> Vec<(String, &'static str, Option<Item>, Option<Item>)> {
+    let read = |at: &str, f: &str| -> Vec<(String, Item)> {
+        git(root, &["show", &format!("{at}:{f}")]).map(|t| surface(&t)).unwrap_or_default().into_iter()
+            .map(|it| (format!("{f}: {} {}", it.kind, it.name), it)).collect()
+    };
+    let mut keys = std::collections::BTreeMap::<String, (Option<Item>, Option<Item>)>::new();
+    for f in files {
+        for (k, it) in read(base, f) { keys.entry(k).or_default().0 = Some(it); }
+        for (k, it) in read(commit, f) { keys.entry(k).or_default().1 = Some(it); }
+    }
+    keys.into_iter().filter_map(|(k, (a, b))| {
+        let how = match (&a, &b) {
+            (None, Some(_)) => "adds",
+            (Some(_), None) => "removes",
+            (Some(x), Some(y)) if x.compared != y.compared => "changes",
+            _ => return None,
+        };
+        Some((k, how, a, b))
+    }).collect()
+}
+
+/// A spec candidate's behavior: a hash of each surface change, in key order.
+fn surface_hashes(change: &[(String, &'static str, Option<Item>, Option<Item>)]) -> Vec<Hash> {
+    change.iter().map(|(k, how, _, b)| Hash(hash(&format!("{k}\n{how}\n{}", b.as_ref().map_or("", |i| i.compared.as_str()))))).collect()
+}
+
+/// The kernel's functions that name one of names, by file and name, each
+/// with whether Verus still proves it with this change, from the whole
+/// kernel's verify log: "still proves", "fails", or, when the crate did not
+/// build, "not built". The kernel's files: the proven files that are not the spec's.
+fn dependents(root: &std::path::Path, commit: &str, files: &[String], names: &[String], log: &str) -> Vec<(String, String, &'static str)> {
+    let built = log.contains("verification results");
+    let errors: Vec<(String, usize)> = log.lines().filter_map(|l| l.trim_start().strip_prefix("--> "))
+        .filter_map(|w| { let mut p = w.split(':'); Some((p.next()?.to_string(), p.next()?.parse().ok()?)) }).collect();
+    let kernel: Vec<String> = git(root, &["ls-tree", "-r", "--name-only", commit]).unwrap_or_default().lines()
+        .filter(|f| f.ends_with(".rs") && !files.iter().any(|s| s == f))
+        .filter(|f| git(root, &["show", &format!("{commit}:{f}")]).is_ok_and(|t| t.lines().any(|l| l.trim_start().starts_with("verus!"))))
+        .map(String::from).collect();
+    let named = |text: &str, n: &str| text.match_indices(n).any(|(k, _)| {
+        let ok = |c: Option<char>| c.is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+        ok(text[..k].chars().last()) && ok(text[k + n.len()..].chars().next())
+    });
+    let mut out = Vec::new();
+    for f in &kernel {
+        let text = git(root, &["show", &format!("{commit}:{f}")]).unwrap_or_default();
+        let lines: Vec<&str> = text.lines().collect();
+        // Each function, from its fn line to the next.
+        let starts: Vec<(usize, String)> = lines.iter().enumerate().filter_map(|(k, l)| {
+            let t = l.trim_start();
+            let rest = ["pub fn ", "fn ", "pub proof fn ", "proof fn ", "pub open spec fn ", "pub closed spec fn ", "spec fn ", "open spec fn "].iter().find_map(|p| t.strip_prefix(p))?;
+            Some((k, rest.split(|c: char| !(c.is_alphanumeric() || c == '_')).next()?.to_string()))
+        }).collect();
+        for (n, (k, name)) in starts.iter().enumerate() {
+            let end = starts.get(n + 1).map_or(lines.len(), |s| s.0);
+            let body = lines[*k..end].join("\n");
+            if !names.iter().any(|x| named(&body, x)) { continue; }
+            let status = if !built { "not built" } else if errors.iter().any(|(e, l)| e == f && (*k + 1..=end).contains(l)) { "fails" } else { "still proves" };
+            out.push((f.clone(), name.clone(), status));
+        }
+    }
+    out
+}
+
+/// A code block of item text, fenced.
+fn fenced(text: &str) -> String { format!("```rust\n{text}\n```\n") }
+
 
 /// A compaction candidate's tests still reject every counterexample. The landed
 /// tests are the files under the counterexample `tests` paths on trunk
@@ -3812,6 +4149,173 @@ pub fn parse_cue(t: &str) -> Option<u64> {
     let secs = parts.iter().fold(0, |a, p| a * 60 + p);
     Some(secs * 1000 + ms.parse::<u64>().ok()?)
 }
+
+verus! {
+
+/// The spec's files at trunk's head, once they stand alone there: what a spec
+/// search may change. Refused, before any search, without a `[searches]
+/// spec` entry, without a spec file, or when they do not verify alone.
+#[verifier::external_body]
+pub fn spec_files(m: &Manifest, head: &Commit) -> (r: Result<Vec<Path>, String>) {
+    if m.config.searches.spec.is_none() { return Err("bon.toml's [searches] has no spec entry: add spec = { role = \"…\", n = [4, 6] }".into()); }
+    let h: String = head.iter().collect();
+    let files = spec_files_at(&m.root, &m.config.checks.paths, &h);
+    if files.is_empty() { return Err("no spec file: no check path holds a Rust file with a verus! block".into()); }
+    stands_alone(m, &h, &files, "trunk", &trace_dir(&m.root).join("spec-alone"))
+        .map_err(|e| format!("trunk's spec does not stand alone, so no spec search can be judged: {e}"))?;
+    Ok(files.iter().map(|f| f.chars().collect()).collect())
+}
+
+/// bon spec's proposal for queue id, in its own directory beside the queue's
+/// proposals, `spec-<id>/`: `review.md`, the review form engineer reads first
+/// (new words, decisions, reach, scenarios, in plain words, no diff); one
+/// patch per behavior beside it (`<k>.patch`, a plain diff `git apply` takes,
+/// so the commit is engineer's); and `proposal.json`, which the proposal
+/// interrupt reads. The kernel decides which candidates are verified; this
+/// groups them by `out`, their surface change. Returns the review's path.
+#[verifier::external_body]
+pub fn spec_proposal(m: &Manifest, s: &Search, id: u64) -> (r: Result<String, String>) {
+    let root = &m.root;
+    let text = |v: &[char]| v.iter().collect::<String>();
+    let Kind::Spec { goal, files } = &s.kind else { return Err("not a spec search".into()) };
+    let (intent, files): (String, Vec<String>) = (text(goal), files.iter().map(|f| text(f)).collect());
+    let base = text(&s.base);
+    let verified: Vec<(usize, &Candidate)> = s.results.iter().enumerate()
+        .filter_map(|(i, r)| r.as_ref().filter(|c| crate::exec::verified(s, c)).map(|c| (i, c))).collect();
+    // Behaviors, in the order of their first agent process.
+    let mut behaviors: Vec<(Vec<Hash>, Vec<usize>)> = Vec::new();
+    for (i, c) in &verified {
+        match behaviors.iter_mut().find(|(out, _)| out.iter().map(|h| h.0).eq(c.out.iter().map(|h| h.0))) {
+            Some(b) => b.1.push(*i),
+            None => behaviors.push((c.out.clone(), vec![*i])),
+        }
+    }
+    let commit_of = |i: usize| s.results[i].as_ref().map_or(String::new(), |c| text(&c.commit));
+    let changes: Vec<Vec<(String, &'static str, Option<Item>, Option<Item>)>> = behaviors.iter().map(|(_, is)| surface_change(root, &base, &commit_of(is[0]), &files)).collect();
+    let at = format!("{BON}/traces/proposals/spec-{id}");
+    let dir = root.join(&at);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let name = |k: usize| format!("{}.patch", k + 1);
+    let who = |is: &[usize]| format!("{} agent process{} ({})", is.len(), if is.len() == 1 { "" } else { "es" }, is.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", "));
+    let mut patches = Vec::new();
+    for (k, (_, is)) in behaviors.iter().enumerate() {
+        let mut args = vec!["diff".to_string(), base.clone(), commit_of(is[0]), "--".into()];
+        args.extend(files.iter().cloned());
+        let diff = git(root, &args.iter().map(String::as_str).collect::<Vec<_>>())?;
+        std::fs::write(dir.join(name(k)), diff + "\n").map_err(|e| e.to_string())?;
+        patches.push(format!("{at}/{}", name(k)));
+    }
+    let mut md = format!("# Proposal: queue {id}, a spec change\n\n> {intent}\n\n");
+    md.push_str(&format!("{} agent processes each proposed a spec change; {} verified (the spec verifies alone, and each changed only the spec's files, {}). \
+        They group into {} behavior{} by the surface items they change. Nothing was pushed.\n\n",
+        s.n, verified.len(), files.join(", "), behaviors.len(), if behaviors.len() == 1 { "" } else { "s" }));
+    md.push_str(&format!("To accept behavior k: `git apply {at}/k.patch`, delete line {id} of `{QUEUE}`, \
+        and commit with the trailer `Source: queue {id}`. To accept none: `git commit --allow-empty -m 'spec: not queue {id}' -m 'Source: queue {id}'`.\n\n"));
+
+    // New words: identifiers new to the surface, each with the sentence each behavior gave it.
+    md.push_str("## New words\n\n");
+    // (word, each agent process's sentence for it)
+    let mut words: std::collections::BTreeMap<String, Vec<(usize, String)>> = Default::default();
+    for (i, _) in &verified {
+        let k = *i;
+        for (_, how, a, b) in &surface_change(root, &base, &commit_of(*i), &files) {
+            let Some(b) = b else { continue };
+            if *how == "adds" { words.entry(format!("`{}` ({})", b.name, b.kind)).or_default().push((k, b.doc.clone())); }
+            if b.kind == "type" {
+                let old: Vec<String> = a.as_ref().map(|a| members(a).into_iter().map(|m| m.0).collect()).unwrap_or_default();
+                for (member, doc) in members(b).into_iter().filter(|m| !old.contains(&m.0)) {
+                    words.entry(format!("`{}.{member}`", b.name)).or_default().push((k, doc));
+                }
+            }
+        }
+    }
+    if words.is_empty() { md.push_str("None: no identifier is new to the surface.\n\n"); }
+    for (w, said) in &words {
+        let mut sentences: Vec<(String, Vec<usize>)> = Vec::new();
+        for (i, d) in said { match sentences.iter_mut().find(|x| x.0 == *d) { Some(x) => x.1.push(*i), None => sentences.push((d.clone(), vec![*i])) } }
+        for (d, is) in sentences {
+            md.push_str(&format!("- {w}, as {} wrote it: {}\n", who(&is), if d.is_empty() { "(no sentence given)".to_string() } else { d }));
+        }
+    }
+
+    // Decisions: each item the behaviors wrote differently, or one wrote and another did not.
+    md.push_str("\n## Decisions\n\nA split is an item the verified agent processes wrote differently. bon compares text, without docs, comments or layout, \
+        so two sides may still mean the same: that is for you to judge.\n\n");
+    let keys: std::collections::BTreeSet<String> = changes.iter().flat_map(|c| c.iter().map(|x| x.0.clone())).collect();
+    let mut n = 0;
+    for key in &keys {
+        // Each side: what the behavior's version is (its compared text, or unchanged), and which behaviors hold it.
+        let mut sides: Vec<(Option<&Item>, &'static str, Vec<usize>)> = Vec::new();
+        for (k, change) in changes.iter().enumerate() {
+            let mine = change.iter().find(|x| &x.0 == key);
+            let (version, how) = match mine { Some((_, how, _, b)) => (b.as_ref(), *how), None => (None, "leaves") };
+            match sides.iter_mut().find(|x| x.1 == how && x.0.map(|i| &i.compared) == version.map(|i| &i.compared)) {
+                Some(x) => x.2.push(k),
+                None => sides.push((version, how, vec![k])),
+            }
+        }
+        if sides.len() < 2 { continue; }
+        n += 1;
+        md.push_str(&format!("{n}. {key}:\n"));
+        for (side, (version, how, ks)) in sides.iter().enumerate() {
+            let count: usize = ks.iter().map(|k| behaviors[*k].1.len()).sum();
+            let label = format!("{} — behavior{} {}, {count} agent process{}", if side == 0 { "either" } else { "or" },
+                if ks.len() == 1 { "" } else { "s" }, ks.iter().map(|k| (k + 1).to_string()).collect::<Vec<_>>().join(", "), if count == 1 { "" } else { "es" });
+            match (how, version) {
+                (&"leaves", _) => md.push_str(&format!("   - {label}: leaves it as trunk has it\n")),
+                (&"removes", _) => md.push_str(&format!("   - {label}: removes it\n")),
+                (_, Some(i)) => md.push_str(&format!("   - {label}: {}\n\n{}\n", if *how == "adds" { "adds it" } else { "changes it to" }, fenced(&i.written).lines().map(|l| format!("     {l}")).collect::<Vec<_>>().join("\n"))),
+                _ => {}
+            }
+        }
+        // The same words in another order: likely the same meaning.
+        let tokens = |i: &Item| { let mut t: Vec<String> = i.compared.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| !w.is_empty()).map(String::from).collect(); t.sort(); t };
+        let versions: Vec<Vec<String>> = sides.iter().filter_map(|x| x.0.map(tokens)).collect();
+        if versions.len() == sides.len() && versions.windows(2).all(|w| w[0] == w[1]) {
+            md.push_str("   These sides use the same words in another order: they may well mean the same.\n");
+        }
+        md.push('\n');
+    }
+    if n == 0 { md.push_str("None: every verified agent process made the same surface change.\n\n"); }
+
+    // Reach, per behavior: what it changes in full, the kernel's functions that name it, and the rest.
+    md.push_str("## Reach\n\n");
+    let surface_count: usize = files.iter().map(|f| git(root, &["show", &format!("{base}:{f}")]).map(|t| surface(&t).len()).unwrap_or(0)).sum();
+    for (k, (_, is)) in behaviors.iter().enumerate() {
+        md.push_str(&format!("### Behavior {}: {}, `{}`\n\n", k + 1, who(is), patches[k]));
+        for (key, how, _, b) in &changes[k] {
+            md.push_str(&format!("It {how} {key}{}", match b { Some(i) => format!(", which reads:\n\n{}\n", fenced(&i.written)), None => ".\n\n".into() }));
+        }
+        let names: Vec<String> = changes[k].iter().filter_map(|x| x.3.as_ref().or(x.2.as_ref()).map(|i| i.name.clone())).collect();
+        let trace = git(root, &["log", "-1", "--format=%B", &commit_of(is[0])]).unwrap_or_default().lines().find_map(|l| l.strip_prefix("Trace: ").map(|t| root.join(t.trim()))).unwrap_or_default();
+        let log: String = (0..m.config.checks.verify.len()).map(|v| std::fs::read_to_string(trace.join(format!("kernel-{v}"))).unwrap_or_default()).collect();
+        let deps = dependents(root, &commit_of(is[0]), &files, &names, &log);
+        if !log.contains("verification results") {
+            let first = log.lines().find(|l| l.starts_with("error")).unwrap_or("it did not finish");
+            md.push_str(&format!("The kernel does not build with this change ({first}): code must follow it before anything proves.\n"));
+        }
+        let count = |st: &str| deps.iter().filter(|d| d.2 == st).count();
+        md.push_str(&format!("The kernel's functions that name what it changes: {} ({} still prove, {} fail, {} not built).\n",
+            deps.len(), count("still proves"), count("fails"), count("not built")));
+        for (f, name, st) in deps.iter().filter(|d| d.2 != "still proves").take(40) { md.push_str(&format!("- {f}: `{name}` {st}\n")); }
+        let rest = surface_count.saturating_sub(changes[k].iter().filter(|x| x.1 != "adds").count());
+        md.push_str(&format!("\nThe rest of the spec's surface, {rest} item{}, is unchanged.\n\n", if rest == 1 { "" } else { "s" }));
+    }
+    md.push_str("## Scenarios\n\nNone derived: bon does not yet write the cases that tell two specs apart.\n");
+    let review = dir.join("review.md");
+    std::fs::write(&review, &md).map_err(|e| e.to_string())?;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let record = serde_json::json!({
+        "source": format!("queue {id}"), "intent": intent, "files": files, "raised": now, "review": format!("{at}/review.md"),
+        "agent_processes": s.n, "verified": verified.len(), "decisions": n,
+        "behaviors": behaviors.iter().enumerate().map(|(k, (_, is))| serde_json::json!({ "agent_processes": is, "patch": patches[k] })).collect::<Vec<_>>(),
+    });
+    std::fs::write(dir.join("proposal.json"), serde_json::to_string_pretty(&record).unwrap_or_default()).map_err(|e| e.to_string())?;
+    Ok(format!("{at}/review.md"))
+}
+
+} // verus!
 
 #[cfg(test)]
 mod tests {
@@ -5000,6 +5504,49 @@ mod tests {
         // No error block: the output's last lines, bounded.
         let tail = informative(&format!("exit: 101\n--- stdout\n{noise}test result: FAILED\n"));
         assert!(tail.contains("test result: FAILED") && tail.lines().count() <= FAILING_LINES + 2, "{}", tail.lines().count());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_spec_candidate_s_behavior_is_its_surface_change_not_its_wording() {
+        // queue 83: docs, comments and layout do not split; a different text does; a proof's body is not surface.
+        let base = "verus! {\n/// r is the larger.\npub open spec fn is_max(a: u64, r: u64) -> bool { r >= a }\n\npub proof fn p(a: u64)\n    ensures a >= 0,\n{\n    assert(true);\n}\n} // verus!\n";
+        let one = base.replace("/// r is the larger.", "/// r is the larger one.\n// a note");
+        let two = base.replace("{ r >= a }", "{\n    r >= a\n}").replace("assert(true);", "assert(a >= 0);");
+        let three = base.replace("{ r >= a }", "{ a <= r }");
+        let keyed = |t: &str| surface(t).into_iter().map(|i| (format!("{} {}", i.kind, i.name), i.compared)).collect::<Vec<_>>();
+        assert_eq!(keyed(base).iter().map(|k| k.0.clone()).collect::<Vec<_>>(), ["predicate is_max", "proof p"]);
+        assert_eq!(keyed(base), keyed(&one), "a doc and a comment are not surface");
+        assert_eq!(keyed(base), keyed(&two), "nor layout, nor a proof's body");
+        assert_ne!(keyed(base), keyed(&three), "another text is another behavior, even of the same meaning");
+        // The state's fields, a trait's methods, types with their members, and invariants.
+        let machine = "pub struct S {\n    /// The base.\n    pub base: u64,\n}\npub trait Gates {\n    fn g(x: u64) -> (r: bool)\n        ensures r == (x > 0);\n}\ntokenized_state_machine!{ m {\n    fields {\n        #[sharding(variable)] pub n: nat,\n    }\n    #[invariant]\n    pub fn ok(&self) -> bool { self.n >= 0 }\n    #[inductive(t)]\n    fn t_inductive(pre: Self, post: Self) { assert(true); }\n}}\n";
+        let items = surface(machine);
+        assert_eq!(items.iter().map(|i| format!("{} {}", i.kind, i.name)).collect::<Vec<_>>(), ["type S", "gate g", "field n", "invariant ok"]);
+        assert_eq!(members(&items[0]), [("base".to_string(), "The base.".to_string())]);
+    }
+
+    #[test]
+    fn the_spec_alone_is_one_crate_of_the_same_bytes_from_the_same_files() {
+        // queue 83: from the manifest and the spec's files alone; refused for a file that is no module of the lib.
+        let root = std::env::temp_dir().join(format!("bon-alone-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[package]\nname = \"k\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"k\"\npath = \"src/main.rs\"\n\n[dependencies]\nvstd = \"1\"\n\n[package.metadata.verus]\nverify = true\n").unwrap();
+        std::fs::write(root.join("src/spec.rs"), "verus! {}\n").unwrap();
+        std::fs::write(root.join("src/gates.rs"), "verus! {}\n").unwrap();
+        std::fs::write(root.join("src/exec.rs"), "fn f() {}\n").unwrap();
+        git(&root, &["init", "-q"]).unwrap();
+        git(&root, &["add", "-A"]).unwrap();
+        git(&root, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "c"]).unwrap();
+        let files = ["src/gates.rs".to_string(), "src/spec.rs".to_string()];
+        let a = alone_commit(&root, "HEAD", &files).unwrap();
+        assert_eq!(alone_commit(&root, "HEAD", &files).unwrap(), a, "the same files, the same commit");
+        assert_eq!(git(&root, &["show", &format!("{a}:src/lib.rs")]).unwrap(), "pub mod gates;\npub mod spec;");
+        let cargo = git(&root, &["show", &format!("{a}:Cargo.toml")]).unwrap();
+        assert!(cargo.contains("name = \"k\"") && cargo.contains("vstd") && cargo.contains("verify = true") && !cargo.contains("[[bin]]"), "{cargo}");
+        assert!(git(&root, &["show", &format!("{a}:src/exec.rs")]).is_err(), "nothing but the spec's files");
+        assert!(alone_commit(&root, "HEAD", &["checks/x.rs".to_string()]).unwrap_err().contains("must be src/<name>.rs"));
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -16,7 +16,7 @@ export type Hash = string;
 /** A process running as agent that writes one candidate. */
 export interface AgentProcess { search: number; index: number }
 /** What a search is for: its kind, carrying its goal. */
-export type Kind = { queue: { goal: Transcript } } | { code: { goal: Commit } } | { compaction: { goal: Commit; out: Array<Hash> } } | { counterexample: { goal: AgentProcess | null } } | { foil: { goal: AgentProcess; changed: Array<Path> } };
+export type Kind = { queue: { goal: Transcript } } | { code: { goal: Commit } } | { compaction: { goal: Commit; out: Array<Hash> } } | { counterexample: { goal: AgentProcess | null } } | { foil: { goal: AgentProcess; changed: Array<Path> } } | { spec: { goal: Intent; files: Array<Path> } };
 /** One generated change, as trusted code observed it. */
 export interface Candidate { commit: Commit; base: Commit; accepted: boolean; proved: boolean; changed: Array<Path>; out: Array<Hash>; intents: Array<[Cue, Intent]>; accepts: Array<[number, boolean]>; accepts_foils: Array<[number, boolean]>; rejects_counterexamples: boolean; measured: boolean; added: Array<Path>; rank: number; diff: number }
 /** One search, once every agent process has returned: `results[i]` is what agent process i returned. */
