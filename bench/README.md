@@ -78,7 +78,13 @@ small, so a warm check is seconds.
 | `PROJECT` | `kernel` | `kernel` (bench/sandbox) or `bon` (bon's own source) |
 | `BON` | `target/debug/bon` | the binary (built first when unset) |
 
-bon's pool knobs pass through the environment (see `src/trusted.rs`, `Pools`).
+| `GENERATION`, `CHECKS`, `CHECK_THREADS`, `CORES`, `MEMORY_GB` | unset | the host file's pool keys for this run |
+
+bon reads a host file of the run's own (`BON_HOST`, in the sandbox):
+`/etc/bon/host.toml` with the run's verdict cache, `cleanup = "own"`, and
+those keys, so a run can size the pools as another machine's (`CORES=12
+MEMORY_GB=16`: a 24 GB, 12-core laptop with 16 GB free). The rows below that
+name `BON_*` variables are from before, when bon read them from its environment.
 
 ## Results
 
@@ -107,3 +113,49 @@ threads, 64 sessions. "Every tree distinct" is `VARIANTS=32 TEST_VARIANTS=4`:
 the warm builds and pools without the cache's help. `bon counterexample` on
 the pushed trunk: 59 s / 70 CPU-s / 2.3 GB before, 69 s / 65 CPU-s / 2.0 GB
 after (its few checks now get 2 threads each, not the machine).
+
+## Results on the merged branch
+
+Same host and settings, later the same day. "merged" is c9578f5 (the judge's
+fresh build); "lazy" is d93cd48 (builds cloned only when a cargo runs). K=0
+is a stub that never runs cargo itself: the one-shot sample's shape. `bon
+code` row; CPU is `cpu_rusage`; checks are executed / cached.
+
+| config | width | K | build | wall s | CPU s | peak RSS MB | checks |
+|---|---|---|---|---|---|---|---|
+| kernel | 8 | 1 | merged | 167 | 131 | 1985 | 38 / 104 |
+| kernel | 32 | 1 | merged | 207 | 209 | 2017 | 38 / 392 |
+| kernel | 128 | 1 | merged | 361 | 436 | 1990 | 38 / 1544 |
+| kernel | 500 | 1 | merged | 957 | 1085 | 1975 | 38 / 6008 |
+| kernel | 32 | 0 | merged | 155 | 231 | 2046 | 38 / 392 |
+| kernel | 128 | 0 | merged | 214 | 633 | 1971 | 38 / 1544 |
+| kernel | 500 | 0 | merged | 453 | 1567 | 1944 | 38 / 6008 |
+| kernel | 32 | 1 | lazy | 206 | 156 | 2010 | 38 / 392 |
+| kernel | 500 | 0 | lazy | 426 | 369 | 1918 | 38 / 6008 |
+| kernel | 500 | 0 | lazy, generation 500 | 252 | 392 | 5254 | 38 / 6008 |
+| kernel, every tree distinct | 500 | 0 | lazy, generation 500 | 2895 | 3502 | 5790 | 6010 / 36 |
+| bon | 8 | 1 | lazy | 337 | 1047 | 4283 | 38 / 104 |
+| bon | 32 | 1 | lazy | 495 | 1780 | 4672 | 38 / 392 |
+| bon | 128 | 1 | lazy | 1104 | 4981 | 5551 | 38 / 1544 |
+
+Where width 500 K=1's time goes (`timeline.py`): of its 798 s code search,
+the median agent process waits 333 s for one of the 64 generation slots and
+spends 52 s (p90 137 s) in its own two cargo runs, mostly queued for one of
+7 check slots; its judge, answered by the cache, takes 0.3 s.
+
+Every tree distinct (500 one-shot samples, generation 500): the check pool was
+full 81% of the code search and 93% of the counterexample search (whose
+verdict matrix is 4 tests × 500 candidates), yet 1.9 of 14 cores were busy on
+average: the checks' 3502 CPU-s over 14 cores is 250 s, against 2895 s of
+wall. These checks are latency, not compute (0.6 CPU-s each): a pool sized
+`cores / check_threads` is the bottleneck, not the machine.
+
+What an agent process costs bon itself (`forks.py`, K=0 width 32, per agent
+process): merged, 98 processes and 7.8 s, of which 2.5 build clones (`cp -cR`
+as agent) 5.5 s and 8 `rm -rf` 1.1 s; lazy, 87 processes and 1.9 s, the rest
+chmod/chgrp/git/ps forks of ~0.02–0.1 s each.
+
+Simulated memory (`BON_CORES=12`, `BON_MEMORY_GB` what was free): with 40 GB
+wired by a ballast, 6–7 GB stayed free (other sessions held the rest) and every
+row matched the full machine's within noise, no swap, pressure normal; with
+49.75 GB wired the kernel's pressure went critical and the level was stopped.

@@ -328,7 +328,7 @@ fn background(root: &str) -> Result<(), String> {
     let busy = std::fs::read_dir(&traces).into_iter().flatten().flatten()
         .any(|e| best_of_n::trusted::trace_running(&traces, &e.file_name().to_string_lossy()));
     if busy { println!("busy: a bon command is running here"); return Ok(()); }
-    let jobs = std::fs::read_to_string(best_of_n::trusted::HOST).ok()
+    let jobs = best_of_n::trusted::host_file().ok().and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|d| d.lines().find_map(|l| l.strip_prefix("jobs").and_then(|v| v.trim_start_matches([' ', '=']).trim().parse::<f64>().ok())))
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1.0, |n| (n.get() / 2).max(1) as f64));
     let load: f64 = Command::new("sysctl").args(["-n", "vm.loadavg"]).output().ok()
@@ -708,8 +708,12 @@ const HOST_TEMPLATE: &str = r#"# bon's host file: facts about this host, not abo
 # once (default 64; a session waits on the model). checks: CPU-heavy commands
 # at once, the judge's checks and every cargo an agent process runs (default
 # cores / check_threads, never more than free memory / 1.5 GB). check_threads:
-# threads one check may use (default 2). BON_GENERATION, BON_CHECKS and
-# BON_CHECK_THREADS in bon's environment override them.
+# threads one check may use (default 2). cores and memory_gb: what the default
+# check pool is sized from, this machine's cores and free memory when absent.
+# verdicts: the verdict cache's directory (default /tmp/bon/verdicts). cleanup:
+# "own" removes only a bon process's own working directories when it ends.
+# Another host file (a benchmark's, sized as another machine) is named by
+# BON_HOST: it must be writable by its owner alone, root or the user bon runs as.
 # generation = 64
 # checks = 7
 # check_threads = 2

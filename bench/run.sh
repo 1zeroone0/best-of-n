@@ -20,8 +20,11 @@
 #                  without n [the stub]; e.g. a real one, through bon-sample:
 #                  'name = "claude", model = "claude-haiku-5-5", command = [...]'
 #   CX_HARNESS     the counterexample and foil searches' harness, likewise [the stub]
-# and bon's own pool knobs, passed through: BON_GENERATION, BON_CHECKS,
-# BON_CHECK_THREADS, BON_CORES, BON_MEMORY_GB.
+#   GENERATION, CHECKS, CHECK_THREADS, CORES, MEMORY_GB
+#                  the host file's pool keys, to size the pools as another
+#                  machine's [unset: /etc/bon/host.toml's, then this machine's]
+# bon reads its own host file for the run (BON_HOST): /etc/bon/host.toml with
+# the verdict cache in the sandbox, cleanup = "own", and those keys.
 set -eu
 WIDTH=${1:?usage: run.sh WIDTH [TAG]}
 TAG=${2:-w$WIDTH}
@@ -115,6 +118,29 @@ echo "$remotes"
 if [ "$(echo "$remotes" | awk '{print $2}' | sort -u)" != "$ORIGIN" ]; then echo "refusing: a remote other than $ORIGIN" >&2; exit 1; fi
 if grep -q '^traces' "$WORK/.bon/bon.toml"; then echo "refusing: bon.toml names a traces remote" >&2; exit 1; fi
 
+# The run's host file: the host's, with this run's verdict cache, cleanup of
+# its own directories only, and any pool sizing asked for. Top-level keys go
+# before the first table; a key the host's file sets is replaced.
+HOSTFILE=$SANDBOX/host.toml
+keys="verdicts = \"$SANDBOX/verdicts\"
+cleanup = \"own\""
+for k in generation checks check_threads cores memory_gb; do
+  v=$(eval "echo \${$(echo $k | tr a-z A-Z):-}")
+  if [ -n "$v" ]; then keys="$keys
+$k = $v"; fi
+done
+names=$(echo "$keys" | awk '{print $1}' | paste -s -d '|' -)
+HOST=/etc/bon/host.toml
+first=$(grep -n '^\[' "$HOST" | head -1 | cut -d: -f1)
+first=${first:-$(($(wc -l < "$HOST") + 1))}
+{
+  head -n $((first - 1)) "$HOST" | grep -v -E "^($names)[ =]"
+  printf '%s\n\n' "$keys"
+  tail -n +"$first" "$HOST"
+} > "$HOSTFILE"
+chmod 0644 "$HOSTFILE"
+export BON_HOST=$HOSTFILE
+
 OUT=$BENCH/results-$TAG
 mkdir -p "$OUT"
 run() {
@@ -122,7 +148,7 @@ run() {
   # The isolation gate has failed here for reasons outside bon (another
   # session on the host); it fails before anything runs, so try again.
   for try in 1 2 3; do
-    (cd "$WORK" && BON_CLEANUP=own BON_VERDICTS="$SANDBOX/verdicts" python3 -I "$REPO/bench/measure.py" "$OUT/$name.json" -- "$BON" "$@" > "$OUT/$name.out" 2> "$OUT/$name.err") || true
+    (cd "$WORK" && python3 -I "$REPO/bench/measure.py" "$OUT/$name.json" -- "$BON" "$@" > "$OUT/$name.out" 2> "$OUT/$name.err") || true
     grep -q 'agent is not isolated' "$OUT/$name.err" || break
     echo "isolation gate failed; again in 30s" >&2; sleep 30
   done

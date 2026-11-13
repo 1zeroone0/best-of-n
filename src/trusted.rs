@@ -98,14 +98,35 @@ fn cargo_config_guard(root: &std::path::Path) -> Result<(), String> {
 /// `bon setup` and owned by root: where agent's tools live, and model prices.
 pub const HOST: &str = "/etc/bon/host.toml";
 
+/// The host file bon reads: HOST, or the one BON_HOST names, which describes
+/// this host otherwise (a benchmark's: its own verdict cache, another
+/// machine's sizing). One file either way; nothing else stands beside it. A
+/// named one must be a file only its owner can write, its owner root or the
+/// user bon runs as, so no agent process can change it.
+pub fn host_file() -> Result<PathBuf, String> { checked_host(std::env::var("BON_HOST").ok()) }
+
+fn checked_host(named: Option<String>) -> Result<PathBuf, String> {
+    use std::os::unix::fs::MetadataExt;
+    let Some(p) = named else { return Ok(PathBuf::from(HOST)) };
+    let m = std::fs::metadata(&p).map_err(|e| format!("BON_HOST {p}: {e}"))?;
+    let me = Command::new("id").arg("-u").output().ok().and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok());
+    if !m.is_file() || m.mode() & 0o022 != 0 || !(m.uid() == 0 || Some(m.uid()) == me) {
+        return Err(format!("BON_HOST {p}: must be a file only its owner (root, or you) can write"));
+    }
+    Ok(PathBuf::from(p))
+}
+
+/// The host file's verdict cache and cleanup, for the code that has no manifest at hand.
+static VERDICTS: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+static CLEANUP_OWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Host {
     path: Vec<String>,
     prices: HashMap<String, Price>,
     /// How many model sessions run at once, host-wide; width stays what
-    /// bon.toml says. Default 64 (a session waits on the model); BON_GENERATION
-    /// overrides it.
+    /// bon.toml says. Default 64 (a session waits on the model).
     #[serde(default)]
     generation: Option<usize>,
     /// The generation pool's earlier name, read when `generation` is absent.
@@ -113,13 +134,26 @@ struct Host {
     jobs: Option<usize>,
     /// How many checks run at once, host-wide: the judge's and every cargo an
     /// agent process runs. Default: cores / check_threads, never more than
-    /// free memory / 1.5 GB. BON_CHECKS overrides it.
+    /// free memory / 1.5 GB.
     #[serde(default)]
     checks: Option<usize>,
-    /// Threads one check may use (CARGO_BUILD_JOBS, Verus --num-threads).
-    /// Default 2; BON_CHECK_THREADS overrides it.
+    /// Threads one check may use (CARGO_BUILD_JOBS, Verus --num-threads). Default 2.
     #[serde(default)]
     check_threads: Option<usize>,
+    /// The cores and free memory (GB) the default check pool is sized from:
+    /// this machine's when absent. Set, the pools are sized as another machine's.
+    #[serde(default)]
+    cores: Option<usize>,
+    #[serde(default)]
+    memory_gb: Option<f64>,
+    /// The verdict cache's directory, engineer's alone. Default /tmp/bon/verdicts.
+    #[serde(default)]
+    verdicts: Option<String>,
+    /// Which working directories a bon process removes when it ends: "own", only
+    /// its own (a host shared with other bon processes); default, also those of
+    /// any bon process no longer running.
+    #[serde(default)]
+    cleanup: Option<String>,
     /// The toolchain checks judge with, where no agent process can write it
     /// (/opt/bon, root's all the way up): rustup's home, and a cargo home whose
     /// root is root's, only its caches agent's. Required.
@@ -771,25 +805,31 @@ fn remove_build(config: &Config, d: &std::path::Path) {
 /// process no longer running. Each holds files of two owners: engineer's check
 /// files (with an ACL denying agent) and agent's build output. So: engineer
 /// removes its ACLs, agent removes what it can, engineer removes the rest.
-/// With BON_CLEANUP=own in bon's environment, only this process's own (a host
+/// With `cleanup = "own"` in the host file, only this process's own (a host
 /// shared with other bon processes, as the benchmark's is).
 pub fn cleanup(path: &[String]) {
     let me = std::process::id().to_string();
-    let own = std::env::var("BON_CLEANUP").is_ok_and(|v| v == "own");
+    let own = CLEANUP_OWN.load(std::sync::atomic::Ordering::SeqCst);
     // ps, not kill -0: kill -0 fails on another user's live process (EPERM),
     // which would read as dead.
-    let running = |pid: &str| pid == me || process_running(pid);
+    // Each pid's liveness asked once, not once per directory.
+    let mut alive: HashMap<String, bool> = HashMap::new();
+    let mut gone: Vec<PathBuf> = Vec::new();
     for e in std::fs::read_dir(WORKING_DIRECTORIES).into_iter().flatten().flatten() {
         let name = e.file_name().to_string_lossy().to_string();
         // <pid>.<owner>; <pid>-<name> from before the working directories were 0711.
         let Some(pid) = name.split(['.', '-']).next() else { continue };
-        if !pid.chars().all(|c| c.is_ascii_digit()) || (pid != me && (own || running(pid))) { continue; }
-        let p = e.path();
-        let _ = Command::new("chmod").args(["-R", "-N"]).arg(&p).stderr(Stdio::null()).status();
-        let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&p).stderr(Stdio::null()).status();
+        if !pid.chars().all(|c| c.is_ascii_digit()) { continue; }
+        if pid != me && (own || *alive.entry(pid.to_string()).or_insert_with(|| process_running(pid))) { continue; }
+        gone.push(e.path());
+    }
+    // All of them at once: three processes in all, not three per directory.
+    for chunk in gone.chunks(200) {
+        let _ = Command::new("chmod").args(["-R", "-N"]).args(chunk).stderr(Stdio::null()).status();
+        let _ = Command::new("chmod").args(["-R", "u+w"]).args(chunk).stderr(Stdio::null()).status();
         let _ = Command::new("sudo").args(["-n", "-u", "agent", "env", "-i", &format!("PATH={}", path.join(":")), "rm", "-rf"])
-            .arg(&p).current_dir("/tmp").stderr(Stdio::null()).status();
-        let _ = std::fs::remove_dir_all(&p);
+            .args(chunk).current_dir("/tmp").stderr(Stdio::null()).status();
+        for p in chunk { let _ = std::fs::remove_dir_all(p); }
     }
 }
 
@@ -816,18 +856,15 @@ pub struct Pools { pub generation: usize, pub checks: usize, pub threads: usize 
 impl Default for Pools { fn default() -> Self { Pools { generation: 1, checks: 1, threads: 1 } } }
 
 impl Pools {
-    /// From bon's environment, then the host file, then this machine: BON_GENERATION
-    /// (default 64, or the host's older `jobs`), BON_CHECK_THREADS (default 2),
-    /// BON_CHECKS (default `check_pool`). BON_CORES and BON_MEMORY_GB stand in
-    /// for this machine's cores and free memory, to size the pools as another
-    /// machine would.
-    fn of(host: &Host, env: &dyn Fn(&str) -> Option<String>) -> Pools {
-        let n = |k: &str| env(k).and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| *v >= 1.0);
-        let cores = n("BON_CORES").map_or_else(|| std::thread::available_parallelism().map_or(1, |c| c.get()), |c| c as usize);
-        let threads = n("BON_CHECK_THREADS").map(|t| t as usize).or(host.check_threads).unwrap_or(2).max(1);
-        let memory = || env("BON_MEMORY_GB").and_then(|v| v.trim().parse().ok()).unwrap_or_else(free_memory_gb);
-        let checks = n("BON_CHECKS").map(|c| c as usize).or(host.checks).unwrap_or_else(|| check_pool(cores, memory(), threads)).max(1);
-        let generation = n("BON_GENERATION").map(|g| g as usize).or(host.generation).or(host.jobs).unwrap_or(64).max(1);
+    /// From the host file, then this machine: generation (default 64, or the
+    /// older `jobs`), check_threads (default 2), checks (default `check_pool` of
+    /// the host file's cores and memory_gb, else this machine's).
+    fn of(host: &Host) -> Pools {
+        let cores = host.cores.filter(|c| *c >= 1).unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |c| c.get()));
+        let threads = host.check_threads.unwrap_or(2).max(1);
+        let memory = || host.memory_gb.unwrap_or_else(free_memory_gb);
+        let checks = host.checks.unwrap_or_else(|| check_pool(cores, memory(), threads)).max(1);
+        let generation = host.generation.or(host.jobs).unwrap_or(64).max(1);
         Pools { generation, checks, threads }
     }
 }
@@ -1029,13 +1066,13 @@ fn tree_of(root: &std::path::Path, commit: &str) -> String {
 }
 
 /// The cache of check results: engineer's alone (0700), never agent's.
-/// BON_VERDICTS names another (a benchmark's own, so runs do not share).
+/// The host file's `verdicts` names another (a benchmark's own, so runs do not share).
 /// None, so nothing is cached, if it cannot be made so, or another can write it.
 fn cache_dir() -> Option<PathBuf> {
     static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let d = std::env::var("BON_VERDICTS").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from(WORKING_DIRECTORIES).join("verdicts"));
+        let d = VERDICTS.get().cloned().flatten().unwrap_or_else(|| PathBuf::from(WORKING_DIRECTORIES).join("verdicts"));
         std::fs::create_dir_all(&d).ok()?;
         std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).ok()?;
         // Owned by whoever owns the working directories (engineer), and by no group or other.
@@ -1055,7 +1092,7 @@ fn identity(config: &Config) -> String {
         let version = |tool: &str| Command::new(tool).arg("--version").env_clear().env("PATH", &path)
             .envs(config.toolchain.iter().map(|(k, v)| (k.as_str(), v.as_str()))).stdin(Stdio::null()).output()
             .map_or_else(|e| e.to_string(), |o| String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr));
-        let host = std::fs::read(HOST).unwrap_or_default();
+        let host = host_file().ok().and_then(|p| std::fs::read(p).ok()).unwrap_or_default();
         format!("{id}\0{}\0{}\0{}\0{}\0{}", String::from_utf8_lossy(&host), version("rustc"), version("cargo"), version("verus"), CARGO)
     }).clone()
 }
@@ -1310,16 +1347,20 @@ pub fn manifest(root: &str, commit: &Commit) -> (r: Result<Manifest, String>) {
     let c: String = commit.iter().collect();
     let text = git(&root, &["show", &format!("{c}:{MANIFEST}")]).map_err(|_| format!("no {MANIFEST} at trunk's head; commit one"))?;
     let mut config: Config = toml::from_str(&text).map_err(|e| format!("{MANIFEST}: {e}"))?;
-    let host: Host = toml::from_str(&std::fs::read_to_string(HOST).map_err(|_| format!("no {HOST}; run bon setup"))?)
-        .map_err(|e| format!("{HOST}: {e}; run bon setup"))?;
-    config.pools = Pools::of(&host, &|k| std::env::var(k).ok());
+    let file = host_file()?;
+    let shown = file.display().to_string();
+    let host: Host = toml::from_str(&std::fs::read_to_string(&file).map_err(|_| format!("no {shown}; run bon setup"))?)
+        .map_err(|e| format!("{shown}: {e}; run bon setup"))?;
+    config.pools = Pools::of(&host);
+    let _ = VERDICTS.set(host.verdicts.as_ref().map(PathBuf::from));
+    CLEANUP_OWN.store(host.cleanup.as_deref() == Some("own"), std::sync::atomic::Ordering::SeqCst);
     config.path = host.path;
     config.prices = host.prices;
     config.toolchain = vec![("RUSTUP_HOME".to_string(), host.rustup_home), ("CARGO_HOME".to_string(), host.cargo_home)];
     cargo_config_guard(&root)?;
     for h in config.harness.iter().chain(config.counterexample.harness.iter()) {
         if !is_stub(h) && !config.prices.contains_key(&h.model) {
-            return Err(format!("{HOST}: no price for {}; bon.toml must name canonical model ids", h.model));
+            return Err(format!("{shown}: no price for {}; bon.toml must name canonical model ids", h.model));
         }
     }
     Ok(Manifest { config, root })
@@ -2396,20 +2437,32 @@ mod tests {
     }
 
     #[test]
-    fn the_pools_are_sized_from_the_host_and_overridden_by_the_environment() {
-        let host: Host = toml::from_str("path = []\nrustup_home = \"\"\ncargo_home = \"\"\n[prices]\n").unwrap();
-        let env = |pairs: &'static [(&'static str, &'static str)]| move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string());
+    fn another_host_file_must_be_writable_by_its_owner_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(checked_host(None), Ok(PathBuf::from(HOST)));
+        let p = std::env::temp_dir().join(format!("bon-host-test-{}.toml", std::process::id()));
+        std::fs::write(&p, "path = []\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert_eq!(checked_host(Some(p.to_string_lossy().into())), Ok(p.clone()));
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o664)).unwrap();
+        assert!(checked_host(Some(p.to_string_lossy().into())).is_err());
+        let _ = std::fs::remove_file(&p);
+        assert!(checked_host(Some(p.to_string_lossy().into())).is_err());
+    }
+
+    #[test]
+    fn the_pools_are_sized_from_the_host_file() {
+        let host = |keys: &str| -> Host { toml::from_str(&format!("{keys}\npath = []\nrustup_home = \"\"\ncargo_home = \"\"\n[prices]\n")).unwrap() };
         // queue 26: width stays what bon.toml says; the pools bound what runs at once.
-        // A 24 GB, 12-core laptop with 16 GB free: 6 checks of 2 threads; 64 sessions.
-        assert_eq!(Pools::of(&host, &env(&[("BON_CORES", "12"), ("BON_MEMORY_GB", "16")])), Pools { generation: 64, checks: 6, threads: 2 });
+        // A host file sized as a 24 GB, 12-core laptop with 16 GB free: 6 checks of 2 threads; 64 sessions.
+        assert_eq!(Pools::of(&host("cores = 12\nmemory_gb = 16")), Pools { generation: 64, checks: 6, threads: 2 });
         // Memory binds before cores: 7 GB free holds 4 checks.
-        assert_eq!(Pools::of(&host, &env(&[("BON_CORES", "14"), ("BON_MEMORY_GB", "7")])).checks, 4);
-        // Every knob by the environment; at least one of each.
-        assert_eq!(Pools::of(&host, &env(&[("BON_GENERATION", "500"), ("BON_CHECKS", "3"), ("BON_CHECK_THREADS", "4")])), Pools { generation: 500, checks: 3, threads: 4 });
-        assert_eq!(Pools::of(&host, &env(&[("BON_CORES", "1"), ("BON_MEMORY_GB", "0.5"), ("BON_CHECK_THREADS", "0")])).checks, 1);
-        // The host file's, where the environment says nothing; its older `jobs` is the generation pool.
-        let older: Host = toml::from_str("jobs = 7\nchecks = 5\ncheck_threads = 3\npath = []\nrustup_home = \"\"\ncargo_home = \"\"\n[prices]\n").unwrap();
-        assert_eq!(Pools::of(&older, &env(&[])), Pools { generation: 7, checks: 5, threads: 3 });
+        assert_eq!(Pools::of(&host("cores = 14\nmemory_gb = 7")).checks, 4);
+        // Every knob; at least one of each.
+        assert_eq!(Pools::of(&host("generation = 500\nchecks = 3\ncheck_threads = 4")), Pools { generation: 500, checks: 3, threads: 4 });
+        assert_eq!(Pools::of(&host("cores = 1\nmemory_gb = 0.5\ncheck_threads = 0")).checks, 1);
+        // The older `jobs` is the generation pool.
+        assert_eq!(Pools::of(&host("jobs = 7\nchecks = 5\ncheck_threads = 3")), Pools { generation: 7, checks: 5, threads: 3 });
         assert_eq!(check_pool(14, 40.0, 2), 7);
     }
 
