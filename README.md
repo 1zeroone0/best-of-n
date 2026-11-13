@@ -73,10 +73,11 @@ goes to a private git remote of its own, never this repository.
   takes a slot of the host's check pool and caps threads. A check's result is
   cached by its tree, command, test and toolchain, where only engineer can write.
 - **Trusted, and not isolated:** agent processes all run as one user, so one
-  could write another's working directory, or build directory: a candidate's
-  judge builds in the one its agent process built in, trusting cargo's change
-  detection over what agent wrote there. Isolating them from each other is a
-  reference monitor's job, not bon's.
+  could write another's working directory, or build directory. A candidate's
+  checks build in a fresh clone of trunk's build, never the one its agent
+  process built in, but another candidate's check, running as the same user,
+  could still write there. Isolating them from each other is a reference
+  monitor's job, not bon's.
 - **Next to Rust's types:** types keep a commit from passing as a path; Verus proves
   what a type cannot say, such as "this is the one candidate the spec selects".
 - **Next to Lean:** Lean checks a proof term in a small kernel, about a model of the
