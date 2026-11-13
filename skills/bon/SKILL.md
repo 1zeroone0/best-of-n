@@ -272,7 +272,8 @@ at a time.
 
 | when | run |
 |---|---|
-| see everything | `bon` in a terminal (the view: Project, Spec, Queue, Traces); piped, it prints text; outside every repository, the host: what waits on engineer across repositories, the pools, memory, each bon process, a journal |
+| see everything | `bon` in a terminal (the view: Project, Spec, Queue, Traces; `?` lists its keys); piped, it prints text in the order to read it: trunk and cost, what is pending, what runs now, what ran lately, then the measures and the queue; outside every repository, the host: what waits on engineer across repositories, the pools, memory, each bon process, a journal |
+| what a command takes | `bon <command> --help` (it does nothing else); `bon help` for all of them |
 | engineer dropped a transcript in `<user>/transcripts` | `bon pending` routes it by the host file's `[routes]` into its repository's transcripts directory; commit it there, push, then `bon queue`. One routed nowhere is pending until a route names it or he moves it |
 | the spec, its vocabulary and how it reaches the code | `bon spec`, or `bon spec NAME` for one item |
 | the kernel's types changed | `bon types`; `bon types --check` is a test |
@@ -318,8 +319,10 @@ Read the trace and bring the finding:
   to build or run on the candidates; name the `[counterexample]` setting or
   check at fault, or widen its list.
 - **Every accepted, proved candidate changed a protected file:** search found
-  the change but may not make it. `bon` prints the diff; review it, apply it,
-  `bon check`, run again. Bring engineer only what you cannot resolve.
+  the change but may not make it. Under the blocked goal, `bon` prints the
+  diff (a fact for you, not a request, so `bon pending` does not list it);
+  review it, apply it, `bon check`, run again. Bring engineer only what you
+  cannot resolve.
 - **Trunk moved:** run it again.
 
 ## Hill climbing
@@ -389,9 +392,13 @@ when an earlier bon process of the same pid left a trace.
 - `.bon/traces/<pid>/<search>/<index>/facts.json`: each agent process's
   `program`, `role`, `client`, `model`, cost and `prices`,
   `requests_over_tier` and what they cost beyond the base price
-  (`over_tier_microdollars`), and its `candidate` (`commit`, `accepted`, `proved`,
+  (`over_tier_microdollars`), its program's `exit` and whether it `started`
+  (one that never started, not found or not executable, is charged nothing
+  and is no candidate), and its `candidate` (`commit`, `accepted`, `proved`,
   `changed`, `added`, `diff`, `lines_added`, `lines_removed`, `rank`, `out`,
   `accepts`, `rejects_counterexamples`); its program's log is `program`.
+  Before a search, bon checks each role's program runs as agent, and says
+  which one does not.
   A compaction candidate's `rank` is its rank command's integer less its
   suite's `seconds` (that file), rounded: each test and verify check run
   again once built (`seconds-k`), timed by bon and kept with the verdict.

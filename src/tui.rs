@@ -20,11 +20,11 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::projection::{self, BonProcess, Facts, GoalTrace, Projection, SearchTrace};
-use crate::view::{self, dur};
+use crate::view::{self, ago, cap, count, dur, money_or as money, outcome_label, short, signed, size};
 
 // ── palette ─────────────────────────────────────────────
 
@@ -56,8 +56,8 @@ const LIGHT: Palette = Palette {
 ///   Where It Went; a counterexample found on trunk (outcome `found`); a goal
 ///   where the kernel's selection differs from the trace's (its list dot and
 ///   its detail's title) and that disagreement's line; an agent process's flags
-///   (killed, over limit, price mismatch); an error reading the projection, in
-///   the footer.
+///   (killed, over limit, price mismatch, and the exit of a program that never
+///   started); an error reading the projection, in the footer.
 /// - Orange, under way: a running bon process or search; Running N in the
 ///   header; In flight in Where It Went.
 /// - Yellow, stopped short and waiting on someone: a blocked goal or search,
@@ -114,27 +114,15 @@ fn goal_tone(g: &GoalTrace) -> Tone {
     if g.processes.iter().flat_map(|b| &b.searches).any(|s| disagreement(s).is_some()) { Tone::Red } else { outcome_tone(&g.outcome) }
 }
 
-/// An outcome as a value: sentence case.
-fn outcome_label(outcome: &str) -> String { if outcome == "not found" { "None found".into() } else { cap(outcome) } }
+// ── layout ──────────────────────────────────────────────
+//
+// Every value is written by `view`'s formats; these only place it: in a
+// column (fit, right), at both ends of a line (spread), wrapped under itself
+// (hanging), or as labeled pairs that wrap (pairs). Nothing is cut without …,
+// and text that matters wraps.
 
-/// A word shown as a value: its first letter upper case.
-fn cap(s: &str) -> String { let mut c = s.chars(); c.next().map_or(String::new(), |f| f.to_uppercase().chain(c).collect()) }
-
-// ── formatting ──────────────────────────────────────────
-
-/// Dollars to the cent; never `$-0.00`.
-fn money(v: Option<f64>) -> String { v.filter(|v| v.is_finite()).map_or("—".into(), |v| format!("${:.2}", if v.abs() < 0.005 { 0.0 } else { v })) }
-fn short(v: &str) -> String { v.chars().take(7).collect() }
-/// The rate time is charged at, next to time.
-fn at_rate(r: Option<f64>) -> String { r.map_or(String::new(), |r| format!("at ${r:.0}/h")) }
-fn plural(n: usize, one: &str, many: &str) -> String { format!("{n} {}", if n == 1 { one } else { many }) }
-
-fn ago(now: i64, t: i64) -> String {
-    let s = (now - t).max(0);
-    match s { 0..=59 => "Now".into(), 60..=3599 => format!("{}m ago", s / 60), 3600..=86399 => format!("{}h ago", s / 3600), _ => format!("{}d ago", s / 86400) }
-}
-
-fn took(s: f64) -> String { if s < 90.0 { format!("{}s", s.round()) } else if s < 5400.0 { format!("{}m", (s / 60.0).round()) } else { format!("{}h {}m", (s / 3600.0) as u64, ((s % 3600.0) / 60.0) as u64) } }
+/// The rate time is charged at, next to time; nothing when there is none.
+fn at_rate(r: Option<f64>) -> String { r.filter(|r| *r > 0.0).map_or(String::new(), |r| format!("at ${r:.0}/h")) }
 
 /// The local offset from UTC, in seconds, read once.
 fn local_offset() -> i64 {
@@ -151,12 +139,7 @@ fn day(t: i64, off: i64) -> i64 { (t + off).div_euclid(86400) }
 fn day_label(d: i64, today: i64) -> String {
     if d == today { return "Today".into(); }
     if d == today - 1 { return "Yesterday".into(); }
-    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
-    let z = d + 719468; let era = z.div_euclid(146097); let doe = z - era * 146097;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); let mp = (5 * doy + 2) / 153;
-    let dd = doy - (153 * mp + 2) / 5 + 1; let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    format!("{}-{:02}-{:02}", if m <= 2 { y + 1 } else { y }, m, dd)
+    view::date(d.max(0) as u64 * 86400)
 }
 
 /// Pad or cut to exactly `w` columns.
@@ -164,6 +147,9 @@ fn fit(s: &str, w: usize) -> String {
     let n = s.chars().count();
     if n > w { let mut t: String = s.chars().take(w.saturating_sub(1)).collect(); if w > 0 { t.push('…'); } t } else { format!("{s}{}", " ".repeat(w - n)) }
 }
+/// Cut to at most `w` columns, with … where it is cut.
+fn cut(s: &str, w: usize) -> String { if s.chars().count() > w { fit(s, w) } else { s.to_string() } }
+
 /// Right-aligned in exactly `w` columns.
 fn right(s: &str, w: usize) -> String { let n = s.chars().count(); if n >= w { s.into() } else { format!("{}{s}", " ".repeat(w - n)) } }
 
@@ -185,9 +171,16 @@ fn spread(mut left: Vec<Span<'static>>, right: Vec<Span<'static>>, w: usize) -> 
 enum Tab { Project, Spec, Queue, Traces, Host }
 const TABS: [Tab; 4] = [Tab::Project, Tab::Spec, Tab::Queue, Tab::Traces];
 
-/// What a focusable row stands for, so its detail is found by key, not by position.
-#[derive(Clone, PartialEq)]
-enum Key { Goal(usize), Queue(usize), Retired(usize), Proposal(usize), Item(usize), Grid, Trusted(usize), Sbom(&'static str) }
+/// What a focusable row stands for, by the item's identity, never its
+/// position: the cursor stays on it when rows come, go or rewrap. A goal is
+/// its first bon process's trace; an intent its id; a spec item, a trusted
+/// function or a proposal its name.
+#[derive(Clone, PartialEq, Debug)]
+enum Key { Goal(String), Queue(u64), Retired(u64), Proposal(String), Item(String), Grid, Trusted(String), Sbom(&'static str) }
+
+/// A goal's identity: its bon processes' traces, first first; it is the same
+/// goal while any of them is (`same`), so a filter that leaves one out keeps it.
+fn goal_key(g: &GoalTrace) -> Key { Key::Goal(g.processes.iter().rev().map(|p| p.trace.as_str()).collect::<Vec<_>>().join(" ")) }
 
 /// One row of a list: what it shows, and the item it stands for, if it can be
 /// focused; `more` when it continues the focusable row above it (the cursor
@@ -213,6 +206,8 @@ const RANGES: [(&str, i64); 4] = [("All time", 0), ("24 hours", 86400), ("7 days
 
 struct App {
     p: Projection,
+    /// When the projection was first read: before it, nothing is shown as if read.
+    loaded: Option<Instant>,
     /// The host as it shows here: this repository's part of it, or, outside
     /// every repository (`root` empty), all of it.
     host: projection::Host,
@@ -224,7 +219,8 @@ struct App {
     filter: std::sync::Arc<std::sync::Mutex<view::Filter>>,
     error: Option<String>,
     tab: Tab,
-    /// Focused row and first visible row, per tab.
+    /// Per tab: the focused item, the row it was last drawn on, and the first visible row.
+    held: [Option<Key>; 4],
     focus: [usize; 4],
     top: [usize; 4],
     /// Scroll of the detail pane.
@@ -235,9 +231,22 @@ struct App {
     palette: Palette,
     dark: bool,
     off: i64,
-    loaded: Option<Instant>,
-    /// The list's width when last drawn: rows wrap by width, so a focus is a row at this width.
+    /// The list's width and the panes' heights when last drawn: rows wrap by
+    /// width, and a page is a pane's height.
     list_w: u16,
+    list_h: u16,
+    detail_h: u16,
+    /// Whether a detail showed when last drawn: ⇧↑↓ and PgUp PgDn scroll it, else the list.
+    detail_shown: bool,
+    /// Rows a page of the detail shows, and of an overlay, when last drawn; an overlay's rows once wrapped.
+    detail_page: u16,
+    body_h: u16,
+    /// The first row of the key reference shown, where it does not fit.
+    keys_top: usize,
+    keys_page: usize,
+    /// Whether the list was last scrolled through its rows rather than moved between items.
+    scrolled: bool,
+    overlay_rows: usize,
     /// The host drawn as two panes (100 columns and wider): what happened on the right.
     split: bool,
 }
@@ -245,11 +254,20 @@ struct App {
 impl App {
     fn new() -> App {
         let dark = std::env::var("BON_THEME").map_or(true, |t| t != "light");
-        App { p: Projection::default(), host: Default::default(), root: ".".into(), overlay: Overlay::None, input: None, range: 0, filter: Default::default(),
-              error: None, tab: Tab::Traces, focus: [0; 4], top: [0; 4], detail_top: 0, detail_open: false,
-              keys: false, palette: if dark { DARK } else { LIGHT }, dark, off: local_offset(), loaded: None, list_w: 200, split: false }
+        App { p: Projection::default(), loaded: None, host: Default::default(), root: ".".into(), overlay: Overlay::None, input: None, range: 0, filter: Default::default(),
+              error: None, tab: Tab::Traces, held: Default::default(), focus: [0; 4], top: [0; 4], detail_top: 0, detail_open: false,
+              keys: false, palette: if dark { DARK } else { LIGHT }, dark, off: local_offset(), list_w: 200, list_h: 20, detail_h: 20, detail_shown: false, detail_page: 18, body_h: 20, keys_top: 0, keys_page: 1, scrolled: false, overlay_rows: 0, split: false }
     }
     fn ti(&self) -> usize { TABS.iter().position(|t| *t == self.tab).unwrap_or(0) }
+    /// Focus row `i` of `list`, and its item; a new focus opens its detail at the top.
+    fn focus_on(&mut self, list: &[Row], i: usize) {
+        let ti = self.ti();
+        let key = list.get(i).and_then(|r| r.key.clone());
+        // Another item opens at its top; the same one (a goal that gained a bon process) stays where it was read to.
+        if !matches!((&key, &self.held[ti]), (Some(a), Some(b)) if same(&self.p, a, b)) { self.detail_top = 0; }
+        self.focus[ti] = i;
+        self.held[ti] = key;
+    }
     /// Switch tab; an open detail closes, so a tab opens on its list. The
     /// host has one tab: there is nothing to switch to.
     fn switch(&mut self, tab: Tab) { if self.tab == Tab::Host { return; } self.tab = tab; self.detail_top = 0; self.detail_open = false; }
@@ -258,8 +276,9 @@ impl App {
 // ── the visual hierarchy ────────────────────────────────
 //
 // Three kinds of text, one style each: a section header (Title Case, strong),
-// a label (sentence case, muted) and a value (the data, ink). Faint is for
-// what only locates a value (a path, a line number).
+// a label (sentence case, muted; what a measure's words mean is a label too)
+// and a value (the data, ink). Faint is for what only locates a value (a
+// path, a line number, a commit beside an intent).
 
 /// A section header, with a count when it has one.
 fn section(pal: &Palette, indent: usize, title: &str, count: Option<usize>) -> Line<'static> {
@@ -276,7 +295,8 @@ fn kv(pal: &Palette, indent: usize, w: usize, label: &str, value: Vec<Span<'stat
 }
 
 /// Labeled values on one line, `Base 9bb8a5b · Limit $5.00`, onto the next
-/// where the line is full.
+/// where the line is full; a pair longer than a line wraps at its words, under
+/// its value.
 fn pairs(pal: &Palette, indent: usize, items: &[(&str, String)], w: usize) -> Vec<Line<'static>> {
     let mut out = Vec::new();
     let mut v = vec![Span::raw(" ".repeat(indent))];
@@ -284,11 +304,52 @@ fn pairs(pal: &Palette, indent: usize, items: &[(&str, String)], w: usize) -> Ve
         let n = k.chars().count() + 1 + val.chars().count();
         if v.len() > 1 && width_of(&v) + 3 + n > w { out.push(Line::from(std::mem::replace(&mut v, vec![Span::raw(" ".repeat(indent))]))); }
         if v.len() > 1 { v.push(Span::styled(" · ", pal.faint())); }
+        let at = width_of(&v) + k.chars().count() + 1;
+        if at + val.chars().count().min(8) > w {
+            // Its label leaves no room: label and value wrap together, under the label.
+            if v.len() > 1 { v.pop(); out.push(Line::from(std::mem::replace(&mut v, vec![Span::raw(" ".repeat(indent))]))); }
+            // How much of the label is left to show, line by line, so all of it stays muted.
+            let mut label_left = k.chars().count();
+            for (j, l) in hanging(&format!("{k} {val}"), indent + 2, w, pal.ink()).into_iter().enumerate() {
+                let body: String = l.spans[0].content.chars().skip(indent + 2).collect();
+                let kn = label_left.min(body.chars().count());
+                label_left = label_left.saturating_sub(kn + 1);
+                let (label, value): (String, String) = (body.chars().take(kn).collect(), body.chars().skip(kn).collect());
+                out.push(Line::from(vec![Span::raw(" ".repeat(if j == 0 { indent } else { indent + 2 })), Span::styled(label, pal.muted()), Span::styled(value, pal.ink())]));
+            }
+            continue;
+        }
         v.push(Span::styled(format!("{k} "), pal.muted()));
-        v.push(Span::styled(val.clone(), pal.ink()));
+        if at + val.chars().count() <= w { v.push(Span::styled(val.clone(), pal.ink())); continue; }
+        // Too long for what is left of the line: its value wraps under itself.
+        let hang = if w.saturating_sub(at) >= 16 { at } else { indent + 2 };
+        let lines = hanging(val, hang, w, pal.ink());
+        let mut lines = lines.into_iter();
+        if hang == at {
+            if let Some(first) = lines.next() { v.push(Span::styled(first.spans[0].content.chars().skip(hang).collect::<String>(), pal.ink())); }
+        }
+        out.push(Line::from(std::mem::replace(&mut v, vec![Span::raw(" ".repeat(indent))])));
+        out.extend(lines);
     }
-    out.push(Line::from(v));
+    if v.len() > 1 { out.push(Line::from(v)); }
     out
+}
+
+/// A line no wider than `w`: one that is wider is cut, and ends in ….
+fn clip(line: Line<'static>, w: usize) -> Line<'static> {
+    if width_of(&line.spans) <= w { return line; }
+    let mut left = w.saturating_sub(1);
+    let mut spans = Vec::new();
+    for s in line.spans {
+        if left == 0 { break; }
+        let n = s.content.chars().count();
+        let text: String = s.content.chars().take(left).collect();
+        left -= n.min(left);
+        spans.push(Span::styled(text, s.style));
+    }
+    let style = spans.last().map_or(Style::new(), |s: &Span| s.style);
+    spans.push(Span::styled("…", style));
+    Line::from(spans)
 }
 
 /// A label, then a value that wraps under itself.
@@ -380,8 +441,8 @@ fn step_parts(g: &GoalTrace) -> Vec<(&'static str, String)> {
             ("found", _) => "Found".into(),
             ("pushed", _) => "None found".into(),
             // How many ran, and how many the spec's two needs.
-            _ if ce.verified < 2 => format!("{} of {} verified, 2 needed", ce.verified, plural(ce.width.max(ce.returned) as usize, "test", "tests")),
-            (_, Some(d)) if d < 2 => format!("{d} of {} reject a foil, 2 needed", plural(ce.verified as usize, "verified test", "verified tests")),
+            _ if ce.verified < 2 => format!("{} of {} verified, 2 needed", ce.verified, count(ce.width.max(ce.returned) as usize, "test", "tests")),
+            (_, Some(d)) if d < 2 => format!("{d} of {} reject a foil, 2 needed", count(ce.verified as usize, "verified test", "verified tests")),
             // Candidates that disagree, and tests that judged them all without telling them apart.
             _ if m.reason.as_deref() == Some("undecided") => "None splits them".into(),
             _ => "None found".into(),
@@ -396,10 +457,10 @@ fn steps(g: &GoalTrace, tight: bool) -> String {
     let parts = step_parts(g);
     if !tight { return parts.iter().map(|(k, v)| format!("{k} {v}")).collect::<Vec<_>>().join(" · "); }
     let get = |k: &str| parts.iter().find(|(l, _)| *l == k).map(|(_, v)| v.clone());
-    if g.kind == "counterexample" { return get("Verified tests").map_or(String::new(), |v| plural(v.parse().unwrap_or(0), "verified test", "verified tests")); }
+    if g.kind == "counterexample" { return get("Verified tests").map_or(String::new(), |v| count(v.parse().unwrap_or(0), "verified test", "verified tests")); }
     let head = ["Candidates", "Verified", "Selected"].iter().filter_map(|k| get(k)).collect::<Vec<_>>().join("→");
     let mut out = vec![head];
-    if let Some(f) = get("Foils") { out.push(plural(f.parse().unwrap_or(0), "foil", "foils")); }
+    if let Some(f) = get("Foils") { out.push(count(f.parse().unwrap_or(0), "foil", "foils")); }
     if let Some(c) = get("Counterexample") { out.push(c); }
     if let Some(c) = g.push.as_ref().and_then(|p| p.commit.as_deref()) { out.push(short(c)); }
     out.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")
@@ -424,9 +485,9 @@ fn cost_heads(pal: &Palette) -> Vec<Span<'static>> {
     vec![Span::styled(right("Gen", GEN_W), pal.muted()), Span::styled(right("Time", TIME_W), pal.muted())]
 }
 
-/// The outcome tables, at the head of Traces: attempts, each kind's reasons
-/// (which sum to its Blocked), then bon processes. Both tables share their
-/// columns' widths; columns that do not fit drop from the right.
+/// The outcome tables, on Project with the other aggregates: attempts, each
+/// kind's reasons (which sum to its Blocked), then bon processes. Both tables
+/// share their columns' widths; columns that do not fit drop from the right.
 fn outcome_rows(pal: &Palette, t: &projection::Totals, w: usize) -> Vec<Row> {
     let (attempts, processes) = (view::attempt_table(t), view::process_table(t));
     if attempts.is_empty() && processes.is_empty() { return Vec::new(); }
@@ -441,7 +502,7 @@ fn outcome_rows(pal: &Palette, t: &projection::Totals, w: usize) -> Vec<Row> {
             lw = 2;
         }
         for (k, l) in wrap_items(&items, " · ", w.saturating_sub(1 + lw)).into_iter().enumerate() {
-            out.push(Row::text(Line::from(vec![Span::styled(format!(" {}", fit(if k == 0 && lw > 2 { &label } else { "" }, lw)), pal.muted()), Span::styled(l, pal.ink())])));
+            out.push(Row::text(Line::from(vec![Span::styled(format!(" {}", fit(if k == 0 && lw > 2 { &label } else { "" }, lw)), pal.muted()), Span::styled(fit(&l, w.saturating_sub(1 + lw)), pal.ink())])));
         }
     }
     if !processes.is_empty() { out.push(Row::text(Line::default())); out.extend(table_rows(pal, &processes, w0, w)); }
@@ -451,17 +512,27 @@ fn outcome_rows(pal: &Palette, t: &projection::Totals, w: usize) -> Vec<Row> {
 /// A table, its header first (strong, then muted), as rows `w` wide: the first
 /// column `w0` wide and left, the rest each as wide as its widest and right;
 /// a row whose label is indented is a sub-row (muted label). Columns that do
-/// not fit drop from the right.
+/// not fit drop from the right; a first column that does not fit is cut with ….
 fn table_rows(pal: &Palette, rows: &[Vec<String>], w0: usize, w: usize) -> Vec<Row> {
     let cw: Vec<usize> = (0..rows.first().map_or(0, |r| r.len())).map(|i| if i == 0 { w0 } else { rows.iter().map(|r| r[i].chars().count()).max().unwrap_or(0) }).collect();
     let mut n = cw.len();
-    while n > 2 && 1 + cw[0] + (1..n).map(|i| cw[i] + 2).sum::<usize>() > w { n -= 1; }
+    // A column that does not fit drops, and the header ends in … to say so.
+    while n > 2 && 1 + cw[0] + (1..n).map(|i| cw[i] + 2).sum::<usize>() + if n < cw.len() { 3 } else { 0 } > w { n -= 1; }
+    let first = cw.first().copied().unwrap_or(0).min(w.saturating_sub(1 + (1..n).map(|i| cw[i] + 2).sum::<usize>()));
     rows.iter().enumerate().map(|(k, r)| {
-        let (first, rest) = if k == 0 { (pal.strong(), pal.muted()) } else if r[0].starts_with(' ') { (pal.muted(), pal.ink()) } else { (pal.ink(), pal.ink()) };
-        let mut v = vec![Span::styled(format!(" {}", fit(&r[0], cw[0])), first)];
+        let (lead, rest) = if k == 0 { (pal.strong(), pal.muted()) } else if r[0].starts_with(' ') { (pal.muted(), pal.ink()) } else { (pal.ink(), pal.ink()) };
+        let mut v = vec![Span::styled(format!(" {}", fit(&r[0], first)), lead)];
         for i in 1..n { v.push(Span::styled(format!("  {}", right(&r[i], cw[i])), rest)); }
+        if k == 0 && n < cw.len() { v.push(Span::styled("  …", pal.muted())); }
         Row::text(Line::from(v))
     }).collect()
+}
+
+/// What each measure's and outcome's words mean, under its table: once, muted, wrapped.
+fn notes(pal: &Palette, out: &mut Vec<Row>, w: usize, all: &[(&str, &str)], names: &[&str]) {
+    for (k, v) in all.iter().filter(|(k, _)| names.contains(k)) {
+        out.extend(hanging(&format!("{k}: {v}"), 3, w, pal.muted()).into_iter().map(Row::text));
+    }
 }
 
 fn rows(app: &App, width: u16) -> Vec<Row> {
@@ -469,13 +540,15 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
     let p = &app.p;
     let w = width as usize;
     let mut out = Vec::new();
+    // Before the first read there is nothing to show as read.
+    if app.loaded.is_none() { return out; }
     let blank = || Row::text(Line::default());
     let header = |t: &str, n: Option<usize>| Row::text(section(pal, 1, t, n));
+    let empty = |s: &str| Row::text(Line::from(Span::styled(format!(" {s}"), pal.muted())));
     match app.tab {
         // Outside every repository: the host, its only tab.
         Tab::Host => {
             // Beside the right pane, one blank column before its rule.
-            let w = if app.split { w.saturating_sub(1) } else { w };
             let pending: Vec<&projection::Interrupt> = app.host.interrupts.iter().filter(|i| i.resolved.is_none()).collect();
             if pending.is_empty() { out.push(header("Pending", None)); out.push(Row::text(Line::from(Span::styled("   Nothing waits on you", pal.muted())))); }
             else { out.extend(pending_rows(pal, &pending, app.host.now, None, w)); }
@@ -484,17 +557,18 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
             out.extend(if app.split { host_now(app, w, true) } else { host_rows(app, w, true) });
         }
         Tab::Traces => {
-            // How attempts and bon processes ended, measured, above the goals themselves.
-            out.extend(outcome_rows(pal, &p.totals, w));
             let today = day(p.repo.now, app.off);
             let mut last_day = None;
             // Three forms by width: 96+ everything; 76+ without who; under 76
             // (beside the detail, or a phone) no steps, which the detail shows.
             let (who_col, with_steps) = (w >= 96, w >= 76);
             let fixed = 1 + 7 + if who_col { 5 } else { 0 } + 2 + 11 + GEN_W + TIME_W;
-            let what_w = if with_steps { 20 } else { w.saturating_sub(fixed).clamp(8, 22) };
+            // The kind and its commit, as wide as the widest of them.
+            let what = |g: &GoalTrace| format!("{} {}", cap(&g.kind), g.title.split_whitespace().last().unwrap_or(""));
+            let widest = p.groups.iter().map(|g| what(g).chars().count() + 1).max().unwrap_or(12).clamp(12, 23);
+            let what_w = if with_steps { widest } else { w.saturating_sub(fixed).clamp(8, widest) };
             let rest = w.saturating_sub(fixed + what_w);
-            for (gi, g) in sorted_groups(p).into_iter().enumerate() {
+            for g in sorted_groups(p) {
                 let d = if g.running { today } else { day(g.time, app.off) };
                 if last_day != Some(d) {
                     if !out.is_empty() { out.push(blank()); }
@@ -505,8 +579,7 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
                 }
                 let tone = pal.tone(goal_tone(g));
                 // The kind and the commit it started from; the title is in the detail.
-                let commit = g.title.split_whitespace().last().unwrap_or("");
-                let what = format!("{} {}", if g.kind == "counterexample" { "Trunk".into() } else { cap(&g.kind) }, commit);
+                let what = what(g);
                 let mut spans = vec![Span::raw(" "), Span::styled(format!("{}  ", clock(g.time, app.off)), pal.muted())];
                 if who_col { spans.push(Span::styled(fit(who(g), 5), pal.muted())); }
                 spans.extend([
@@ -517,9 +590,9 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
                 spans.push(if with_steps { Span::styled(fit(&steps(g, true), rest), pal.muted()) } else { Span::raw(" ".repeat(rest)) });
                 let (gen, time) = goal_cost(g);
                 spans.extend(cost_cells(pal, gen, time));
-                out.push(Row::item(Line::from(spans), Key::Goal(gi)));
+                out.push(Row::item(Line::from(spans), goal_key(g)));
             }
-            if p.groups.is_empty() { out.push(Row::text(Line::from(Span::styled(" No bon process yet", pal.muted())))); }
+            if p.groups.is_empty() { out.push(empty(none_yet(p))); }
         }
         Tab::Queue => {
             // Every item in full, full width: its label, then its text wrapped under itself.
@@ -539,14 +612,14 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
             };
             if !p.proposals.is_empty() {
                 out.push(header("Proposed", Some(p.proposals.len())));
-                for (pi, pr) in p.proposals.iter().enumerate() {
+                for pr in &p.proposals {
                     let counts = vec![Span::styled("New ", pal.muted()), Span::styled(format!("{:<3}", pr.intents.len()), pal.ink()),
                         Span::styled("Contested ", pal.muted()), Span::styled(format!("{:<2}", pr.contested.len()), pal.ink())];
                     let room = w.saturating_sub(5 + width_of(&counts) + 1);
-                    out.push(Row::item(spread(vec![Span::styled("  ● ", pal.tone(Tone::Yellow)), Span::styled(fit(&pr.source, room), pal.ink())], counts, w), Key::Proposal(pi)));
+                    out.push(Row::item(spread(vec![Span::styled("  ● ", pal.tone(Tone::Yellow)), Span::styled(fit(&pr.source, room), pal.ink())], counts, w), Key::Proposal(pr.name.clone())));
                     under(&mut out, "Accept", &format!("git am {}", pr.path), pal.ink());
                     for i in &pr.intents {
-                        under(&mut out, &format!("New {}", i.id.map_or("—".into(), |n| n.to_string())), &i.intent, pal.ink());
+                        under(&mut out, &format!("New {}", i.id.map_or("—".into(), |n| format!("#{n}"))), &i.intent, pal.ink());
                         if let Some(c) = &i.cue { under(&mut out, "Cue", c, pal.faint()); }
                     }
                     for c in &pr.contested { under(&mut out, "Contested", c, pal.ink()); }
@@ -554,37 +627,46 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
                 out.push(blank());
             }
             if !p.proposals.is_empty() || !p.retired.is_empty() { out.push(header("Queued", Some(p.queue.as_ref().map_or(0, |q| q.len())))); }
-            for (qi, q) in p.queue.iter().flatten().enumerate() { entry(&mut out, Key::Queue(qi), format!("#{}", q.id), &q.intent, pal.ink()); }
-            if p.queue.as_ref().is_none_or(|q| q.is_empty()) { out.push(Row::text(Line::from(Span::styled(" Nothing queued", pal.muted())))); }
-            // Intents taken off the queue, newest first, each with the commit that took it off.
+            for q in p.queue.iter().flatten() { entry(&mut out, Key::Queue(q.id), format!("#{}", q.id), &q.intent, pal.ink()); }
+            if p.queue.as_ref().is_none_or(|q| q.is_empty()) { out.push(empty("Nothing queued")); }
+            // Intents taken off the queue, newest first, each with the commit that
+            // took it off; the commit's subject once, under the first it took off.
             if !p.retired.is_empty() {
                 out.push(blank());
                 out.push(header("Retired", Some(p.retired.len())));
-                for (ri, r) in p.retired.iter().enumerate() {
-                    entry(&mut out, Key::Retired(ri), format!("#{}", r.id), &r.intent, pal.muted());
+                for (k, r) in p.retired.iter().enumerate() {
+                    entry(&mut out, Key::Retired(r.id), format!("#{}", r.id), &r.intent, pal.muted());
                     let when = r.time.map_or(String::new(), |x| format!(" · {}", ago(p.repo.now, x)));
-                    under(&mut out, "Taken off by", &format!("{}{when} · {}", short(&r.commit), r.subject), pal.faint());
+                    let first = k == 0 || p.retired[k - 1].commit != r.commit;
+                    let subject = if first && !r.subject.is_empty() { format!(" · {}", r.subject) } else { String::new() };
+                    let at = out.len();
+                    under(&mut out, "Taken off by", &format!("{}{when}{subject}", short(&r.commit)), pal.muted());
+                    // The commit only locates it: faint.
+                    if let Some(row) = out.get_mut(at) {
+                        let body = row.line.spans.pop().map(|s| s.content.to_string()).unwrap_or_default();
+                        let (commit, rest): (String, String) = (body.chars().take(7).collect(), body.chars().skip(7).collect());
+                        row.line.spans.extend([Span::styled(commit, pal.faint()), Span::styled(rest, pal.muted())]);
+                    }
                 }
             }
         }
         Tab::Spec => {
-            let Some(spec) = &p.spec else { out.push(Row::text(Line::from(Span::styled(" No spec found", pal.muted())))); return out };
+            let Some(spec) = &p.spec else { out.push(empty("No spec found")); return out };
             let g = p.system.clone().unwrap_or_default();
             // Names as wide as the longest, but never more than a third of the width (a phone).
             let nw = (spec.items.iter().map(|i| i.name.chars().count()).chain(spec.fields.iter().map(|f| f.name.chars().count())).max().unwrap_or(10).min(24) + 2).min((w / 3).max(10));
             // An item whose detail shows something that differs from trunk is marked in the gutter.
             let changed = |name: &str| ["spec", "gate", "kernel"].iter().any(|l| g.nodes.iter().any(|n| n.changed && n.id == format!("{l}:{name}")));
             let gutter = |c: bool| Span::styled(format!(" {} ", if c { DIFFERS } else { " " }), pal.ink());
-            let item = |i: usize, rest: Vec<Span<'static>>| { let mut v = vec![gutter(changed(&spec.items[i].name)), Span::styled(fit(&spec.items[i].name, nw), pal.ink())]; v.extend(rest); Row::item(Line::from(v), Key::Item(i)) };
+            let item = |i: usize, rest: Vec<Span<'static>>| { let mut v = vec![gutter(changed(&spec.items[i].name)), Span::styled(fit(&spec.items[i].name, nw), pal.ink())]; v.extend(rest); Row::item(Line::from(v), Key::Item(spec.items[i].name.clone())) };
             let room = w.saturating_sub(nw + 4);
             let doc_of = |i: usize| Span::styled(fit(&spec.items[i].doc.clone().unwrap_or_default(), room), pal.muted());
             let of = |kind: &str| spec.items.iter().enumerate().filter(|(_, x)| x.kind == kind).map(|(i, _)| i).collect::<Vec<_>>();
-            // Where the spec is, and how much of it differs from trunk.
+            // Where the spec is (a path: faint), and how much of it differs from trunk.
             let differ = g.nodes.iter().filter(|n| n.changed).count();
-            let mut file = vec![(" File", spec.path.clone())];
-            let label = format!("{DIFFERS} Differs from trunk");
-            if differ > 0 { file.push((label.as_str(), differ.to_string())); }
-            out.extend(pairs(pal, 0, &file, w).into_iter().map(Row::text));
+            let mut file = vec![Span::styled(" File ", pal.muted()), Span::styled(cut(&spec.path, w.saturating_sub(7)), pal.faint())];
+            if differ > 0 && width_of(&file) + 24 <= w { file.extend([Span::styled(" · ", pal.faint()), Span::styled(format!("{DIFFERS} Differs from trunk "), pal.muted()), Span::styled(differ.to_string(), pal.ink())]); }
+            out.push(Row::text(Line::from(file)));
             out.push(blank());
 
             out.push(header("Vocabulary", Some(of("type").len())));
@@ -595,7 +677,7 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
             out.push(header("State Machine", Some(ts.len())));
             if !spec.fields.is_empty() {
                 let names = spec.fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join(" · ");
-                out.push(Row::item(Line::from(vec![Span::styled(format!("   {}", fit("Fields", nw)), pal.ink()), Span::styled(fit(&names, room), pal.muted())]), Key::Grid));
+                out.push(Row::item(Line::from(vec![Span::styled(format!("   {}", fit("Fields", nw)), pal.muted()), Span::styled(fit(&names, room), pal.ink())]), Key::Grid));
             }
             for i in ts { out.push(item(i, vec![doc_of(i)])); }
 
@@ -626,8 +708,11 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
                 let mut h = vec![Span::styled(format!(" {}", fit("Spec → Code", nw + 2)), pal.strong())];
                 for &k in cols { h.push(Span::styled(fit(heads[k], cws[k]), pal.muted())); }
                 out.push(Row::text(Line::from(h)));
-                out.push(Row::text(Line::from(vec![Span::raw(format!("   {}", " ".repeat(nw))), Span::styled("✓ ", pal.ink()), Span::styled("Present   ", pal.muted()), Span::styled("— ", pal.faint()), Span::styled("Absent", pal.muted())])));
-                if !absent.is_empty() { out.push(Row::text(Line::from(vec![Span::raw(format!("   {}", " ".repeat(nw))), Span::styled(fit(&format!("{}: absent for every one", absent.join(", ")), room), pal.muted())]))); }
+                // The legend, for what a cell can show: — only where some cell is absent.
+                let some_absent = decided.iter().any(|i| layers(&spec.items[*i].name).is_some_and(|l| cols.iter().any(|&k| l[k].is_none())));
+                if some_absent { out.push(Row::text(Line::from(vec![Span::raw(format!("   {}", " ".repeat(nw))), Span::styled("✓ ", pal.ink()), Span::styled("Present", pal.muted()),
+                    Span::styled("   — ", pal.faint()), Span::styled("Absent", pal.muted())]))); }
+                if !absent.is_empty() { out.extend(hanging(&format!("{}: absent for every one", absent.join(", ")), 3 + nw, w, pal.muted()).into_iter().map(Row::text)); }
             }
             for i in &decided {
                 let ls = layers(&spec.items[*i].name).unwrap();
@@ -650,8 +735,8 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
 
             out.push(blank());
             out.push(header("Trusted", Some(g.trusted.len())));
-            for (ti, t) in g.trusted.iter().enumerate() {
-                out.push(Row::item(Line::from(vec![gutter(t.changed), Span::styled(fit(&t.name, nw), pal.ink()), Span::styled(fit(&t.doc.clone().unwrap_or_default(), room), pal.muted())]), Key::Trusted(ti)));
+            for t in &g.trusted {
+                out.push(Row::item(Line::from(vec![gutter(t.changed), Span::styled(fit(&t.name, nw), pal.ink()), Span::styled(fit(&t.doc.clone().unwrap_or_default(), room), pal.muted())]), Key::Trusted(t.name.clone())));
             }
             if let Some(sb) = &p.sbom {
                 let comps = &sb.document.components;
@@ -674,127 +759,131 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
             }
             // Then what runs now in this repository, against the host's pools, and what happened (queue 60).
             out.extend(host_rows(app, w, false));
-            if app.loaded.is_some() { out.push(blank()); }
-            let lw = 18;
+            out.push(blank());
+            let lw = 23;
             let num = |s: String| Span::styled(right(&s, 9), pal.ink());
             let line = |label: &str, value: Vec<Span<'static>>| Row::text(kv(pal, 3, lw, label, value));
-            out.push(header("Cost", None));
-            for l in cost_rows(pal, 3, Some(t.generation), Some(t.time_cost), t.rate) {
-                // Project's labels are as wide as its others.
-                let mut s = l.spans; s[0] = Span::styled(format!("   {}", fit(s[0].content.trim(), lw)), pal.muted()); out.push(Row::text(Line::from(s)));
-            }
-            out.push(line("Per verified", vec![num(money(t.per_verified_candidate))]));
-            // Per push, with its basis: what reached a push, over how many pushes.
-            out.push(Row::text(Line::default()));
-            out.push(line("Reached a push", vec![num(money(Some(t.pushed)))]));
-            out.push(line("Pushes", vec![num(t.pushes.to_string())]));
-            out.push(line("Per push", vec![num(money(t.per_push)), Span::styled(format!("   {} / {}", money(Some(t.pushed)), t.pushes), pal.muted())]));
+            // Nothing has run: nothing to measure; trunk is all there is.
+            if p.groups.is_empty() { out.push(empty(none_yet(p))); }
+            else {
+                // Cost: generation, time and their total are the header's, on every tab;
+                // here what each verified candidate and each push cost.
+                out.push(header("Cost", None));
+                out.push(line("Per verified candidate", vec![num(money(t.per_verified_candidate))]));
+                out.push(line("Reached a push", vec![num(money(Some(t.pushed)))]));
+                out.push(line("Pushes", vec![num(t.pushes.to_string())]));
+                out.push(line("Per push", vec![num(money(t.per_push))]));
 
-            // Where it went: what reached a push, what ended each other way, what is running;
-            // each in its outcome's tone, split into generation (█) and time (▒) by its share of the total.
-            let sum = |gs: &mut dyn Iterator<Item = (Option<f64>, Option<f64>)>| gs.fold((0.0, 0.0), |(a, b), (g, t)| (a + g.unwrap_or(0.0), b + t.unwrap_or(0.0)));
-            let mut parts = vec![("Reached a push".to_string(), Tone::Violet, sum(&mut p.groups.iter().filter(|g| g.outcome == "pushed").map(goal_cost)))];
-            let mut others: Vec<&str> = p.groups.iter().filter(|g| g.outcome != "pushed" && !g.running).map(|g| g.outcome.as_str()).collect();
-            others.sort(); others.dedup();
-            for o in others {
-                parts.push((outcome_label(o), outcome_tone(o), sum(&mut p.groups.iter().filter(|g| g.outcome == o && !g.running).map(|g| (Some(g.generation), Some(g.time_cost))))));
-            }
-            parts.push(("In flight".to_string(), Tone::Orange, sum(&mut p.groups.iter().filter(|g| g.running).map(goal_cost))));
-            let whole: f64 = parts.iter().map(|(_, _, (g, t))| g + t).sum::<f64>().max(1e-9);
-            let share_w = 14;
-            let bw = w.saturating_sub(3 + lw + GEN_W + TIME_W + 2 + share_w).min(30);
-            out.push(blank());
-            let mut h = vec![Span::styled(format!(" {}", fit("Where It Went", lw + 2)), pal.strong())];
-            h.extend(cost_heads(pal));
-            let legend = vec![Span::styled("█ ", pal.muted()), Span::styled("Gen  ", pal.muted()), Span::styled("▒ ", pal.muted()), Span::styled("Time", pal.muted())];
-            h.push(Span::raw("  "));
-            if bw >= 12 { let lw = width_of(&legend); h.extend(legend); h.push(Span::raw(" ".repeat(bw - lw))); } else { h.push(Span::raw(" ".repeat(bw))); }
-            h.push(Span::styled(right("Share of total", share_w), pal.muted()));
-            out.push(Row::text(Line::from(h)));
-            for (label, tone, (g, tm)) in parts {
-                if label == "In flight" && g + tm == 0.0 { continue; }
-                let label = label.as_str();
-                let (ng, nt) = ((g / whole * bw as f64).round() as usize, ((g + tm) / whole * bw as f64).round() as usize);
-                let mut v = cost_cells(pal, Some(g), Some(tm));
-                v.push(Span::raw("  "));
-                v.push(Span::styled("█".repeat(ng), pal.tone(tone)));
-                v.push(Span::styled("▒".repeat(nt.saturating_sub(ng)), pal.tone(tone)));
-                v.push(Span::raw(" ".repeat(bw.saturating_sub(nt.max(ng)))));
-                let share = (g + tm) / whole * 100.0;
-                v.push(Span::styled(right(&if share > 0.0 && share < 1.0 { "<1%".to_string() } else { format!("{share:.0}%") }, share_w), pal.ink()));
-                out.push(line(label, v));
-            }
-
-            // Where the wall time went: each search's split by its slowest agent process, summed,
-            // with the time cost each part carries. Trunk's checks before a search are charged nothing.
-            let (parts, trunk) = time_split(p);
-            let wall: f64 = parts.iter().map(|x| x.0).sum();
-            if wall > 0.0 {
+                // Where it went: what reached a push, what ended each other way, what is running;
+                // each in its outcome's tone, split into generation (█) and time (▒) by its share of the total.
+                let sum = |gs: &mut dyn Iterator<Item = (Option<f64>, Option<f64>)>| gs.fold((0.0, 0.0), |(a, b), (g, t)| (a + g.unwrap_or(0.0), b + t.unwrap_or(0.0)));
+                let mut parts = vec![("Reached a push".to_string(), Tone::Violet, sum(&mut p.groups.iter().filter(|g| g.outcome == "pushed").map(goal_cost)))];
+                let mut others: Vec<&str> = p.groups.iter().filter(|g| g.outcome != "pushed" && !g.running).map(|g| g.outcome.as_str()).collect();
+                others.sort(); others.dedup();
+                for o in others {
+                    parts.push((outcome_label(o), outcome_tone(o), sum(&mut p.groups.iter().filter(|g| g.outcome == o && !g.running).map(|g| (Some(g.generation), Some(g.time_cost))))));
+                }
+                parts.push(("In flight".to_string(), Tone::Orange, sum(&mut p.groups.iter().filter(|g| g.running).map(goal_cost))));
+                let whole: f64 = parts.iter().map(|(_, _, (g, t))| g + t).sum::<f64>().max(1e-9);
+                // The share's heading in full where it fits.
+                let (share_w, share_head) = if w >= 3 + lw + GEN_W + TIME_W + 2 + 14 { (14, "Share of total") } else { (7, "Share") };
+                let bw = w.saturating_sub(3 + lw + GEN_W + TIME_W + 2 + share_w).min(30);
                 out.push(blank());
-                out.push(Row::text(Line::from(vec![Span::styled(format!(" {}", fit("Where The Time Went", lw + 2)), pal.strong()),
-                    Span::styled(right("Wall", 9), pal.muted()), Span::styled(right("Time", TIME_W), pal.muted()), Span::styled(right("Share", 7), pal.muted())])));
-                for (label, (secs, dollars)) in ["Model session", "Checks", "Other"].into_iter().zip(parts) {
-                    out.push(line(label, vec![num(dur(secs)), Span::styled(right(&money(Some(dollars)), TIME_W), pal.ink()), Span::styled(right(&format!("{:.0}%", 100.0 * secs / wall), 7), pal.ink())]));
+                let mut h = vec![Span::styled(format!(" {}", fit("Where It Went", lw + 2)), pal.strong())];
+                h.extend(cost_heads(pal));
+                let legend = vec![Span::styled("█ ", pal.muted()), Span::styled("Gen  ", pal.muted()), Span::styled("▒ ", pal.muted()), Span::styled("Time", pal.muted())];
+                h.push(Span::raw("  "));
+                if bw >= 12 { let lw = width_of(&legend); h.extend(legend); h.push(Span::raw(" ".repeat(bw - lw))); } else { h.push(Span::raw(" ".repeat(bw))); }
+                h.push(Span::styled(right(share_head, share_w), pal.muted()));
+                out.push(Row::text(Line::from(h)));
+                for (label, tone, (g, tm)) in parts {
+                    if g + tm == 0.0 && label != "Reached a push" { continue; }
+                    let (ng, nt) = ((g / whole * bw as f64).round() as usize, ((g + tm) / whole * bw as f64).round() as usize);
+                    // The label carries its outcome's tone, so it holds where the bar is too small to draw.
+                    let mut v = vec![Span::styled(format!("   {}", fit(&label, lw)), pal.tone(tone))];
+                    v.extend(cost_cells(pal, Some(g), Some(tm)));
+                    v.push(Span::raw("  "));
+                    v.push(Span::styled("█".repeat(ng), pal.tone(tone)));
+                    v.push(Span::styled("▒".repeat(nt.saturating_sub(ng)), pal.tone(tone)));
+                    v.push(Span::raw(" ".repeat(bw.saturating_sub(nt.max(ng)))));
+                    v.push(Span::styled(right(&view::percent((g + tm) / whole), share_w), pal.ink()));
+                    out.push(Row::text(Line::from(v)));
                 }
-                out.push(line("Searches", vec![num(dur(wall)), Span::styled(right(&money(Some(parts.iter().map(|x| x.1).sum())), TIME_W), pal.muted())]));
-                if trunk > 0.0 { out.push(line("Trunk checks", vec![num(dur(trunk)), Span::styled("   before each first search; no time charged", pal.muted())])); }
-                out.push(Row::text(Line::from(Span::styled(fit("   By each search's slowest agent process; other is waiting on a slot and setup (inferred)", w), pal.faint()))));
-            }
 
-            // The measures, each table with its formulas under it, said once.
-            let notes = |out: &mut Vec<Row>, names: &[&str]| for (k, v) in view::MEASURE_NOTES.iter().filter(|(k, _)| names.contains(k)) {
-                out.extend(hanging(&format!("{k}: {v}"), 3, w, pal.faint()).into_iter().map(Row::text));
-            };
-            let (run, fits) = view::run_time_table(t);
-            let tables = [
-                (view::utilization_table(t), vec!["Utilization"]),
-                (view::success_table(t), vec!["Success probability per agent process", "Success probability per attempt", "Attempt a"]),
-                (run, vec!["Time, cost to a push", "Median, 90th percentile"]),
-                (view::per_verified_table(t), vec!["Cost per verified candidate"]),
-                (view::over_tier_table(t), vec!["Over tier"]),
-                (view::turnaround_table(t), vec!["Turnaround"]),
-            ];
-            for (k, (rows, names)) in tables.into_iter().enumerate() {
-                // The run-time distribution's fits stand under its table, or alone where nothing pushed.
-                if rows.is_empty() && !(k == 2 && !fits.is_empty()) { continue; }
+                // Where the wall time went: each search's split by its slowest agent process, summed,
+                // with the time cost each part carries. Trunk's checks before a search are charged nothing.
+                let (parts, trunk) = time_split(p);
+                let wall: f64 = parts.iter().map(|x| x.0).sum();
+                if wall > 0.0 {
+                    out.push(blank());
+                    out.push(Row::text(Line::from(vec![Span::styled(format!(" {}", fit("Where The Time Went", lw + 2)), pal.strong()),
+                        Span::styled(right("Wall", 9), pal.muted()), Span::styled(right("Time", TIME_W), pal.muted()), Span::styled(right("Share", 7), pal.muted())])));
+                    for (label, (secs, dollars)) in ["Model", "Checks", "Other"].into_iter().zip(parts) {
+                        out.push(line(label, vec![num(dur(secs)), Span::styled(right(&money(Some(dollars)), TIME_W), pal.ink()), Span::styled(right(&view::percent(secs / wall), 7), pal.ink())]));
+                    }
+                    out.push(line("Searches", vec![num(dur(wall)), Span::styled(right(&money(Some(parts.iter().map(|x| x.1).sum())), TIME_W), pal.muted())]));
+                    if trunk > 0.0 { out.push(line("Trunk checks", vec![num(dur(trunk)), Span::styled(fit("   before each first search; no time charged", w.saturating_sub(3 + lw + 9)), pal.muted())])); }
+                    out.extend(hanging("By each search's slowest agent process; other is waiting on a slot and setup (inferred)", 3, w, pal.muted()).into_iter().map(Row::text));
+                }
+
+                // How attempts and bon processes ended, measured; what their words mean under them.
+                let outcomes = outcome_rows(pal, t, w);
+                if !outcomes.is_empty() {
+                    out.push(blank());
+                    out.extend(outcomes);
+                    notes(pal, &mut out, w, &view::OUTCOME_NOTES, &["All", "Exited", "Expected", "Inferred"]);
+                }
+
+                // The measures, each table with its formulas under it, said once.
+                let (run, fits) = view::run_time_table(t);
+                let tables = [
+                    (view::success_table(t), vec!["Success probability per agent process", "Success probability per attempt", "Attempt a"]),
+                    (run, vec!["Time, cost to a push", "Median, 90th percentile"]),
+                    (view::per_verified_table(t), vec!["Cost per verified candidate"]),
+                    (view::over_tier_table(t), vec!["Over tier"]),
+                    (view::utilization_table(t), vec!["Utilization"]),
+                    (view::turnaround_table(t), vec!["Turnaround"]),
+                ];
+                for (k, (rows, names)) in tables.into_iter().enumerate() {
+                    // The run-time distribution's fits stand under its table, or alone where nothing pushed.
+                    if rows.is_empty() && !(k == 1 && !fits.is_empty()) { continue; }
+                    out.push(blank());
+                    if rows.is_empty() { out.push(header("Run-Time Distribution", None)); }
+                    out.extend(table_rows(pal, &rows, rows.iter().map(|r| r[0].chars().count()).max().unwrap_or(0), w));
+                    if k == 1 {
+                        for f in &fits { out.extend(hanging(f, 3, w, pal.ink()).into_iter().map(Row::text)); }
+                        notes(pal, &mut out, w, &view::MEASURE_NOTES, &["Per search (inferred)"]);
+                    }
+                    notes(pal, &mut out, w, &view::MEASURE_NOTES, &names);
+                }
+
                 out.push(blank());
-                if rows.is_empty() { out.push(header("Run-Time Distribution", None)); }
-                out.extend(table_rows(pal, &rows, rows.iter().map(|r| r[0].chars().count()).max().unwrap_or(0), w));
-                if k == 2 {
-                    for f in &fits { out.extend(hanging(f, 3, w, pal.ink()).into_iter().map(Row::text)); }
-                    notes(&mut out, &["Per search (inferred)"]);
+                out.push(header("Results", None));
+                let cands: Vec<&Facts> = p.processes.iter().flat_map(|b| &b.searches).flat_map(|s| &s.candidates).collect();
+                let (v, a, r) = (cands.iter().filter(|c| c.verified).count(), cands.iter().filter(|c| c.accepted && !c.verified).count(), cands.iter().filter(|c| !c.accepted).count());
+                out.push(line("Candidates", vec![num(cands.len().to_string())]));
+                out.push(line("Verified", vec![num(v.to_string())]));
+                out.push(line("Not verified", vec![num(a.to_string())]));
+                out.push(line("Rejected", vec![num(r.to_string())]));
+                let mut kinds: Vec<(String, usize)> = Vec::new();
+                for g in p.groups.iter().filter(|g| g.outcome == "pushed") { match kinds.iter_mut().find(|(k, _)| *k == g.kind) { Some(e) => e.1 += 1, None => kinds.push((g.kind.clone(), 1)) } }
+                for (k, n) in &kinds { out.push(line(&format!("{} pushes", cap(k)), vec![num(n.to_string())])); }
+                // Spec strength, measured by search: searches whose verified candidates show one behavior.
+                let measured: Vec<usize> = p.processes.iter().flat_map(|b| &b.searches).filter(|s| !clears(&s.kind) && s.verified >= 2).map(|s| groups(s).len()).collect();
+                let room = w.saturating_sub(3 + lw + 9);
+                if !measured.is_empty() {
+                    let pinned = measured.iter().filter(|n| **n == 1).count();
+                    // Every search one behavior: agree has never told verified candidates apart.
+                    let always = if pinned == measured.len() { " · every one: agree split none" } else { "" };
+                    out.push(line("One behavior", vec![num(pinned.to_string()), Span::styled(fit(&format!("   of {} searches with two verified{always}", measured.len()), room), pal.muted())]));
                 }
-                notes(&mut out, &names);
-                if k == 0 && t.utilization.agent_processes.size.is_none() {
-                    out.extend(hanging("Size: no trace records the semaphores' sizes yet, so utilization is held ÷ wall alone", 3, w, pal.faint()).into_iter().map(Row::text));
-                }
-            }
-
-            out.push(blank());
-            out.push(header("Results", None));
-            let cands: Vec<&Facts> = p.processes.iter().flat_map(|b| &b.searches).flat_map(|s| &s.candidates).collect();
-            let (v, a, r) = (cands.iter().filter(|c| c.verified).count(), cands.iter().filter(|c| c.accepted && !c.verified).count(), cands.iter().filter(|c| !c.accepted).count());
-            out.push(line("Candidates", vec![num(cands.len().to_string())]));
-            out.push(line("Verified", vec![num(v.to_string())]));
-            out.push(line("Not verified", vec![num(a.to_string())]));
-            out.push(line("Rejected", vec![num(r.to_string())]));
-            let mut kinds: Vec<(String, usize)> = Vec::new();
-            for g in p.groups.iter().filter(|g| g.outcome == "pushed") { match kinds.iter_mut().find(|(k, _)| *k == g.kind) { Some(e) => e.1 += 1, None => kinds.push((g.kind.clone(), 1)) } }
-            for (k, n) in &kinds { out.push(line(&format!("{} pushes", cap(k)), vec![num(n.to_string())])); }
-            // Spec strength, measured by search: searches whose verified candidates show one behavior.
-            let measured: Vec<usize> = p.processes.iter().flat_map(|b| &b.searches).filter(|s| !clears(&s.kind) && s.verified >= 2).map(|s| groups(s).len()).collect();
-            if !measured.is_empty() {
-                let pinned = measured.iter().filter(|n| **n == 1).count();
-                // Every search one behavior: agree has never told verified candidates apart.
-                let always = if pinned == measured.len() { " · every one: agree split none" } else { "" };
-                out.push(line("One behavior", vec![num(pinned.to_string()), Span::styled(format!("   of {} searches with two verified{always}", measured.len()), pal.muted())]));
-            }
-            // A kind's rank every candidate in range shares: it selects nothing.
-            for kind in ["code", "compaction"] {
-                let ranks: Vec<Option<i64>> = p.processes.iter().flat_map(|b| &b.searches).filter(|s| s.kind == kind).flat_map(|s| &s.candidates).map(|c| c.rank).collect();
-                if ranks.len() > 1 && ranks.windows(2).all(|w| w[0] == w[1]) {
-                    out.push(line(&format!("{} rank", cap(kind)), vec![num(ranks[0].map_or("—".to_string(), |r| r.to_string())),
-                        Span::styled(format!("   for all {} candidates: the smallest diff, then the earliest, selects", ranks.len()), pal.muted())]));
+                // A kind's rank every candidate in range shares: it selects nothing.
+                for kind in ["code", "compaction"] {
+                    let ranks: Vec<Option<i64>> = p.processes.iter().flat_map(|b| &b.searches).filter(|s| s.kind == kind).flat_map(|s| &s.candidates).map(|c| c.rank).collect();
+                    if ranks.len() > 1 && ranks.windows(2).all(|w| w[0] == w[1]) {
+                        out.push(line(&format!("{} rank", cap(kind)), vec![num(ranks[0].map_or("—".to_string(), |r| r.to_string())),
+                            Span::styled(fit(&format!("   for all {} candidates: the smallest diff, then the earliest, selects", ranks.len()), room), pal.muted())]));
+                    }
                 }
             }
 
@@ -802,9 +891,12 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
             out.push(header("Trunk", None));
             let repo = &p.repo;
             let room = w.saturating_sub(3 + lw + 9);
-            out.push(line("Head", vec![Span::styled(fit(&short(repo.remote_head.as_deref().or(repo.head.as_deref()).unwrap_or("")), 9), pal.ink()), Span::styled(fit(&repo.subject.clone().unwrap_or_default(), room), pal.muted())]));
-            if let Some(lp) = &repo.last_push { out.push(line("Last push", vec![Span::styled(fit(&short(lp.commit.as_deref().unwrap_or("")), 9), pal.ink()), Span::styled(lp.time.map_or(String::new(), |t| ago(repo.now, t)), pal.muted())])); }
-            if let Some(sp) = &repo.since_push { out.push(line("Since push", vec![num(sp.commits.to_string()), Span::styled(format!("   {}{}", if sp.commits == 1 { "commit" } else { "commits" }, if sp.authors.is_empty() { String::new() } else { format!(" by {}", sp.authors.join(", ")) }), pal.muted())])); }
+            match repo.remote_head.as_deref() {
+                Some(h) => out.push(line("Head", vec![Span::styled(fit(&short(h), 9), pal.ink()), Span::styled(fit(&repo.subject.clone().unwrap_or_default(), room), pal.muted())])),
+                None => out.push(line("Head", vec![Span::styled("—", pal.faint())])),
+            }
+            if let Some(lp) = &repo.last_push { out.push(line("Last push", vec![Span::styled(fit(&short(lp.commit.as_deref().unwrap_or("")), 9), pal.ink()), Span::styled(lp.time.map_or(String::new(), |t| cap(&ago(repo.now, t))), pal.muted())])); }
+            if let Some(sp) = &repo.since_push { out.push(line("Since push", vec![num(sp.commits.to_string()), Span::styled(fit(&format!("   {}{}", if sp.commits == 1 { "commit" } else { "commits" }, if sp.authors.is_empty() { String::new() } else { format!(" by {}", sp.authors.join(", ")) }), room), pal.muted())])); }
         }
     }
     out
@@ -839,24 +931,11 @@ fn pending_rows(pal: &Palette, pending: &[&projection::Interrupt], now: i64, her
         for line in &i.what { labeled(&mut out, Vec::new(), line, pal.muted()); }
         for c in &i.choices {
             labeled(&mut out, vec![Span::styled(format!("    {}", cap(&c.choice)), pal.ink())], &c.cost, pal.ink());
-            labeled(&mut out, Vec::new(), &c.how, pal.faint());
+            // How it is made is what the owner does: a label's weight, not a location's.
+            labeled(&mut out, Vec::new(), &c.how, pal.muted());
         }
     }
     out
-}
-
-/// A line cut to `w` columns, its last cell `…` where anything was cut.
-fn clip(line: Line<'static>, w: usize) -> Line<'static> {
-    if width_of(&line.spans) <= w { return line; }
-    let mut left = w.saturating_sub(1);
-    let mut spans = Vec::new();
-    for s in line.spans {
-        if left == 0 { break; }
-        let n = s.content.chars().count();
-        if n <= left { left -= n; spans.push(s); } else { spans.push(Span::styled(s.content.chars().take(left).collect::<String>(), s.style)); left = 0; }
-    }
-    if w > 0 { spans.push(Span::styled("…", spans.last().map_or(Style::new(), |s| s.style))); }
-    Line::from(spans)
 }
 
 /// A gauge `w` cells wide: `part` of `whole` as ink cells, the rest faint.
@@ -867,8 +946,6 @@ fn gauge(pal: &Palette, part: f64, whole: f64, w: usize) -> Vec<Span<'static>> {
     vec![Span::styled("█".repeat(n), pal.ink()), Span::styled("░".repeat(w - n), pal.faint())]
 }
 
-/// Resident memory in words: `36 MB`, `1.2 GB`.
-fn size(gb: f64) -> String { if gb < 1.0 { format!("{:.0} MB", gb * 1000.0) } else { format!("{gb:.1} GB") } }
 
 /// How many journal lines show: in a repository's Project, its latest; on the host, more.
 const JOURNAL_HERE: usize = 8;
@@ -891,7 +968,7 @@ fn host_rows(app: &App, w: usize, whole: bool) -> Vec<Row> {
 fn host_record(app: &App, w: usize, whole: bool) -> Vec<Row> {
     let mut out: Vec<Line<'static>> = Vec::new();
     if app.loaded.is_none() { return Vec::new(); }
-    host_journal(app, whole, &mut out);
+    host_journal(app, whole, w, &mut out);
     if whole { host_repositories(app, w, &mut out); }
     out.into_iter().map(|l| Row::text(clip(l, w))).collect()
 }
@@ -910,11 +987,12 @@ fn host_now(app: &App, w: usize, whole: bool) -> Vec<Row> {
     out.push(section(pal, 1, "Now", None));
     let wt = &h.waiting;
     if wt.searches > 0 {
-        let mut v = vec![ink(plural(wt.searches as usize, "search", "searches")), muted(" · "), ink(format!("{}/h", money(Some(wt.per_hour)))), muted(" of your time")];
+        let mut v = vec![ink(count(wt.searches as usize, "search", "searches")), muted(" · "), ink(format!("{}/h", money(Some(wt.per_hour)))), muted(" of your time")];
         if wt.host > wt.searches && !whole { v.push(muted(&format!(" · {} on the host", wt.host))); }
         out.push(line("You wait on", v));
     }
-    out.push(line("Your time today", vec![ink(money(Some(wt.today)))]));
+    // The host's header says it already; a repository's header says its own cost, so here it is the host's.
+    if !whole { out.push(line("Your time today", vec![ink(money(Some(wt.today)))])); }
     // A gauge where the line has room for one of at least 8 cells, up to 16.
     let gw = match w.saturating_sub(3 + lw + 2 + 32) { n if n >= 8 => n.min(16), _ => 0 };
     for (name, s, what) in [("agent_processes", &h.pools.agent_processes, "in flight"), ("check_processes", &h.pools.check_processes, "in checks")] {
@@ -934,7 +1012,8 @@ fn host_now(app: &App, w: usize, whole: bool) -> Vec<Row> {
     if m.total > 0.0 {
         let mut v = Vec::new();
         if gw > 0 { v.extend(gauge(pal, m.total - m.free, m.total, gw)); v.push(Span::raw("  ")); }
-        v.push(ink(format!("{:.1} of {:.1} GB free", m.free, m.total)));
+        // The bar is what is in use; so are the words.
+        v.push(ink(format!("{:.1} of {:.1} GB in use", m.total - m.free, m.total)));
         if !h.trees.is_empty() { v.push(muted(" · bon ")); v.push(ink(size(m.bon))); }
         out.push(line("Memory", v));
     }
@@ -977,7 +1056,7 @@ fn host_now(app: &App, w: usize, whole: bool) -> Vec<Row> {
 }
 
 /// The journal: what happened, in the order it happened, by day; the latest.
-fn host_journal(app: &App, whole: bool, out: &mut Vec<Line<'static>>) {
+fn host_journal(app: &App, whole: bool, w: usize, out: &mut Vec<Line<'static>>) {
     let (pal, h) = (&app.palette, &app.host);
     out.push(section(pal, 1, "Journal", None));
     let take = if whole { JOURNAL_HOST } else { JOURNAL_HERE };
@@ -991,8 +1070,13 @@ fn host_journal(app: &App, whole: bool, out: &mut Vec<Line<'static>>) {
         let tone = match e.kind.as_str() { "pushed" => pal.tone(Tone::Violet), "blocked" => pal.tone(Tone::Yellow), _ => pal.ink() };
         let mut v = vec![Span::styled(format!("   {}  ", clock(e.time, app.off)), pal.muted()), Span::styled(fit(&cap(&e.kind), 10), tone)];
         if whole && !e.repository.is_empty() { v.push(Span::styled(format!("{} · ", e.repository), pal.muted())); }
-        v.push(Span::styled(e.text.clone(), pal.ink()));
-        out.push(Line::from(v));
+        // What happened wraps under itself, after its time and kind.
+        let at = width_of(&v);
+        for (k, l) in hanging(&e.text, at, w.max(at + 12), pal.ink()).into_iter().enumerate() {
+            let body: String = l.spans[0].content.chars().skip(at).collect();
+            if k == 0 { v.push(Span::styled(body, pal.ink())); out.push(Line::from(std::mem::take(&mut v))); }
+            else { out.push(Line::from(vec![Span::raw(" ".repeat(at)), Span::styled(body, pal.ink())])); }
+        }
     }
 }
 
@@ -1028,8 +1112,11 @@ fn host_repositories(app: &App, w: usize, out: &mut Vec<Line<'static>>) {
 
 // ── detail ──────────────────────────────────────────────
 
-/// The focused row's key.
-fn focused(app: &App) -> Option<Key> { rows(app, app.list_w).into_iter().nth(app.focus[app.ti()]).and_then(|r| r.key) }
+/// The focused item.
+fn focused(app: &App) -> Option<Key> { app.held[app.ti()].clone() }
+
+/// The goal a key stands for.
+fn goal<'a>(p: &'a Projection, k: &Key) -> Option<&'a GoalTrace> { p.groups.iter().find(|g| goal_key(g) == *k) }
 
 /// The goals in the order Traces lists them.
 fn sorted_groups(p: &Projection) -> Vec<&GoalTrace> {
@@ -1084,12 +1171,11 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
         // The host's right pane: what happened, and each repository.
         Tab::Host => { t.extend(host_record(app, width as usize, true).into_iter().map(|r| r.line)); }
         Tab::Traces => {
-            let Some(Key::Goal(gi)) = focused(app) else { return (Text::default(), marks) };
-            let Some(g) = sorted_groups(&app.p).get(gi).copied() else { return (Text::default(), marks) };
+            let Some(g) = focused(app).and_then(|k| goal(&app.p, &k)) else { return (Text::default(), marks) };
             let tone = pal.tone(goal_tone(g));
             marks.push((t.len(), Mark::Title));
             t.push(spread(vec![Span::styled(format!("{} {}", cap(&g.kind), g.title), pal.strong())], vec![Span::styled(format!("● {}", outcome_label(&g.outcome)), tone)], wd));
-            if !g.about.subject.is_empty() { t.push(Line::from(Span::styled(fit(&g.about.subject, wd), pal.muted()))); }
+            if !g.about.subject.is_empty() { t.extend(hanging(&g.about.subject, 0, wd, pal.muted())); }
             t.push(blank());
             t.extend(pairs(&pal, 0, &step_parts(g), wd));
             if let Some(c) = g.push.as_ref().and_then(|p| p.commit.as_deref()) { t.push(kv("Pushed commit", vec![Span::styled(short(c), pal.ink())])); }
@@ -1097,9 +1183,10 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
             let (gen, time) = goal_cost(g);
             t.extend(cost_rows(&pal, 0, gen, time, app.p.totals.rate));
             // Each bon process: its searches as a table, each search's candidates under it.
-            // Narrow, Elapsed moves to the search's line below it, so the steps fit.
+            // Narrow, Elapsed and then the costs move to the search's lines below it, so the steps fit.
             let (kw, tw) = (17usize, if wd >= 60 { 8usize } else { 0 });
-            let sw = wd.saturating_sub(2 + kw + tw + GEN_W + TIME_W).max(6);
+            let costs = wd >= 2 + kw + 10 + GEN_W + TIME_W;
+            let sw = wd.saturating_sub(2 + kw + tw + if costs { GEN_W + TIME_W } else { 0 }).max(6);
             // Kernel's value: why it is unreadable, said once.
             let mut explained = false;
             let mut kernel = |k: &str| match k {
@@ -1121,48 +1208,49 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
                 if let Some(k) = shared_kernel.as_deref().and_then(&mut kernel) { shared.push(("Kernel", k)); }
                 if !shared.is_empty() { t.extend(pairs(&pal, 0, &shared, wd)); }
                 let mut h = vec![Span::styled(format!("  {}{}{}", fit("Search", kw), fit("Steps", sw), if tw == 0 { String::new() } else { right("Elapsed", tw) }), pal.muted())];
-                h.extend(cost_heads(&pal));
+                if costs { h.extend(cost_heads(&pal)); }
                 t.push(Line::from(h));
                 for (k, s) in b.searches.iter().enumerate() {
                     if k > 0 && !b.searches[k - 1].candidates.is_empty() { t.push(blank()); }
                     let stone = if s.running { Tone::Orange } else if s.blocked.is_some() { Tone::Yellow } else if clears(&s.kind) { Tone::Indigo } else if s.selected.is_some() { Tone::Blue } else { Tone::Yellow };
                     let how = match s.kind.as_str() {
-                        "foil" => format!("{} → {}", s.width.max(s.returned), plural(foil_indices(s).len(), "foil", "foils")),
+                        "foil" => format!("{} → {}", s.width.max(s.returned), count(foil_indices(s).len(), "foil", "foils")),
                         "counterexample" => format!("{} → {}", s.width.max(s.returned), s.verified),
                         _ => format!("{} → {}{}", s.width.max(s.returned), s.verified, s.selected.map_or(String::new(), |i| format!(" → #{i}"))),
                     };
-                    let elapsed = s.seconds.map_or(String::new(), took);
+                    let elapsed = s.seconds.map_or(String::new(), dur);
                     marks.push((t.len(), Mark::Search));
                     let mut row = vec![
                         Span::styled("● ", pal.tone(stone)),
                         Span::styled(fit(&format!("{} {}", s.search, cap(&s.kind)), kw), pal.ink()),
                         Span::styled(fit(&how, sw), pal.ink()),
-                        Span::styled(if tw == 0 { String::new() } else { right(&elapsed, tw) }, pal.muted()),
+                        Span::styled(if tw == 0 { String::new() } else { right(&elapsed, tw) }, pal.ink()),
                     ];
-                    row.extend(cost_cells(&pal, s.generation, s.time_cost));
+                    if costs { row.extend(cost_cells(&pal, s.generation, s.time_cost)); }
                     t.push(Line::from(row));
                     let mut facts: Vec<(&str, String)> = Vec::new();
                     if !s.params.base.is_empty() { facts.push(("Base", short(&s.params.base))); }
                     if shared_limit.is_none() { if let Some(l) = s.params.limit { facts.push(("Limit", money(Some(l)))); } }
                     if shared_kernel.is_none() { if let Some(k) = kernel(&s.kernel) { facts.push(("Kernel", k)); } }
                     if tw == 0 && !elapsed.is_empty() { facts.push(("Elapsed", elapsed.clone())); }
+                    if !costs { facts.push(("Gen", money(s.generation))); facts.push(("Time", money(s.time_cost))); }
                     if s.running { let now = view::now_counts(s.in_flight, s.in_checks, s.waiting); if !now.is_empty() { facts.push(("Agent processes", now)); } }
                     // The search's measures: success, its spread over behaviors, its trees, its cost per verified candidate.
                     if s.time.is_some() && s.width > 0 {
                         let k = if s.kind == "foil" { foil_indices(s).len() as u64 } else { s.verified };
-                        facts.push(("Success probability per agent process", format!("{:.0}% ({k} of {})", 100.0 * k as f64 / s.width as f64, s.width)));
+                        facts.push(("Success probability per agent process", view::share(k, s.width)));
                     }
                     if !s.behaviors.is_empty() { facts.push(("Agent processes per behavior", s.behaviors.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(" · "))); }
                     if let Some(n) = s.trees.filter(|_| !s.candidates.is_empty()) { facts.push(("Distinct trees", n.to_string())); }
                     if let (Some(c), true) = (s.cost, s.verified > 0 && s.time.is_some()) { facts.push(("Cost per verified candidate", money(Some(c / s.verified as f64)))); }
                     // Its requests over a model's tier threshold, where any crossed it, and what they cost beyond the base price (queue 82).
-                    if s.requests_over_tier > 0 { facts.push(("Over tier", format!("{} · {} beyond the base price", plural(s.requests_over_tier as usize, "request", "requests"), money(Some(s.over_tier))))); }
+                    if s.requests_over_tier > 0 { facts.push(("Over tier", format!("{} · {} beyond the base price", count(s.requests_over_tier as usize, "request", "requests"), money(Some(s.over_tier))))); }
                     if !facts.is_empty() { t.extend(pairs(&pal, 2, &facts, wd)); }
-                    // Where its wall time went, by its slowest agent process; and summed over all of them.
+                    // Where its elapsed time went, by its slowest agent process; and summed over all of them.
                     if let Some(x) = split(s).filter(|x| x.n > 0) {
-                        t.extend(pairs(&pal, 2, &[("Wall", dur(x.wall)), ("Model", dur(x.model)), ("Checks", dur(x.checks)), ("Other", dur(x.rest))], wd));
+                        t.extend(pairs(&pal, 2, &[("Model", dur(x.model)), ("Checks", dur(x.checks)), ("Other", dur(x.rest))], wd));
                         t.extend(hanging(&format!("By its slowest agent process, #{}; other is waiting on a slot and setup (inferred). Summed over {}: model {} · checks {}",
-                            x.slowest.unwrap_or(0), plural(x.n, "agent process", "agent processes"), dur(x.model_all), dur(x.checks_all)), 2, wd, pal.faint()));
+                            x.slowest.unwrap_or(0), count(x.n, "agent process", "agent processes"), dur(x.model_all), dur(x.checks_all)), 2, wd, pal.muted()));
                     }
                     if let Some(d) = disagreement(s) { t.extend(hanging(&d, 2, wd, pal.tone(Tone::Red))); }
                     if s.blocked.is_some() { for l in why_blocked_in(s, &app.p.protected) { t.extend(hanging(&l, 2, wd, pal.tone(Tone::Yellow))); } }
@@ -1212,7 +1300,12 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
                                 else if rejected.len() == members.len() { ("Rejects".into(), pal.ink()) } else { (format!("Rejects {}", rejected.join(" ")), pal.ink()) };
                             row.push(Span::styled(fit(&m, mw), st));
                             for j in &foils { let (v, st) = verdict(c.accepts_foils.iter().find(|(k, _)| k == j).map(|(_, a)| *a)); row.push(Span::styled(fit(v, 9), st)); }
+                            // Its flags beside it where they fit, else under it: never cut.
+                            let flags = c.flags.iter().map(|f| cap(&f.replace('_', " "))).collect::<Vec<_>>().join(" · ");
+                            let beside = !flags.is_empty() && width_of(&row) + flags.chars().count() + 2 <= wd;
+                            if beside { row.push(Span::styled(format!("  {flags}"), pal.tone(Tone::Red))); }
                             t.push(Line::from(row));
+                            if !flags.is_empty() && !beside { t.extend(hanging(&flags, 8, wd, pal.tone(Tone::Red))); }
                         }
                         continue;
                     }
@@ -1236,6 +1329,8 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
                             if c.accepted && !c.proved { ("Foil", pal.ink()) } else if c.accepted { ("Not a foil", pal.muted()) } else { ("Rejected", pal.faint()) }
                         } else if c.verified { ("Yes", pal.ink()) } else if c.accepted { ("No", pal.muted()) } else { ("Rejected", pal.faint()) };
                         let lines = match (c.lines_added, c.lines_removed) { (Some(a), Some(r)) => format!("+{a} −{r}"), _ => c.diff.map_or("—".into(), |d| d.to_string()) };
+                        let flags = c.flags.iter().map(|f| cap(&f.replace('_', " "))).collect::<Vec<_>>().join(" · ");
+                        let beside = 2 + 4 + 9 + 11 + rw + 11 + 8 + 2 + flags.chars().count() <= wd;
                         t.push(Line::from(vec![
                             Span::styled(format!("  {}", fit(&format!("{}{}", c.index, if sel { "★" } else { "" }), 4)), if sel { pal.tone(Tone::Blue) } else { pal.muted() }),
                             Span::styled(fit(&short(c.commit.as_deref().unwrap_or("")), 9), pal.ink()),
@@ -1243,8 +1338,9 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
                             Span::styled(if rw == 0 { String::new() } else { right(&rank_cell(c), rw) }, pal.ink()),
                             Span::styled(right(&lines, 11), pal.ink()),
                             Span::styled(right(&money(c.generation), 8), pal.ink()),
-                            Span::styled(if c.flags.is_empty() { String::new() } else { format!("  {}", c.flags.iter().map(|f| cap(&f.replace('_', " "))).collect::<Vec<_>>().join(" · ")) }, pal.tone(Tone::Red)),
+                            Span::styled(if flags.is_empty() || !beside { String::new() } else { format!("  {flags}") }, pal.tone(Tone::Red)),
                         ]));
+                        if !flags.is_empty() && !beside { t.extend(hanging(&flags, 6, wd, pal.tone(Tone::Red))); }
                     }
                 }
             }
@@ -1252,7 +1348,7 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
             marks.push((t.len(), Mark::Notes));
             t.push(blank());
             for (k, v) in view::MEASURE_NOTES.iter().filter(|(k, _)| ["Success probability per agent process", "Agent processes per behavior", "Cost per verified candidate"].contains(k)) {
-                t.extend(hanging(&format!("{k}: {v}"), 0, wd, pal.faint()));
+                t.extend(hanging(&format!("{k}: {v}"), 0, wd, pal.muted()));
             }
         }
         Tab::Spec => {
@@ -1288,8 +1384,8 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
                 }
             };
             match focused(app) {
-                Some(Key::Item(i)) => {
-                    let it = &spec.items[i];
+                Some(Key::Item(name)) => {
+                    let Some(it) = spec.items.iter().find(|i| i.name == name) else { return (Text::default(), marks) };
                     t.push(spread(vec![Span::styled(it.name.clone(), pal.strong())], vec![Span::styled(cap(&it.kind), pal.muted())], wd));
                     if let Some(d) = &it.doc { t.extend(hanging(d, 0, wd, pal.ink())); }
                     t.push(blank());
@@ -1318,7 +1414,7 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
                     graph(&mut t, &sid);
                 }
                 Some(Key::Grid) => {
-                    t.push(spread(vec![Span::styled("State Machine", pal.strong())], vec![Span::styled(plural(spec.fields.len(), "field", "fields"), pal.muted())], wd));
+                    t.push(spread(vec![Span::styled("State Machine", pal.strong())], vec![Span::styled(count(spec.fields.len(), "field", "fields"), pal.muted())], wd));
                     // The marks, as the key bar shows keys.
                     let mut legend = Vec::new();
                     for (m, w) in [("r", "Reads"), ("w", "Writes"), ("+", "Adds"), ("−", "Removes")] { legend.push(Span::styled(format!("{m} "), pal.ink())); legend.push(Span::styled(format!("{w}   "), pal.muted())); }
@@ -1350,8 +1446,8 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
                         if let Some(d) = f.doc.as_ref().filter(|d| !d.is_empty()) { t.extend(hanging(d, nw + 1, wd, pal.faint())); }
                     }
                 }
-                Some(Key::Trusted(ti)) => {
-                    let Some(tf) = g.trusted.get(ti) else { return (Text::default(), marks) };
+                Some(Key::Trusted(name)) => {
+                    let Some(tf) = g.trusted.iter().find(|t| t.name == name) else { return (Text::default(), marks) };
                     t.push(spread(vec![Span::styled(tf.name.clone(), pal.strong())], vec![Span::styled("Trusted", pal.muted())], wd));
                     if let Some(d) = &tf.doc { t.extend(hanging(d, 0, wd, pal.ink())); }
                     t.push(blank());
@@ -1385,7 +1481,8 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
         // Project and Queue show everything in their lists: no detail.
         Tab::Project | Tab::Queue => {}
     }
-    (Text::from(t), marks)
+    // Text wraps; a table row too wide for the pane says it is cut.
+    (Text::from(t.into_iter().map(|l| clip(l, wd)).collect::<Vec<_>>()), marks)
 }
 
 /// Where the kernel, re-deriving a search from its words, disagrees with what the trace recorded.
@@ -1462,9 +1559,6 @@ fn rank_shown(s: &SearchTrace) -> RankShown {
     RankShown::Raw
 }
 
-/// A count of lines with its sign: +3, −19, ±0.
-fn signed(n: i64) -> String { if n > 0 { format!("+{n}") } else if n < 0 { format!("−{}", -n) } else { "±0".into() } }
-
 /// What decided a code or compaction search's selection, against the verified
 /// candidate that came next (the spec's `beats`): rank, then the smaller diff,
 /// then the earlier index.
@@ -1493,8 +1587,8 @@ fn rank_note(s: &SearchTrace, shown: &RankShown) -> Option<String> {
     let rank = match shown {
         RankShown::Constant(Some(r)) => Some(format!("Rank {r} for every candidate")),
         RankShown::Constant(None) => Some("No rank".to_string()),
-        RankShown::Lines { base } => Some(format!("Rank is −lines, shown against the base's {base}{}", s.selected
-            .and_then(|i| s.candidates.iter().find(|c| c.index == i)).and_then(|c| c.rank).map_or(String::new(), |r| format!(" (#{}★ raw {})", s.selected.unwrap_or(0), signed(r))))),
+        // Lines against the base: what selected says it.
+        RankShown::Lines { .. } => None,
         RankShown::Raw => None,
     };
     match (rank, how) {
@@ -1571,13 +1665,13 @@ fn hanging(text: &str, indent: usize, width: usize, style: Style) -> Vec<Line<'s
 // ── drawing ─────────────────────────────────────────────
 
 /// The key reference `?` opens: every key, by where it applies, in the
-/// key bar's words.
-const KEYS: [(&str, &[(&str, &str)]); 3] = [
-    ("Everywhere", &[("↑ ↓   j k", "Move"), ("g  G", "First, last"), ("⇥  ⇧⇥  1–4", "Tab"), ("⏎", "Open"), ("esc", "Close"),
-        ("⇧↑ ⇧↓  PgUp PgDn", "Scroll"), ("/", "Find"), ("r", "Range"), ("t", "Light or dark"), ("?", "Keys"), ("q", "Quit")]),
-    ("Traces", &[("l", "Logs"), ("d", "Compare")]),
-    // Not keys: what the words of the outcome tables at the head of Traces mean.
-    ("Outcomes", &view::OUTCOME_NOTES),
+/// key bar's words. Each works everywhere its heading says.
+const KEYS: [(&str, &[(&str, &str)]); 4] = [
+    ("Everywhere", &[("↑ ↓   j k", "Move; scroll where nothing is focused"), ("g  G", "First, last"), ("⇧↑ ⇧↓  PgUp PgDn", "Scroll"),
+        ("⇥  ⇧⇥  1–4", "Tab, in a repository"), ("t", "Light or dark"), ("?", "Keys"), ("q  ⌃C", "Quit")]),
+    ("Spec and Traces", &[("⏎", "Open, under 100 columns"), ("esc", "Close")]),
+    ("Project and Traces", &[("/", "Find"), ("r", "Range")]),
+    ("Traces", &[("l", "Logs"), ("d", "Compare two behaviors")]),
 ];
 
 /// A key bar: each key in ink, what it does muted. Where it does not fit,
@@ -1592,7 +1686,7 @@ fn key_bar(pal: &Palette, items: &[(&str, String, u8)], w: usize) -> Line<'stati
     }
     let mut v = vec![Span::raw(" ")];
     for (k, d, _) in items { v.push(Span::styled(format!("{k} "), pal.ink().add_modifier(Modifier::BOLD))); v.push(Span::styled(format!("{d}  "), pal.muted())); }
-    Line::from(v)
+    clip(Line::from(v), w)
 }
 
 /// The overflow cue a pane shows on its first row once scrolled, and on its last
@@ -1608,9 +1702,16 @@ fn more(len: usize, h: usize, top: usize) -> (bool, usize) {
     (up, if top + avail < len { avail.saturating_sub(1) } else { avail })
 }
 
+/// The first row from which the last of `len` rows shows in a pane `h` high.
+fn last_top(len: usize, h: usize) -> usize { if len > h { len + 1 - h } else { 0 } }
+
 /// Whether a tab shows the focused item's detail: Spec and Traces. Project and
 /// Queue show everything in their lists.
 fn has_detail(tab: Tab) -> bool { matches!(tab, Tab::Spec | Tab::Traces) }
+
+/// Whether a tab's list is what Find and Range filter: the bon processes, on
+/// Project (its totals) and Traces.
+fn filtered(tab: Tab) -> bool { matches!(tab, Tab::Project | Tab::Traces) }
 
 /// A row under the cursor: its text in reverse video, one style, padded to `w`.
 fn cursor_line(pal: &Palette, line: Line<'static>, w: usize) -> Line<'static> {
@@ -1620,78 +1721,182 @@ fn cursor_line(pal: &Palette, line: Line<'static>, w: usize) -> Line<'static> {
     Line::from(spans)
 }
 
+/// Where the body's panes are: the list, and the detail beside it (100
+/// columns and wider, a gutter and a rule between them) or over it (opened
+/// with ⏎ under 100). Project and Queue are a list alone.
+struct Panes { list: Rect, rows_w: u16, detail: Option<Rect>, beside: bool }
+
+fn panes(app: &App, body: Rect) -> Panes {
+    // The host, 100 columns and wider: what waits and runs │ what happened, half each.
+    if app.tab == Tab::Host && body.width >= 100 {
+        let [l, _, d] = Layout::horizontal([Constraint::Length(body.width / 2), Constraint::Length(1), Constraint::Min(30)]).areas(body);
+        return Panes { list: l, rows_w: (body.width / 2).saturating_sub(1), detail: Some(d), beside: true };
+    }
+    let beside = has_detail(app.tab) && body.width >= 100;
+    if beside {
+        // Beside the detail the list is compact (its steps are in the detail), so the detail has room.
+        let list_w = (body.width * 9 / 20).clamp(60, 66).min(body.width.saturating_sub(40));
+        let [l, _, d] = Layout::horizontal([Constraint::Length(list_w), Constraint::Length(1), Constraint::Min(30)]).areas(body);
+        // One blank column between the list's last column and the rule.
+        return Panes { list: l, rows_w: list_w.saturating_sub(1), detail: Some(d), beside };
+    }
+    if has_detail(app.tab) && app.detail_open { return Panes { list: Rect::default(), rows_w: app.list_w, detail: Some(body), beside }; }
+    Panes { list: body, rows_w: body.width, detail: None, beside }
+}
+
+/// Whether a row's key is the held item: the same key; or the same intent,
+/// queued then and retired now (or back); or the goal one of whose bon
+/// processes the held goal began with, when a filter left that one out.
+fn same(p: &Projection, row: &Key, held: &Key) -> bool {
+    match (row, held) {
+        (Key::Queue(a) | Key::Retired(a), Key::Queue(b) | Key::Retired(b)) => a == b,
+        (Key::Goal(a), Key::Goal(b)) => { let _ = p; a.split(' ').any(|t| b.split(' ').any(|u| t == u)) }
+        _ => row == held,
+    }
+}
+
+/// What a list with no bon process says: none yet, or none the find or range matches.
+fn none_yet(p: &Projection) -> &'static str {
+    if p.filter.find.is_some() { "No bon process matches" } else if p.filter.since.is_some() || p.filter.until.is_some() { "No bon process in this range" } else { "No bon process yet" }
+}
+
+/// The rows that continue row `i` (its wrapped lines), and it: the cursor covers them all.
+fn block_end(list: &[Row], i: usize) -> usize { (i + 1..list.len()).take_while(|&j| list[j].more).last().unwrap_or(i) }
+
+/// After the rows changed (a refresh, a resize, a find, a key), put the focus
+/// back on its item, or, where the item is gone, on the nearest row; keep it as
+/// far from the pane's top as it was, and in view with the rows that continue
+/// it. A list with nothing to focus scrolls, no further than its last row.
+fn place(app: &mut App, list: &[Row], h: usize) {
+    let ti = app.ti();
+    if !list.iter().any(|r| r.focusable()) { app.top[ti] = app.top[ti].min(last_top(list.len(), h)); return; }
+    let was = app.focus[ti];
+    let found = app.held[ti].as_ref().and_then(|k| list.iter().position(|r| r.key.as_ref().is_some_and(|r| same(&app.p, r, k))));
+    let i = found.unwrap_or_else(|| {
+        let from = was.min(list.len() - 1);
+        (0..list.len()).filter(|&j| list[j].focusable()).min_by_key(|&j| j.abs_diff(from)).unwrap_or(from)
+    });
+    // Its item moved to another row: the pane moves with it.
+    if found.is_some_and(|i| i != was) { app.top[ti] = (app.top[ti] + i).saturating_sub(was); }
+    app.focus_on(list, i);
+    let end = block_end(list, i);
+    // Scrolled through an item's lines (⇧↑↓, PgUp PgDn): left where it is while any of the item shows.
+    let (_, avail) = more(list.len(), h, app.top[ti]);
+    if app.scrolled && end >= app.top[ti] && i < app.top[ti] + avail { app.top[ti] = app.top[ti].min(last_top(list.len(), h)); return; }
+    app.scrolled = false;
+    if h > 2 {
+        if i < app.top[ti] { app.top[ti] = i.saturating_sub(1); }
+        for _ in 0..3 {
+            let (_, avail) = more(list.len(), h, app.top[ti]);
+            if end >= app.top[ti] + avail { app.top[ti] = (end + 1 - avail).min(i); } else { break; }
+        }
+    }
+    // A list that got shorter shows its last rows, not space under them.
+    app.top[ti] = app.top[ti].min(last_top(list.len(), h));
+}
+
+/// Every log of a goal's agent processes, by where it is.
+fn logs_of(app: &App, g: &GoalTrace) -> Vec<(String, std::path::PathBuf)> {
+    let mut items = Vec::new();
+    for b in &g.processes { for s in &b.searches { for c in &s.candidates { for l in &c.logs {
+        items.push((format!("Process {} · Search {} · #{} · {l}", b.pid, s.search, c.index), app.root.join(".bon/traces").join(&b.trace).join(s.search.to_string()).join(c.index.to_string()).join(l)));
+    } } } }
+    items
+}
+
+/// The first search of a goal whose verified candidates show two behaviors, and one candidate of each.
+fn two_behaviors(g: &GoalTrace) -> Option<(&BonProcess, &SearchTrace, &Facts, &Facts)> {
+    g.processes.iter().flat_map(|b| b.searches.iter().map(move |s| (b, s))).find_map(|(b, s)| {
+        let gs = groups(s);
+        (gs.len() >= 2).then(|| (b, s, gs[0][0], gs[1][0]))
+    })
+}
+
+/// The width from which the header is one row, cost beside what runs.
+const HEAD_ONE_ROW: usize = 140;
+
+/// What a line says when the file it would show is gone.
+const GONE: &str = "This log is no longer on disk.";
+
 fn draw(f: &mut Frame, app: &mut App) {
     let pal = app.palette;
     let area = f.area();
-    let p = &app.p;
+    let w = area.width as usize;
+    let loaded = app.loaded.is_some();
 
     // Header: the repository, trunk and what is running; cost at the right:
-    // generation and time, the same weight, then their total, muted. Where
-    // both do not fit on one row, cost has a row of its own.
-    // What runs now: the bon processes, and their running searches' agent processes by where each is.
-    let running = p.processes.iter().filter(|b| b.running).count();
-    let live: Vec<&SearchTrace> = p.processes.iter().filter(|b| b.running).flat_map(|b| &b.searches).filter(|s| s.running).collect();
-    let sum = |f: fn(&SearchTrace) -> u64| live.iter().map(|s| f(s)).sum::<u64>();
-    let now = view::now_counts(sum(|s| s.in_flight), sum(|s| s.in_checks), sum(|s| s.waiting));
+    // generation and time, the same weight, then their total, muted. Its rows
+    // depend on the width alone (one from HEAD_ONE_ROW columns, else two, the
+    // cost on its own), so nothing moves when a read or a bon process arrives.
+    // Before the first read, only the repository's name and that it is being
+    // read, where trunk will be.
+    let p = &app.p;
     let repo = &p.repo;
     let host = app.tab == Tab::Host;
-    let mut left = if host {
-        // The host: how many repositories it reaches; then what runs and what waits, across them.
-        let n = app.host.repositories.len();
-        vec![Span::styled(" Host", pal.strong()), Span::styled(if app.loaded.is_some() { format!(" · {}", plural(n, "repository", "repositories")) } else { " · Reading".into() }, pal.muted()), Span::raw("   ")]
-    } else { vec![
-        Span::styled(format!(" {}", repo.name.clone().unwrap_or_default()), pal.strong()),
-        // Trunk as bon works on it: the remote's ref.
-        Span::styled(format!(" · {}/{} · {}", repo.remote.clone().unwrap_or("origin".into()), repo.trunk.clone().unwrap_or("main".into()), short(repo.remote_head.as_deref().unwrap_or(""))), pal.muted()),
-        Span::raw("   "),
-    ] };
-    let running = if host { app.host.trees.iter().map(|g| g.processes.len()).sum() } else { running };
-    let now = if host {
-        let ps = || app.host.trees.iter().flat_map(|g| &g.processes);
-        view::now_counts(ps().map(|r| r.in_flight).sum(), ps().map(|r| r.in_checks).sum(), ps().map(|r| r.waiting).sum())
-    } else { now };
-    if host && app.loaded.is_none() {}
-    else if running > 0 {
-        left.push(Span::styled(format!("● Running {running}"), pal.tone(Tone::Orange)));
-        if !now.is_empty() { left.push(Span::styled(format!(" · agent processes {now}"), pal.ink())); }
-    } else { left.push(Span::styled("Idle", pal.muted())); }
-    // What waits on engineer: the pending interrupts, which Project lists first.
-    let pending = if host { &app.host.interrupts } else { &p.interrupts }.iter().filter(|i| i.resolved.is_none()).count();
-    if pending > 0 { left.push(Span::styled(format!("   ● Pending {pending}"), pal.tone(Tone::Yellow))); }
-    let t = &p.totals;
-    let cost = |gw: &str, rate: bool| {
-        // The host's: engineer's time charged today, across its repositories.
-        if host {
-            return if app.loaded.is_none() { Vec::new() } else { vec![Span::styled(money(Some(app.host.waiting.today)), pal.ink()), Span::styled(if rate { " of your time today " } else { " today " }, pal.muted())] };
-        }
-        let mut v = vec![Span::styled(money(Some(t.generation)), pal.ink()), Span::styled(format!(" {gw} + "), pal.muted()),
-            Span::styled(money(Some(t.time_cost)), pal.ink()), Span::styled(" time", pal.muted())];
-        if rate && t.rate.is_some() { v.push(Span::styled(format!(" {}", at_rate(t.rate)), pal.muted())); }
-        v.push(Span::styled(format!(" = {} ", money(Some(t.cost))), pal.muted()));
-        v
-    };
-    let w = area.width as usize;
-    // Too narrow for what runs in words: its counts go first, the rest is cut with …
-    if width_of(&left) >= w { left.retain(|s| !s.content.starts_with(" · agent processes")); }
-    let fits = |l: usize, r: &Vec<Span>| l + width_of(r) + 2 <= w;
-    let head: Vec<Line> = match [cost("generation", true), cost("generation", false)].into_iter().find(|c| fits(width_of(&left), c)) {
-        Some(c) => vec![spread(left, c, w)],
-        None => {
+    let name = if host { "Host".to_string() } else { repo.name.clone().unwrap_or_else(|| app.root.canonicalize().ok().and_then(|r| r.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_default()) };
+    let mut left = vec![Span::styled(format!(" {name}"), pal.strong())];
+    let head: Vec<Line> = if !loaded {
+        left.push(Span::styled(" · Reading", pal.muted()));
+        let mut rows = vec![clip(Line::from(left), w)];
+        if w < HEAD_ONE_ROW { rows.push(Line::default()); }
+        rows
+    } else {
+        // What runs now: the bon processes (on the host, across its repositories), and their running searches' agent processes by where each is.
+        let (running, now) = if host {
+            let ps = || app.host.trees.iter().flat_map(|g| &g.processes);
+            (ps().count(), view::now_counts(ps().map(|r| r.in_flight).sum(), ps().map(|r| r.in_checks).sum(), ps().map(|r| r.waiting).sum()))
+        } else {
+            let live: Vec<&SearchTrace> = p.processes.iter().filter(|b| b.running).flat_map(|b| &b.searches).filter(|s| s.running).collect();
+            let sum = |f: fn(&SearchTrace) -> u64| live.iter().map(|s| f(s)).sum::<u64>();
+            (p.processes.iter().filter(|b| b.running).count(), view::now_counts(sum(|s| s.in_flight), sum(|s| s.in_checks), sum(|s| s.waiting)))
+        };
+        // Where: on the host, how many repositories it reaches; in one, trunk as bon works on it, the remote's ref.
+        let at = if host { count(app.host.repositories.len(), "repository", "repositories") } else { view::trunk(repo.remote.as_deref(), repo.trunk.as_deref(), repo.remote_head.as_deref()) };
+        if !at.is_empty() { left.push(Span::styled(format!(" · {at}"), pal.muted())); }
+        left.push(Span::raw("   "));
+        if running > 0 {
+            left.push(Span::styled(format!("● Running {running}"), pal.tone(Tone::Orange)));
+            if !now.is_empty() { left.push(Span::styled(format!(" · agent processes {now}"), pal.ink())); }
+        } else { left.push(Span::styled("Idle", pal.muted())); }
+        // What waits on engineer: the pending interrupts, which Project (or the host) lists first.
+        let pending = if host { &app.host.interrupts } else { &p.interrupts }.iter().filter(|i| i.resolved.is_none()).count();
+        if pending > 0 { left.push(Span::styled(format!("   ● Pending {pending}"), pal.tone(Tone::Yellow))); }
+        let t = &p.totals;
+        let cost = |gw: &str, rate: bool| {
+            // The host's: engineer's time charged today, across its repositories.
+            if host { return vec![Span::styled(money(Some(app.host.waiting.today)), pal.ink()), Span::styled(if rate { " of your time today " } else { " today " }, pal.muted())]; }
+            let mut v = vec![Span::styled(money(Some(t.generation)), pal.ink()), Span::styled(format!(" {gw} + "), pal.muted()),
+                Span::styled(money(Some(t.time_cost)), pal.ink()), Span::styled(" time", pal.muted())];
+            if rate && !at_rate(t.rate).is_empty() { v.push(Span::styled(format!(" {}", at_rate(t.rate)), pal.muted())); }
+            v.push(Span::styled(format!(" = {} ", money(Some(t.cost))), pal.muted()));
+            v
+        };
+        // Too narrow for what runs in words: its counts go first, so Pending still shows.
+        if width_of(&left) >= w { left.retain(|s| !s.content.starts_with(" · agent processes")); }
+        let fits = |l: usize, r: &Vec<Span>| l + width_of(r) + 2 <= w;
+        if w >= HEAD_ONE_ROW {
+            // The shortest cost that fits beside what runs; what runs is cut, with …, before cost is.
+            let c = [cost("generation", true), cost("generation", false), cost("gen", false)].into_iter().find(|c| fits(width_of(&left), c)).unwrap_or_else(|| cost("gen", false));
+            let room = w.saturating_sub(width_of(&c) + 2);
+            vec![spread(clip(Line::from(left), room).spans, c, w)]
+        } else {
             let c = [cost("generation", true), cost("generation", false), cost("gen", false)].into_iter().find(|c| fits(1, c)).unwrap_or_else(|| cost("gen", false));
             let mut row = vec![Span::raw(" ")]; row.extend(c);
-            vec![clip(Line::from(left), w), Line::from(row)]
+            vec![clip(Line::from(left), w), clip(Line::from(row), w)]
         }
     };
     let [top, tabs, rule, body, foot] = Layout::vertical([Constraint::Length(head.len() as u16), Constraint::Length(if host { 0 } else { 1 }), Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)]).areas(area);
     f.render_widget(Paragraph::new(head), top);
 
-    // Tabs, with counts where a count says something.
+    // Tabs, with counts where a count says something, once read.
     let label = |tab: Tab| match tab {
         Tab::Project => "Project".to_string(),
         Tab::Spec => "Spec".to_string(),
-        Tab::Queue => format!("Queue {}", p.queue.as_ref().map_or(0, |q| q.len())),
-        Tab::Traces => format!("Traces {}", p.groups.len()),
-        Tab::Host => "Host".to_string(),
+        Tab::Queue if loaded => format!("Queue {}", p.queue.as_ref().map_or(0, |q| q.len())),
+        Tab::Traces if loaded => format!("Traces {}", p.groups.len()),
+        Tab::Queue => "Queue".into(),
+        Tab::Traces => "Traces".into(),
+        Tab::Host => "Host".into(),
     };
     let mut spans = vec![Span::raw(" ")];
     for tab in if host { &[Tab::Host][..] } else { &TABS[..] }.iter().copied() {
@@ -1699,93 +1904,75 @@ fn draw(f: &mut Frame, app: &mut App) {
         spans.push(Span::styled(format!(" {} ", label(tab)), if on { pal.strong().add_modifier(Modifier::UNDERLINED) } else { pal.muted() }));
         spans.push(Span::raw("  "));
     }
-    f.render_widget(Paragraph::new(Line::from(spans)), tabs);
+    f.render_widget(Paragraph::new(clip(Line::from(spans), w)), tabs);
     f.render_widget(Paragraph::new(Line::from(Span::styled("─".repeat(rule.width as usize), pal.rule()))), rule);
 
     // Body: the list, and the focused item's detail beside it or over it.
-    let wide = body.width >= 100;
-    // The host, wide: what waits and runs │ what happened, half each.
-    app.split = app.tab == Tab::Host && wide;
-    let detail_tab = has_detail(app.tab) || app.split;
-    let (list_area, detail_area) = if !detail_tab { (body, None) }
-        else if app.split {
-            let [l, _, d] = Layout::horizontal([Constraint::Length(body.width / 2), Constraint::Length(1), Constraint::Min(30)]).areas(body); (l, Some(d))
-        }
-        else if wide {
-            // Beside the detail the list is compact (its steps are in the detail), so the detail has room.
-            let list_w = (body.width * 9 / 20).clamp(60, 66).min(body.width.saturating_sub(40));
-            let [l, _, d] = Layout::horizontal([Constraint::Length(list_w), Constraint::Length(1), Constraint::Min(30)]).areas(body); (l, Some(d))
-        }
-        else if app.detail_open { (Rect::default(), Some(body)) } else { (body, None) };
-    if wide && detail_tab {
-        let x = list_area.right();
+    let panes = panes(app, body);
+    app.split = app.tab == Tab::Host && panes.beside;
+    if panes.beside {
+        let x = panes.list.right();
         for y in body.top()..body.bottom() { f.buffer_mut()[(x, y)].set_symbol("│").set_style(pal.rule()); }
     }
-    if list_area.width > 0 { app.list_w = list_area.width; }
+    if panes.list.width > 0 { app.list_w = panes.rows_w; app.list_h = panes.list.height; }
     let list = rows(app, app.list_w);
-    let scrolls = !list.iter().any(|r| r.focusable());
-    let list_fits = list.len() <= list_area.height as usize;
+    let focusable = list.iter().filter(|r| r.focusable()).count();
     let ti = app.ti();
-    // Keep the focus on a focusable row, and in view: rows below a cue it
-    // shares the pane with. A list with nothing to focus scrolls, no further
-    // than its last row.
-    if !list.iter().any(|r| r.focusable()) {
-        let h = list_area.height as usize;
-        app.top[ti] = if list.len() > h { app.top[ti].min(list.len() + 1 - h) } else { 0 };
-    } else {
-        let mut i = app.focus[ti].min(list.len() - 1);
-        if !list[i].focusable() { if let Some(j) = (i..list.len()).chain((0..i).rev()).find(|&j| list[j].focusable()) { i = j; } }
-        app.focus[ti] = i;
-        let h = list_area.height as usize;
-        if h > 2 {
-            if i < app.top[ti] { app.top[ti] = i.saturating_sub(1); }
-            for _ in 0..3 {
-                let (_, avail) = more(list.len(), h, app.top[ti]);
-                if i >= app.top[ti] + avail { app.top[ti] = i + 1 - avail; } else { break; }
-            }
-        }
-    }
-    if list_area.width > 0 {
-        let (up, avail) = more(list.len(), list_area.height as usize, app.top[ti]);
+    place(app, &list, if panes.list.width > 0 { panes.list.height as usize } else { app.list_h as usize });
+    // A detail opened over a list that has since emptied (a find that matched nothing) closes onto it.
+    if app.detail_open && focusable == 0 { app.detail_open = false; }
+    let list_len = list.len();
+    if panes.list.width > 0 {
+        let (up, avail) = more(list.len(), panes.list.height as usize, app.top[ti]);
         let down = app.top[ti] + avail < list.len();
         // The cursor: the focused row and the rows that continue it, in reverse video, the list's width.
-        let lw = list_area.width as usize;
-        let focus = app.focus[ti];
-        let covered: Vec<bool> = list.iter().enumerate().scan(false, |on, (i, r)| { *on = if r.focusable() { i == focus } else { *on && r.more }; Some(*on) }).collect();
+        let lw = app.list_w as usize;
+        let (focus, end) = (app.focus[ti], block_end(&list, app.focus[ti]));
         let mut lines: Vec<Line> = list.into_iter().enumerate().skip(app.top[ti]).take(avail).map(|(i, r)| {
-            if covered[i] { cursor_line(&pal, r.line, lw) } else { r.line }
+            let l = clip(r.line, lw);
+            if focusable > 0 && (focus..=end).contains(&i) { cursor_line(&pal, l, lw) } else { l }
         }).collect();
         if up { lines.insert(0, more_line(&pal, true)); }
         if down { lines.push(more_line(&pal, false)); }
-        f.render_widget(Paragraph::new(lines), list_area);
+        f.render_widget(Paragraph::new(lines), panes.list);
     }
-    let mut detail_fits = true;
-    if let Some(d) = detail_area {
+    let mut detail_more = false;
+    app.detail_shown = panes.detail.is_some();
+    if let Some(d) = panes.detail {
         let inner = Rect { x: d.x + 1, width: d.width.saturating_sub(2), ..d };
+        app.detail_h = inner.height;
         let (text, marks) = detail_marked(app, inner.width);
         let lines = text.lines;
         let h = inner.height as usize;
-        detail_fits = lines.len() <= h;
-        // Its lines are cut to the pane, so a line is a row; it scrolls no further than its last line.
-        let s = (app.detail_top as usize).min(lines.len().saturating_sub(1));
+        // Its lines fit the pane, so a line is a row.
+        detail_more = lines.len() > h;
+        // Scrolled to line s: the title, the process above, its search and a table's header
+        // whose rows continue stay at the top, each while what it heads is on screen (and
+        // only where at least three rows of what scrolls remain under them); then the cues.
+        let layout = |s: usize| -> (Vec<usize>, bool, bool, usize) {
+            let last = |m: Mark| marks.iter().rev().find(|(i, k)| *k == m && *i < s).map(|(i, _)| *i);
+            let open = |at: usize, ends: &[Mark]| !marks.iter().any(|(i, k)| *i > at && *i <= s && ends.contains(k));
+            let mut pins: Vec<usize> = Vec::new();
+            if s > 0 && h >= 8 {
+                if let Some(i) = last(Mark::Title) { pins.push(i); }
+                if let Some(i) = last(Mark::Process) { pins.push(i); }
+                if let Some(i) = last(Mark::Search).filter(|&i| open(i, &[Mark::Process, Mark::Search, Mark::Notes])) { pins.push(i); }
+                if let Some(i) = last(Mark::Header).filter(|&i| open(i, &[Mark::Process, Mark::Search, Mark::Notes])) { pins.push(i); }
+                pins.retain(|i| *i < s);
+                pins.dedup();
+            }
+            let up = s > 0;
+            let room = h.saturating_sub(pins.len() + up as usize);
+            let down = s + room < lines.len();
+            (pins, up, down, room.saturating_sub(down as usize))
+        };
+        // It scrolls no further than the first line from which its last line shows.
+        let end = (0..lines.len().max(1)).find(|&s| !layout(s).2).unwrap_or(0);
+        let s = (app.detail_top as usize).min(end);
         if !lines.is_empty() { app.detail_top = s as u16; }
-        // Scrolled, the title, the process above, its search and a table's header whose
-        // rows continue stay at the top: each while what it heads is on screen.
-        let last = |m: Mark| marks.iter().rev().find(|(i, k)| *k == m && *i < s).map(|(i, _)| *i);
-        let open = |at: usize, ends: &[Mark]| !marks.iter().any(|(i, k)| *i > at && *i <= s && ends.contains(k));
-        let mut pins: Vec<usize> = Vec::new();
-        if s > 0 {
-            if let Some(i) = last(Mark::Title) { pins.push(i); }
-            if let Some(i) = last(Mark::Process) { pins.push(i); }
-            if let Some(i) = last(Mark::Search).filter(|&i| open(i, &[Mark::Process, Mark::Search, Mark::Notes])) { pins.push(i); }
-            if let Some(i) = last(Mark::Header).filter(|&i| open(i, &[Mark::Process, Mark::Search, Mark::Notes])) { pins.push(i); }
-            pins.retain(|i| *i < s);
-            pins.dedup();
-        }
-        let up = s > 0;
-        let room = h.saturating_sub(pins.len() + up as usize);
-        let down = s + room < lines.len();
-        let room = room.saturating_sub(down as usize);
+        let (pins, up, down, room) = layout(s);
+        // A page of the detail is what it shows under its pinned lines and cues.
+        app.detail_page = room.max(1) as u16;
         let mut shown: Vec<Line> = Vec::new();
         if up { shown.push(more_line(&pal, true)); }
         shown.extend(pins.iter().map(|i| lines[*i].clone()));
@@ -1793,8 +1980,17 @@ fn draw(f: &mut Frame, app: &mut App) {
         if down { shown.push(more_line(&pal, false)); }
         f.render_widget(Paragraph::new(shown), inner);
     }
-    // An overlay covers the body.
-    match &app.overlay {
+    // An overlay covers the body. Its long lines wrap, and it scrolls by the rows they wrap to.
+    let bw = body.width as usize;
+    app.body_h = body.height;
+    // A text as the rows it wraps to at `w`: no character is cut off, none is lost.
+    let rows_of = |text: &[String], w: usize| -> Vec<String> {
+        text.iter().flat_map(|l| {
+            let c: Vec<char> = l.chars().collect();
+            if c.is_empty() { vec![String::new()] } else { c.chunks(w.max(1)).map(|p| p.iter().collect()).collect::<Vec<String>>() }
+        }).collect()
+    };
+    match &mut app.overlay {
         Overlay::None => {}
         Overlay::Logs { items, sel } => {
             f.render_widget(ratatui::widgets::Clear, body);
@@ -1802,59 +1998,78 @@ fn draw(f: &mut Frame, app: &mut App) {
             let h = body.height.saturating_sub(2) as usize;
             let first = sel.saturating_sub(h.saturating_sub(1));
             for (i, (label, _)) in items.iter().enumerate().skip(first).take(h) {
-                let l = Line::from(Span::styled(format!(" {}", fit(label, body.width as usize - 1)), pal.ink()));
-                lines.push(if i == *sel { cursor_line(&pal, l, body.width as usize) } else { l });
+                let l = Line::from(Span::styled(format!(" {}", fit(label, bw.saturating_sub(1))), pal.ink()));
+                lines.push(if i == *sel { cursor_line(&pal, l, bw) } else { l });
             }
             f.render_widget(Paragraph::new(lines), body);
         }
         Overlay::Text { title, lines, top } => {
             f.render_widget(ratatui::widgets::Clear, body);
             let [head, text] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(body);
-            f.render_widget(Paragraph::new(spread(vec![Span::styled(format!(" {title}"), pal.strong())], vec![Span::styled(format!("Line {} of {} ", top + 1, lines.len()), pal.muted())], head.width as usize)), head);
-            // Long lines wrap, so nothing is cut at the edge.
-            let shown: Vec<Line> = lines.iter().skip(*top).take(text.height as usize * 2).map(|l| Line::from(Span::styled(l.clone(), pal.ink()))).collect();
-            f.render_widget(Paragraph::new(shown).wrap(Wrap { trim: false }), Rect { x: text.x + 1, width: text.width.saturating_sub(2), ..text });
+            let rows = rows_of(lines, text.width.saturating_sub(2) as usize);
+            *top = (*top).min(rows.len().saturating_sub(text.height as usize));
+            app.overlay_rows = rows.len().saturating_sub(text.height as usize) + 1;
+            let at = vec![Span::styled(if rows.is_empty() { "Empty ".to_string() } else { format!("Row {} of {} ", *top + 1, rows.len()) }, pal.muted())];
+            f.render_widget(Paragraph::new(spread(vec![Span::styled(format!(" {}", fit(title, bw.saturating_sub(width_of(&at) + 2))), pal.strong())], at, bw)), head);
+            let shown: Vec<Line> = rows.into_iter().skip(*top).take(text.height as usize).map(|l| Line::from(Span::styled(l, pal.ink()))).collect();
+            f.render_widget(Paragraph::new(shown), Rect { x: text.x + 1, width: text.width.saturating_sub(2), ..text });
         }
         Overlay::Compare { titles, left, right, top } => {
             f.render_widget(ratatui::widgets::Clear, body);
             let [l, _, r] = Layout::horizontal([Constraint::Percentage(50), Constraint::Length(1), Constraint::Percentage(50)]).areas(body);
-            for (area, title, text) in [(l, &titles.0, left), (r, &titles.1, right)] {
-                let mut out = vec![Line::from(Span::styled(format!(" {title}"), pal.strong())), Line::default()];
-                out.extend(text.iter().enumerate().skip(*top).take(area.height as usize).map(|(i, line)| {
-                    let other = if std::ptr::eq(text, left) { right.get(i) } else { left.get(i) };
-                    Line::from(Span::styled(format!(" {line}"), if other == Some(line) { pal.muted() } else { pal.ink() }))
-                }));
-                f.render_widget(Paragraph::new(out), area);
+            // Each output wraps in its pane; a row the other side has too is muted.
+            let pane_w = l.width.min(r.width).saturating_sub(1) as usize;
+            let (lr, rr) = (rows_of(left, pane_w), rows_of(right, pane_w));
+            let h = body.height.saturating_sub(2) as usize;
+            *top = (*top).min(lr.len().max(rr.len()).saturating_sub(h));
+            app.overlay_rows = lr.len().max(rr.len()).saturating_sub(h) + 1;
+            for (area, title, rows, other) in [(l, &titles.0, &lr, &rr), (r, &titles.1, &rr, &lr)] {
+                let [head, rest] = Layout::vertical([Constraint::Length(2), Constraint::Min(1)]).areas(area);
+                f.render_widget(Paragraph::new(Line::from(Span::styled(format!(" {}", fit(title, area.width.saturating_sub(1) as usize)), pal.strong()))), head);
+                let out: Vec<Line> = rows.iter().enumerate().skip(*top).take(rest.height as usize)
+                    .map(|(i, row)| Line::from(Span::styled(row.clone(), if other.get(i) == Some(row) { pal.muted() } else { pal.ink() }))).collect();
+                f.render_widget(Paragraph::new(out), Rect { x: rest.x + 1, width: rest.width.saturating_sub(1), ..rest });
             }
             for y in body.top()..body.bottom() { f.buffer_mut()[(l.right(), y)].set_symbol("│").set_style(pal.rule()); }
         }
     }
 
-    // Footer: the keys, the same on every tab, or an error reading the projection.
-    let filter = app.filter.lock().map(|f| f.clone()).unwrap_or_default();
+    // Footer: what each key does now, and only the keys that would change
+    // something; or an error reading the projection.
+    // Find and Range as the shown projection was read, so the footer and the rows agree.
+    let pf = &app.p.filter;
+    let filter = view::Filter { since: pf.since.map(|t| t as u64), until: pf.until.map(|t| t as u64), find: pf.find.clone() };
     let fw = foot.width as usize;
-    let foot_line = if let Some(e) = &app.error { Line::from(Span::styled(format!(" {e}"), pal.tone(Tone::Red))) }
-    else if let Some(buf) = &app.input { let mut l = vec![Span::styled(" Find  ", pal.muted()), Span::styled(format!("{buf}▏   "), pal.ink())]; l.extend(key_bar(&pal, &[("⏎", "Apply".into(), 1), ("esc", "Cancel".into(), 1)], fw).spans); Line::from(l) }
+    // What is being typed shows over an error: the error is still there when it is done.
+    let foot_line = if let Some(buf) = &app.input { let mut l = vec![Span::styled(" Find  ", pal.muted()), Span::styled(format!("{buf}▏   "), pal.ink())]; l.extend(key_bar(&pal, &[("⏎", "Apply".into(), 1), ("esc", "Cancel".into(), 1)], fw).spans); clip(Line::from(l), fw) }
+    else if let Some(e) = &app.error { clip(Line::from(Span::styled(format!(" {e}"), pal.tone(Tone::Red))), fw) }
     else {
-        // The same words as the key reference; the detail's keys where a detail shows.
-        let shown = detail_tab && (wide || app.detail_open);
+        let shown = panes.detail.is_some();
         let items: Vec<(&str, String, u8)> = match &app.overlay {
-            Overlay::Logs { .. } => vec![("↑↓", "Move".into(), 3), ("⏎", "Open".into(), 3), ("esc", "Close".into(), 3)],
-            Overlay::Text { .. } | Overlay::Compare { .. } => vec![("↑↓", "Scroll".into(), 3), ("PgUp PgDn", "Scroll".into(), 2), ("esc", "Close".into(), 3)],
+            Overlay::Logs { items, .. } => { let mut v = vec![("⏎", "Open".into(), 3), ("esc", "Close".into(), 3)]; if items.len() > 1 { v.insert(0, ("↑↓", "Move".into(), 3)); } v }
+            Overlay::Text { .. } | Overlay::Compare { .. } => vec![("↑↓ PgUp PgDn", "Scroll".into(), 3), ("esc", "Close".into(), 3)],
+            Overlay::None if !loaded => { let mut v = vec![("?", "Keys".into(), 6), ("q", "Quit".into(), 9)]; if app.tab != Tab::Host { v.insert(0, ("⇥", "Tab".into(), 3)); } v }
             Overlay::None => {
+                let goal_now = (app.tab == Tab::Traces).then(|| focused(app).and_then(|k| goal(&app.p, &k))).flatten();
                 // Narrow, what the open detail binds outranks what ? lists anyway.
-                // On the host, a scroll key only where its pane runs past its height.
-                let host = app.tab == Tab::Host;
                 let mut v: Vec<(&str, String, u8)> = Vec::new();
-                if !(host && list_fits) { v.push(("↑↓", if scrolls { "Scroll" } else { "Move" }.into(), 5)); }
-                if detail_tab && !wide { v.push(if app.detail_open { ("esc", "Close".into(), 9) } else { ("⏎", "Open".into(), 9) }); }
-                if shown && !(host && detail_fits) { v.push(("⇧↑↓", if app.split { "Scroll right" } else { "Scroll" }.into(), 8)); }
-                if shown && app.tab == Tab::Traces { v.push(("l", "Logs".into(), 7)); v.push(("d", "Compare".into(), 7)); }
-                // The host has one tab, and nothing to find or range over.
-                if app.tab != Tab::Host {
-                    v.push(("⇥", "Tab".into(), 3));
+                if focusable > 1 && panes.list.width > 0 { v.push(("↑↓", "Move".into(), 5)); }
+                else if focusable == 0 && list_len > panes.list.height as usize { v.push(("↑↓", "Scroll".into(), 5)); }
+                if has_detail(app.tab) && !panes.beside {
+                    if app.detail_open { v.push(("esc", "Close".into(), 9)); } else if focusable > 0 { v.push(("⏎", "Open".into(), 9)); }
+                }
+                if shown && detail_more { v.push(("⇧↑↓", "Scroll".into(), 8)); }
+                if shown { if let Some(g) = goal_now {
+                    if !logs_of(app, g).is_empty() { v.push(("l", "Logs".into(), 7)); }
+                    if two_behaviors(g).is_some() { v.push(("d", "Compare".into(), 7)); }
+                } }
+                // The host is one tab.
+                if app.tab != Tab::Host { v.push(("⇥", "Tab".into(), 3)); }
+                // Find and Range only where there are bon processes to filter, or a filter to undo.
+                let narrowed = filter.find.is_some() || filter.since.is_some() || filter.until.is_some();
+                if filtered(app.tab) && (!app.p.groups.is_empty() || narrowed) {
                     v.push(("/", filter.find.as_deref().map_or("Find".to_string(), |f| format!("Find: {f}")), 4));
-                    v.push(("r", if app.range == 0 { "Range".to_string() } else { format!("Range: {}", RANGES[app.range].0) }, 2));
+                    v.push(("r", range_label(app, &filter), 2));
                 }
                 v.push(("?", "Keys".into(), 6));
                 v.push(("q", "Quit".into(), 9));
@@ -1867,17 +2082,40 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     if app.keys {
         let kw = 20;
-        let n: usize = KEYS.iter().map(|(_, ks)| ks.len() + 2).sum::<usize>() + 1;
+        // Its rows: each group's heading and keys, and a blank row between groups where they fit.
+        let content: usize = KEYS.iter().map(|(_, ks)| ks.len() + 1).sum();
+        let spaced = (content + KEYS.len() - 1 + 2) as u16 <= area.height;
+        let n = content + if spaced { KEYS.len() - 1 } else { 0 };
         let w = 72.min(area.width); let h = (n as u16 + 2).min(area.height);
         let r = Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h };
         f.render_widget(ratatui::widgets::Clear, r);
         let mut all = vec![];
         for (i, (where_, ks)) in KEYS.iter().enumerate() {
-            if i > 0 { all.push(Line::default()); }
+            if i > 0 && spaced { all.push(Line::default()); }
             all.push(section(&pal, 1, where_, None));
-            for (k, what) in ks.iter() { all.push(Line::from(vec![Span::styled(format!("   {}", fit(k, kw)), pal.ink().add_modifier(Modifier::BOLD)), Span::styled(what.to_string(), pal.muted())])); }
+            for (k, what) in ks.iter() { all.push(clip(Line::from(vec![Span::styled(format!("   {}", fit(k, kw)), pal.ink().add_modifier(Modifier::BOLD)), Span::styled(what.to_string(), pal.muted())]), w.saturating_sub(2) as usize)); }
         }
-        f.render_widget(Paragraph::new(all).block(ratatui::widgets::Block::bordered().border_style(pal.rule()).title(Span::styled(" Keys ", pal.strong()))), r);
+        // Too short for every key: it scrolls, with the panes' cues.
+        let inner = h.saturating_sub(2) as usize;
+        app.keys_top = app.keys_top.min(last_top(all.len(), inner));
+        let (up, avail) = more(all.len(), inner, app.keys_top);
+        app.keys_page = avail.max(1);
+        let down = app.keys_top + avail < all.len();
+        let mut shown: Vec<Line> = all.into_iter().skip(app.keys_top).take(avail).collect();
+        if up { shown.insert(0, more_line(&pal, true)); }
+        if down { shown.push(more_line(&pal, false)); }
+        f.render_widget(Paragraph::new(shown).block(ratatui::widgets::Block::bordered().border_style(pal.rule()).title(Span::styled(" Keys ", pal.strong()))), r);
+    }
+}
+
+/// The range r has set, or the one bon was started with: what the footer says.
+fn range_label(app: &App, f: &view::Filter) -> String {
+    // r's range once the read for it is shown; until then, what is shown.
+    let asked = app.filter.lock().map(|x| x.since).unwrap_or(None);
+    if app.range > 0 && f.since == asked { return format!("Range: {}", RANGES[app.range].0); }
+    match (f.since, f.until) {
+        (None, None) => "Range".into(),
+        (s, u) => format!("Range:{}{}", s.map_or(String::new(), |t| format!(" since {}", view::date(t))), u.map_or(String::new(), |t| format!(" until {}", view::date(t)))),
     }
 }
 
@@ -1896,11 +2134,16 @@ pub fn frame(root: &str, w: u16, h: u16, tab: usize, focus: usize, light: bool) 
     // Outside every repository, the host is the one tab.
     app.tab = if root.is_empty() { Tab::Host } else { TABS[tab.min(3)] };
     if light { app.dark = false; app.palette = LIGHT; }
-    // Focus the focus-th focusable row.
     let mut t = ratatui::Terminal::new(TestBackend::new(w, h)).map_err(|e| e.to_string())?;
-    // A first draw sets the list's width; the focus is a row at that width.
+    // A first draw sets the list's width; then focus the focus-th focusable row at that width.
     t.draw(|f| draw(f, &mut app)).map_err(|e| e.to_string())?;
-    if let Some((i, _)) = rows(&app, app.list_w).iter().enumerate().filter(|(_, r)| r.focusable()).nth(focus) { app.focus[app.ti()] = i; }
+    let list = rows(&app, app.list_w);
+    let rows_n = list.iter().filter(|r| r.focusable()).count();
+    match list.iter().enumerate().filter(|(_, r)| r.focusable()).nth(focus) {
+        Some((i, _)) => app.focus_on(&list, i),
+        None if focus > 0 => return Err(format!("--focus {focus} is not a row; this tab has {}", count(rows_n, "row to focus, 0", &format!("rows to focus, 0 to {}", rows_n.saturating_sub(1))))),
+        None => {}
+    }
     t.draw(|f| draw(f, &mut app)).map_err(|e| e.to_string())?;
     Ok(frame_html(t.backend().buffer(), light))
 }
@@ -1939,14 +2182,15 @@ pub fn spec_text(root: &str, name: Option<&str>, width: u16) -> Result<String, S
     let mut app = App::new();
     app.root = root.into();
     app.p = projection::read(std::path::Path::new(root), &view::Filter::default())?;
+    app.loaded = Some(Instant::now());
     app.tab = Tab::Spec;
     let list = rows(&app, width);
     let Some(name) = name else { return Ok(list.into_iter().map(|r| plain(Text::from(r.line))).collect::<Vec<_>>().join("\n") + "\n") };
     let spec = app.p.spec.clone().unwrap_or_default();
-    let key = spec.items.iter().position(|i| i.name == name).map(Key::Item).or_else(|| (name == "fields" || name == "state").then_some(Key::Grid))
+    let key = spec.items.iter().any(|i| i.name == name).then(|| Key::Item(name.to_string())).or_else(|| (name == "fields" || name == "state").then_some(Key::Grid))
         .ok_or_else(|| format!("no {name} in the spec; bon spec lists every item"))?;
     let at = list.iter().position(|r| r.key.as_ref() == Some(&key)).ok_or("not listed")?;
-    app.focus[app.ti()] = at;
+    app.focus_on(&list, at);
     Ok(plain(detail(&app, width)) + "\n")
 }
 
@@ -1954,121 +2198,167 @@ pub fn spec_text(root: &str, name: Option<&str>, width: u16) -> Result<String, S
 
 /// Handle one key; false to quit.
 fn key(app: &mut App, k: KeyEvent) -> bool {
-    let ti = app.ti();
-    let step = |app: &mut App, down: bool| {
-        let list = rows(app, app.list_w);
-        // A list with nothing to focus (Project) scrolls instead.
-        if !list.iter().any(|r| r.focusable()) { app.top[ti] = if down { app.top[ti] + 1 } else { app.top[ti].saturating_sub(1) }; return; }
-        let mut i = app.focus[ti] as isize;
-        loop { i += if down { 1 } else { -1 }; if i < 0 || i as usize >= list.len() { break; } if list[i as usize].focusable() { app.focus[ti] = i as usize; app.detail_top = 0; break; } }
-    };
-    if app.keys { app.keys = false; return true; }
-    // Typing after /: find.
+    // Ctrl-C quits, whatever is open: in raw mode it is a key like any other.
+    if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) { return false; }
+    // Keys: ↑↓ and PgUp PgDn scroll it where it does not fit; any other key closes it.
+    if app.keys {
+        match k.code {
+            KeyCode::Up | KeyCode::Char('k') => app.keys_top = app.keys_top.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => app.keys_top += 1,
+            KeyCode::PageUp => app.keys_top = app.keys_top.saturating_sub(app.keys_page),
+            KeyCode::PageDown => app.keys_top += app.keys_page,
+            KeyCode::Char('g') => app.keys_top = 0,
+            KeyCode::Char('G') => app.keys_top = usize::MAX,
+            KeyCode::Char('q') => return false,
+            _ => { app.keys = false; app.keys_top = 0; }
+        }
+        return true;
+    }
+    // Typing after /: find, in any case (the filter compares without case).
     if let Some(buf) = app.input.as_mut() {
         match k.code {
             KeyCode::Esc => app.input = None,
-            KeyCode::Enter => { let f = app.input.take().filter(|s| !s.is_empty()); app.filter.lock().map(|mut x| x.find = f).ok(); app.focus = [0; 4]; }
+            KeyCode::Enter => { let f = app.input.take().filter(|s| !s.is_empty()); app.filter.lock().map(|mut x| x.find = f).ok(); }
             KeyCode::Backspace => { buf.pop(); }
             KeyCode::Char(c) => buf.push(c),
             _ => {}
         }
         return true;
     }
-    // An overlay takes the keys until esc.
+    // An overlay's page: the body under its two heading rows.
+    let body_page = (app.body_h as usize).saturating_sub(2).max(1);
+    let overlay_rows = app.overlay_rows;
     match &mut app.overlay {
         Overlay::None => {}
         Overlay::Logs { items, sel } => {
             match k.code {
-                KeyCode::Esc | KeyCode::Char('q') => app.overlay = Overlay::None,
+                KeyCode::Esc => app.overlay = Overlay::None,
+                KeyCode::Char('q') => return false,
                 KeyCode::Up | KeyCode::Char('k') => *sel = sel.saturating_sub(1),
                 KeyCode::Down | KeyCode::Char('j') => *sel = (*sel + 1).min(items.len().saturating_sub(1)),
+                KeyCode::PageUp => *sel = sel.saturating_sub(body_page),
+                KeyCode::PageDown => *sel = (*sel + body_page).min(items.len().saturating_sub(1)),
+                KeyCode::Char('g') => *sel = 0,
+                KeyCode::Char('G') => *sel = items.len().saturating_sub(1),
                 KeyCode::Enter => if let Some((label, path)) = items.get(*sel).cloned() {
-                    let text = std::fs::read_to_string(&path).unwrap_or_else(|_| "This log is no longer on disk.".into());
+                    let text = std::fs::read_to_string(&path).unwrap_or_else(|_| GONE.into());
                     app.overlay = Overlay::Text { title: label, lines: text.lines().map(String::from).collect(), top: 0 };
                 },
                 _ => {}
             }
             return true;
         }
-        Overlay::Text { top, lines, .. } => {
-            match k.code {
-                KeyCode::Esc | KeyCode::Char('q') => app.overlay = Overlay::None,
-                KeyCode::Up | KeyCode::Char('k') => *top = top.saturating_sub(1),
-                KeyCode::Down | KeyCode::Char('j') => *top = (*top + 1).min(lines.len().saturating_sub(1)),
-                KeyCode::PageUp => *top = top.saturating_sub(20),
-                KeyCode::PageDown | KeyCode::Char(' ') => *top = (*top + 20).min(lines.len().saturating_sub(1)),
-                KeyCode::Char('g') => *top = 0,
-                KeyCode::Char('G') => *top = lines.len().saturating_sub(1),
-                _ => {}
-            }
-            return true;
+        Overlay::Text { top, .. } => {
+            scroll(top, overlay_rows, k, body_page);
+            if k.code == KeyCode::Esc { app.overlay = Overlay::None; }
+            return k.code != KeyCode::Char('q');
         }
-        Overlay::Compare { top, left, right, .. } => {
-            let n = left.len().max(right.len());
-            match k.code {
-                KeyCode::Esc | KeyCode::Char('q') => app.overlay = Overlay::None,
-                KeyCode::Up | KeyCode::Char('k') => *top = top.saturating_sub(1),
-                KeyCode::Down | KeyCode::Char('j') => *top = (*top + 1).min(n.saturating_sub(1)),
-                KeyCode::PageUp => *top = top.saturating_sub(20),
-                KeyCode::PageDown | KeyCode::Char(' ') => *top = (*top + 20).min(n.saturating_sub(1)),
-                _ => {}
-            }
-            return true;
+        Overlay::Compare { top, .. } => {
+            scroll(top, overlay_rows, k, body_page);
+            if k.code == KeyCode::Esc { app.overlay = Overlay::None; }
+            return k.code != KeyCode::Char('q');
         }
     }
+    let ti = app.ti();
+    let list = rows(app, app.list_w);
+    let focusable: Vec<usize> = (0..list.len()).filter(|&i| list[i].focusable()).collect();
+    // Whether ⇧↑↓ and PgUp PgDn scroll the detail: only where one shows.
+    let detail_shown = app.detail_shown;
+    // The list moves its focus by `by` rows (down when positive), or, with nothing to focus, scrolls.
+    let mv = |app: &mut App, by: isize| {
+        if focusable.is_empty() {
+            app.top[ti] = if by > 0 { app.top[ti].saturating_add(by as usize) } else { app.top[ti].saturating_sub(by.unsigned_abs()) };
+            return;
+        }
+        let at = app.focus[ti] as isize + by;
+        let i = if by > 0 { focusable.iter().copied().find(|&j| j as isize >= at).or(focusable.last().copied()) }
+                else { focusable.iter().rev().copied().find(|&j| j as isize <= at).or(focusable.first().copied()) };
+        if let Some(i) = i { app.focus_on(&list, i); app.scrolled = false; }
+    };
+    let detail_page = app.detail_page.max(1);
+    // A page of the list: its rows between the cues.
+    let list_page = (app.list_h as isize - 2).max(1);
     match (k.code, k.modifiers) {
-        (KeyCode::Char('q'), _) | (KeyCode::Char('c'), KeyModifiers::CONTROL) => return false,
+        (KeyCode::Char('q'), _) => return false,
         (KeyCode::Esc, _) => app.detail_open = false,
         (KeyCode::Char('?'), _) => app.keys = true,
         (KeyCode::Tab, _) => app.switch(TABS[(ti + 1) % 4]),
         (KeyCode::BackTab, _) => app.switch(TABS[(ti + 3) % 4]),
         (KeyCode::Char(c @ '1'..='4'), _) => app.switch(TABS[c as usize - '1' as usize]),
-        (KeyCode::Up, KeyModifiers::SHIFT) | (KeyCode::PageUp, _) => app.detail_top = app.detail_top.saturating_sub(if k.code == KeyCode::PageUp { 10 } else { 1 }),
-        (KeyCode::Down, KeyModifiers::SHIFT) | (KeyCode::PageDown, _) => app.detail_top = app.detail_top.saturating_add(if k.code == KeyCode::PageDown { 10 } else { 1 }),
-        (KeyCode::Up, _) | (KeyCode::Char('k'), _) => step(app, false),
-        (KeyCode::Down, _) | (KeyCode::Char('j'), _) => step(app, true),
-        (KeyCode::Char('g'), _) => { app.focus[ti] = 0; app.top[ti] = 0; }
-        (KeyCode::Char('G'), _) => { app.focus[ti] = usize::MAX; }
-        (KeyCode::Enter, _) if has_detail(app.tab) => app.detail_open = true,
+        // The detail scrolls where one shows; otherwise the list does.
+        (KeyCode::Up, KeyModifiers::SHIFT) if detail_shown => app.detail_top = app.detail_top.saturating_sub(1),
+        (KeyCode::Down, KeyModifiers::SHIFT) if detail_shown => app.detail_top = app.detail_top.saturating_add(1),
+        (KeyCode::PageUp, _) if detail_shown => app.detail_top = app.detail_top.saturating_sub(detail_page),
+        (KeyCode::PageDown, _) if detail_shown => app.detail_top = app.detail_top.saturating_add(detail_page),
+        // A list of items with no detail beside it scrolls through its rows, an item's wrapped lines
+        // included; the focus follows to an item that shows.
+        (KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown, m) if !focusable.is_empty() && (m.contains(KeyModifiers::SHIFT) || matches!(k.code, KeyCode::PageUp | KeyCode::PageDown)) => {
+            let by = match k.code { KeyCode::Up => -1, KeyCode::Down => 1, KeyCode::PageUp => -list_page, _ => list_page };
+            let h = app.list_h as usize;
+            app.top[ti] = (app.top[ti] as isize + by).clamp(0, last_top(list.len(), h) as isize) as usize;
+            let (_, avail) = more(list.len(), h, app.top[ti]);
+            let (top, i) = (app.top[ti], app.focus[ti]);
+            if block_end(&list, i) < top || i >= top + avail {
+                if let Some(&j) = focusable.iter().find(|&&j| block_end(&list, j) >= top) { app.focus_on(&list, j); }
+            }
+            app.scrolled = true;
+        }
+        (KeyCode::PageUp, _) => mv(app, -list_page),
+        (KeyCode::PageDown, _) => mv(app, list_page),
+        (KeyCode::Up, _) | (KeyCode::Char('k'), _) => mv(app, -1),
+        (KeyCode::Down, _) | (KeyCode::Char('j'), _) => mv(app, 1),
+        (KeyCode::Char('g'), _) => { app.top[ti] = 0; if let Some(&i) = focusable.first() { app.focus_on(&list, i); } }
+        // The last item, and its last line.
+        (KeyCode::Char('G'), _) => match focusable.last() {
+            Some(&i) => { app.focus_on(&list, i); app.top[ti] = last_top(list.len(), app.list_h as usize); app.scrolled = true; }
+            None => app.top[ti] = usize::MAX,
+        },
+        // Under 100 columns the detail opens over the list; beside it, it is already open.
+        (KeyCode::Enter, _) if has_detail(app.tab) && !focusable.is_empty() && !app.detail_shown => app.detail_open = true,
         (KeyCode::Char('t'), _) => { app.dark = !app.dark; app.palette = if app.dark { DARK } else { LIGHT }; }
-        (KeyCode::Char('/'), _) if app.tab != Tab::Host => app.input = Some(app.filter.lock().ok().and_then(|f| f.find.clone()).unwrap_or_default()),
-        (KeyCode::Char('r'), _) if app.tab != Tab::Host => {
+        (KeyCode::Char('/'), _) if filtered(app.tab) && app.loaded.is_some() => app.input = Some(app.filter.lock().ok().and_then(|f| f.find.clone()).unwrap_or_default()),
+        // The next range; All time clears both bounds, whatever bon was started with.
+        (KeyCode::Char('r'), _) if filtered(app.tab) && app.loaded.is_some() => {
             app.range = (app.range + 1) % RANGES.len();
             let since = (RANGES[app.range].1 > 0).then(|| (app.p.repo.now - RANGES[app.range].1).max(0) as u64);
-            app.filter.lock().map(|mut f| f.since = since).ok();
+            app.filter.lock().map(|mut f| { f.since = since; f.until = None; }).ok();
         }
         // Traces: every log of the focused goal's agent processes.
         (KeyCode::Char('l'), _) if app.tab == Tab::Traces => {
-            if let Some(Key::Goal(gi)) = focused(app) {
-                if let Some(g) = sorted_groups(&app.p).get(gi) {
-                    let mut items = Vec::new();
-                    for b in &g.processes { for s in &b.searches { for c in &s.candidates { for l in &c.logs {
-                        items.push((format!("Process {} · Search {} · #{} · {l}", b.pid, s.search, c.index), app.root.join(".bon/traces").join(&b.trace).join(s.search.to_string()).join(c.index.to_string()).join(l)));
-                    } } } }
-                    if !items.is_empty() { app.overlay = Overlay::Logs { items, sel: 0 }; }
-                }
+            if let Some(g) = focused(app).and_then(|k| goal(&app.p, &k)) {
+                let items = logs_of(app, g);
+                if !items.is_empty() { app.overlay = Overlay::Logs { items, sel: 0 }; }
             }
         }
         // Traces: two groups of disagreeing candidates, their agree output side by side.
         (KeyCode::Char('d'), _) if app.tab == Tab::Traces => {
-            if let Some(Key::Goal(gi)) = focused(app) {
-                if let Some(g) = sorted_groups(&app.p).get(gi) {
-                    'find: for b in &g.processes { for s in &b.searches {
-                        let gs = groups(s);
-                        if gs.len() < 2 { continue; }
-                        let side = |c: &Facts| { let dir = app.root.join(".bon/traces").join(&b.trace).join(s.search.to_string()).join(c.index.to_string());
-                            let name = c.logs.iter().find(|l| l.starts_with("agree")).cloned().unwrap_or("agree-0".into());
-                            (format!("#{} {name}", c.index), std::fs::read_to_string(dir.join(&name)).unwrap_or_default().lines().map(String::from).collect::<Vec<_>>()) };
-                        let ((lt, l), (rt, r)) = (side(gs[0][0]), side(gs[1][0]));
-                        app.overlay = Overlay::Compare { titles: (lt, rt), left: l, right: r, top: 0 };
-                        break 'find;
-                    } }
-                }
+            if let Some((b, s, x, y)) = focused(app).and_then(|k| goal(&app.p, &k)).and_then(two_behaviors) {
+                let side = |c: &Facts| {
+                    let dir = app.root.join(".bon/traces").join(&b.trace).join(s.search.to_string()).join(c.index.to_string());
+                    let name = c.logs.iter().find(|l| l.starts_with("agree")).cloned().unwrap_or("agree-0".into());
+                    (format!("#{} {name}", c.index), std::fs::read_to_string(dir.join(&name)).unwrap_or_else(|_| GONE.into()).lines().map(String::from).collect::<Vec<_>>())
+                };
+                let ((lt, l), (rt, r)) = (side(x), side(y));
+                app.overlay = Overlay::Compare { titles: (lt, rt), left: l, right: r, top: 0 };
             }
         }
         _ => {}
     }
     true
+}
+
+/// One key's scroll of a text `n` lines long, a page at a time with PgUp PgDn.
+fn scroll(top: &mut usize, n: usize, k: KeyEvent, page: usize) {
+    let last = n.saturating_sub(1);
+    match k.code {
+        KeyCode::Up | KeyCode::Char('k') => *top = top.saturating_sub(1),
+        KeyCode::Down | KeyCode::Char('j') => *top = (*top + 1).min(last),
+        KeyCode::PageUp => *top = top.saturating_sub(page),
+        KeyCode::PageDown | KeyCode::Char(' ') => *top = (*top + page).min(last),
+        KeyCode::Char('g') => *top = 0,
+        KeyCode::Char('G') => *top = last,
+        _ => {}
+    }
 }
 
 // ── the loop ────────────────────────────────────────────
@@ -2097,11 +2387,11 @@ pub fn run(root: &str, filter: view::Filter) -> Result<(), String> {
     let (root_t, shared) = (app.root.clone(), app.filter.clone());
     // Read the projection every 2 s, or as soon as find or the range changes.
     std::thread::spawn(move || {
-        let mut last: Option<(Option<u64>, Option<String>)> = None;
+        let mut last: Option<(Option<u64>, Option<u64>, Option<String>)> = None;
         let mut at = Instant::now() - Duration::from_secs(10);
         loop {
             let f = shared.lock().map(|f| f.clone()).unwrap_or_default();
-            let now_key = (f.since, f.find.clone());
+            let now_key = (f.since, f.until, f.find.clone());
             if last.as_ref() != Some(&now_key) || at.elapsed() >= Duration::from_secs(2) {
                 if tx.send(read(&root_t, &f)).is_err() { break; }
                 last = Some(now_key); at = Instant::now();
@@ -2109,11 +2399,18 @@ pub fn run(root: &str, filter: view::Filter) -> Result<(), String> {
             std::thread::sleep(Duration::from_millis(100));
         }
     });
+    // ratatui draws into a buffer and writes only the cells that changed since the last frame.
     let mut terminal: DefaultTerminal = ratatui::init();
     let result = (|| -> Result<(), String> {
         loop {
             while let Ok(p) = rx.try_recv() {
-                match p { Ok((p, h)) => { app.p = p; app.host = h; app.error = None; app.loaded = Some(Instant::now()); } Err(e) => app.error = Some(e) }
+                // A read made for a find or range since changed is not shown: the read for the new one follows.
+                let asked = app.filter.lock().map(|f| (f.since, f.until, f.find.clone())).unwrap_or_default();
+                match p {
+                    Ok((p, _)) if (p.filter.since.map(|t| t as u64), p.filter.until.map(|t| t as u64), p.filter.find.clone()) != asked => {}
+                    Ok((p, h)) => { app.p = p; app.host = h; app.error = None; app.loaded = Some(Instant::now()); }
+                    Err(e) => app.error = Some(e),
+                }
             }
             terminal.draw(|f| draw(f, &mut app)).map_err(|e| e.to_string())?;
             if event::poll(Duration::from_millis(200)).map_err(|e| e.to_string())? {
@@ -2134,8 +2431,11 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
+    /// The view once the projection has been read.
+    fn ready() -> App { let mut a = App::new(); a.loaded = Some(Instant::now()); a }
+
     fn screen(p: Projection, tab: Tab, w: u16, h: u16) -> String {
-        let mut app = App::new();
+        let mut app = ready();
         app.p = p; app.tab = tab;
         let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
         t.draw(|f| draw(f, &mut app)).unwrap();
@@ -2167,7 +2467,7 @@ mod tests {
 
     #[test]
     fn the_host_draws_at_every_width_with_nothing_past_its_pane() {
-        for (w, h) in [(60, 24), (80, 40), (100, 30), (120, 12), (200, 50), (60, 8)] {
+        for (w, h) in [(60, 24), (80, 50), (100, 30), (120, 12), (200, 50), (60, 8)] {
             let mut app = App::new();
             app.host = host(); app.tab = Tab::Host; app.loaded = Some(Instant::now());
             let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
@@ -2240,7 +2540,8 @@ mod tests {
             assert!(project.contains("$2.00") && project.contains("$8.00") && project.contains("$10.00"), "{project}");
             // Per push shows its basis: what reached a push, over how many.
             assert!(project.contains("Reached a push") && project.contains("Pushes") && project.contains("Per push"), "{project}");
-            assert!(traces.lines().next().unwrap().contains("$2.00 gen") && traces.lines().next().unwrap().contains("= $10.00"), "{traces}");
+            // Under 140 columns the cost has the header's second row, whatever runs.
+            assert!(traces.lines().nth(1).unwrap().contains("$2.00 gen") && traces.lines().nth(1).unwrap().contains("= $10.00"), "{traces}");
             // Nothing is drawn past the last column.
             assert!(traces.lines().all(|l| l.chars().count() <= w as usize));
         }
@@ -2315,7 +2616,7 @@ mod tests {
         let q = screen(p.clone(), Tab::Queue, 120, 20);
         assert!(q.find("Proposed").unwrap() < q.find("Queued").unwrap() && q.contains("New 1  Contested 1") && q.contains("#7"), "{q}");
         let sp = screen(p.clone(), Tab::Spec, 140, 30);
-        assert!(sp.contains("may_open") && sp.contains("Gate  Implementation") && sp.contains("✓     ✓") && sp.contains("✓ Present"), "{sp}");
+        assert!(sp.contains("may_open") && sp.contains("Gate  Implementation") && sp.contains("✓     ✓") && !sp.contains("✓ Present"), "{sp}");
         // The gate's section says where it is; its expression sits under its label.
         assert!(sp.contains("Gate · k/rules.rs:0") && sp.contains("Ensures") && sp.contains("  r == spec::may_open(locked)"), "{sp}");
     }
@@ -2370,27 +2671,30 @@ mod tests {
 
     #[test]
     fn a_scrolled_detail_keeps_the_title_and_process_at_the_top() {
-        let mut app = App::new();
+        let mut app = ready();
         app.p = serde_json::from_value(serde_json::json!({ "configured": true, "repo": { "now": 10 } })).unwrap();
         app.p.groups = vec![foiled()];
         // Scrolled into the counterexample search's table: the cue, the title, the process,
         // the search's heading and the table's header, then its rows.
-        let mut t = Terminal::new(TestBackend::new(140, 30)).unwrap();
+        let mut t = Terminal::new(TestBackend::new(140, 16)).unwrap();
         t.draw(|f| draw(f, &mut app)).unwrap();
-        let lines = detail_marked(&app, 140 - 63 - 1 - 2).0.lines;
-        let at = lines.iter().position(|l| l.spans.iter().any(|s| s.content.starts_with("  #1 "))).unwrap();
-        app.detail_top = at as u16;
+        // Scrolled as far as it goes (its last page): the cue, the title, the process,
+        // and the counterexample search's heading over its table.
+        app.detail_top = u16::MAX;
         t.draw(|f| draw(f, &mut app)).unwrap();
         let b = t.backend().buffer().clone();
         let row = |y: u16| (63..140).map(|x| b[(x, y)].symbol().to_string()).collect::<String>();
-        let top: Vec<String> = (3..9).map(row).collect();
-        assert!(top[0].contains("↑ more") && top[1].contains("Code from 9bb8a5b") && top[2].contains("Process 7")
-            && top[3].contains("2 Counterexample") && top[4].contains("Test  Verified") && top[5].contains("#1"), "{top:#?}");
+        let top: Vec<String> = (3..8).map(row).collect();
+        assert!(top[0].contains("↑ more") && top[1].contains("Code from 9bb8a5b") && top[2].contains("Process 7"), "{top:#?}");
+        // No further than its last page: its last line is on the pane's last row.
+        let last = detail_marked(&app, 140 - 63 - 1 - 2).0.lines.last().map(|l| l.spans.iter().map(|s| s.content.to_string()).collect::<String>()).unwrap();
+        let pane: Vec<String> = (3..15).map(row).collect();
+        assert!(pane.iter().any(|r| r.trim_end().ends_with(last.trim_end())) && !pane.iter().any(|r| r.contains("↓ more")), "{pane:#?}");
         // Scrolled past it to the end, no search is pinned whose rows are gone.
         app.detail_top = u16::MAX;
         t.draw(|f| draw(f, &mut app)).unwrap();
         let b = t.backend().buffer().clone();
-        let all: String = (3..29).map(|y| (63..140).map(|x| b[(x, y)].symbol().to_string()).collect::<String>() + "\n").collect();
+        let all: String = (4..15).map(|y| (63..140).map(|x| b[(x, y)].symbol().to_string()).collect::<String>() + "\n").collect();
         assert!(!all.contains("Test  Verified") || all.contains("#1    Yes"), "{all}");
     }
 
@@ -2441,7 +2745,7 @@ mod tests {
         // Rank is −(lines): 11376 at the base, −19 for +28 −47.
         let s = ranked("compaction", 0, &[(-11357, 75, 28, 47), (-11372, 14, 5, 9)]);
         assert_eq!(rank_shown(&s), RankShown::Lines { base: 11376 });
-        assert_eq!(rank_note(&s, &rank_shown(&s)).unwrap(), "Rank is −lines, shown against the base's 11376 (#0★ raw −11357); selected #0 by fewest lines: −19 against #1's −4");
+        assert_eq!(rank_note(&s, &rank_shown(&s)).unwrap(), "Selected #0 by fewest lines: −19 against #1's −4");
         // Ranks that are not −lines of one base stay as recorded.
         assert_eq!(rank_shown(&ranked("compaction", 0, &[(-5, 1, 1, 0), (-100, 1, 1, 0)])), RankShown::Raw);
     }
@@ -2488,13 +2792,15 @@ mod tests {
     fn money_never_prints_negative_zero() {
         assert_eq!(money(Some(-0.001)), "$0.00");
         assert_eq!(money(Some(-0.0)), "$0.00");
-        assert_eq!(money(Some(-1.5)), "$-1.50");
+        assert_eq!(money(Some(-1.5)), "−$1.50");
+        assert_eq!(money(Some(-12.444)), "−$12.44");
+        assert_eq!(view::money(-0.004), "$0.00");
         assert_eq!(money(None), "—");
     }
 
     #[test]
     fn switching_tabs_closes_an_open_detail() {
-        let mut app = App::new();
+        let mut app = ready();
         let k = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
         for c in [KeyCode::Tab, KeyCode::BackTab, KeyCode::Char('2')] {
             app.detail_open = true;
@@ -2515,7 +2821,7 @@ mod tests {
 
     #[test]
     fn the_cursor_is_reverse_video_and_no_color() {
-        let mut app = App::new();
+        let mut app = ready();
         app.p = serde_json::from_value(serde_json::json!({ "configured": true, "repo": { "now": 10 } })).unwrap();
         app.p.groups = vec![foiled()];
         app.tab = Tab::Traces;
@@ -2523,16 +2829,18 @@ mod tests {
         // The focused goal's row, the list's width, in reverse video; no cell anywhere is blue but a selection's.
         let row = (0..30).find(|&y| b[(1, y)].modifier.contains(Modifier::REVERSED)).expect("a reversed row");
         assert!((0..60).all(|x| b[(x, row)].modifier.contains(Modifier::REVERSED)));
-        assert!((0..63).all(|x| b[(x, row)].fg == rgb(DARK.ink)), "one style under the cursor");
+        assert!((0..62).all(|x| b[(x, row)].fg == rgb(DARK.ink)), "one style under the cursor");
+        // One blank column between the list and the rule.
+        assert!(!b[(62, row)].modifier.contains(Modifier::REVERSED) && b[(63, row)].symbol() == "│");
         assert!(!(0..30).any(|y| (0..140).any(|x| b[(x, y)].symbol() == "▎")));
         // Queue's focused intent and its continuation lines are under it too.
-        let mut q = App::new();
+        let mut q = ready();
         q.p = serde_json::from_value(serde_json::json!({ "configured": true, "repo": { "now": 10 },
             "queue": [{ "id": 7, "intent": "word ".repeat(40) }, { "id": 8, "intent": "next" }] })).unwrap();
         q.tab = Tab::Queue;
         let b = buffer(&mut q, 80, 20);
         let reversed: Vec<u16> = (0..20).filter(|&y| b[(0, y)].modifier.contains(Modifier::REVERSED)).collect();
-        assert_eq!(reversed, vec![3, 4, 5], "#7's three lines");
+        assert_eq!(reversed, vec![4, 5, 6], "#7's three lines, under the header's two rows");
         // The frame's HTML draws reverse video as swapped colors.
         assert!(frame_html(&b, false).contains("color:#09090A;background:#edeae5"));
     }
@@ -2543,7 +2851,7 @@ mod tests {
         g.processes[0].searches[0].kernel = "derived".into();
         g.processes[0].searches[0].recorded_selected = Some(0);
         assert!(matches!(goal_tone(&g), Tone::Red));
-        let mut app = App::new();
+        let mut app = ready();
         app.p = serde_json::from_value(serde_json::json!({ "configured": true, "repo": { "now": 10 } })).unwrap();
         app.p.groups = vec![g];
         app.tab = Tab::Traces;
@@ -2556,7 +2864,7 @@ mod tests {
 
     #[test]
     fn where_it_went_shows_each_outcome_in_its_own_tone() {
-        let mut app = App::new();
+        let mut app = ready();
         app.p = serde_json::from_value(serde_json::json!({ "configured": true, "repo": { "now": 10 },
             "groups": [{ "kind": "code", "outcome": "blocked", "generation": 1.0, "time_cost": 1.0 },
                        { "kind": "code", "outcome": "exited", "generation": 1.0, "time_cost": 1.0 },
@@ -2569,7 +2877,7 @@ mod tests {
         assert!(tone_colors(Tone::Yellow).contains(&bar(line("Blocked"))));
         assert!(tone_colors(Tone::Red).contains(&bar(line("Exited"))));
         assert!(tone_colors(Tone::Indigo).contains(&bar(line("None found"))));
-        assert!(!(0..60).any(|y| (0..120).map(|x| b[(x, y)].symbol().to_string()).collect::<String>().contains("No push")));
+        assert!(!(0..60).any(|y| (0..120).map(|x| b[(x, y)].symbol().to_string()).collect::<String>().contains("No push ")));
     }
 
     #[test]
@@ -2581,7 +2889,7 @@ mod tests {
         let sp = screen(p.clone(), Tab::Spec, 140, 30);
         assert!(sp.contains("≠ Differs from trunk 1") && sp.contains(" ≠ may_open") && sp.contains("   may_close"), "{sp}");
         // The detail says so in ink, with the mark.
-        let mut app = App::new();
+        let mut app = ready();
         app.p = p; app.tab = Tab::Spec;
         let b = buffer(&mut app, 140, 30);
         let y = (0..30).find(|&y| (63..140).map(|x| b[(x, y)].symbol().to_string()).collect::<String>().contains("≠ Differs from trunk")).unwrap();
@@ -2591,19 +2899,19 @@ mod tests {
 
     #[test]
     fn the_header_says_what_runs_now_and_trunk_as_the_remotes() {
-        let mut app = App::new();
+        let mut app = ready();
         app.p = serde_json::from_value(serde_json::json!({ "configured": true,
             "repo": { "name": "r", "trunk": "main", "remote": "origin", "head": "1111111aaa", "remote_head": "2222222bbb", "now": 10 },
             "processes": [{ "pid": 1, "running": true, "searches": [{ "kind": "code", "running": true, "in_flight": 5, "in_checks": 2, "waiting": 1 }] }] })).unwrap();
         let b = buffer(&mut app, 160, 10);
         let head: String = (0..160).map(|x| b[(x, 0)].symbol().to_string()).collect();
-        assert!(head.contains("origin/main · 2222222") && head.contains("● Running 1 · agent processes 5 in flight, 2 in checks, 1 waiting"), "{head}");
+        assert!(head.contains("r · trunk origin/main 2222222   ● Running 1 · agent processes 5 in flight, 2 in checks, 1 waiting"), "{head}");
         assert!(!head.contains("1111111"));
     }
 
     #[test]
     fn project_scrolls_and_a_counterexample_says_how_many_tests_ran() {
-        let mut app = App::new();
+        let mut app = ready();
         app.p = serde_json::from_value(serde_json::json!({ "configured": true, "repo": { "now": 10 } })).unwrap();
         app.tab = Tab::Project;
         let k = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
@@ -2616,5 +2924,220 @@ mod tests {
         let mut g = foiled();
         g.processes[0].searches[2] = ce;
         assert!(steps(&g, false).ends_with("Counterexample 1 of 4 tests verified, 2 needed"), "{}", steps(&g, false));
+    }
+
+    /// A goal of `kind` from `commit`, its one bon process `trace`, at `time`.
+    fn goal_at(trace: &str, kind: &str, commit: &str, time: i64, outcome: &str) -> GoalTrace {
+        let candidate = serde_json::json!({ "index": 1, "commit": "1111111", "accepted": true, "proved": true, "verified": true, "rank": -11357, "diff": 75,
+            "lines_added": 28, "lines_removed": 47, "program_seconds": 489.0, "check_seconds": 139.0, "flags": ["exit 126"] });
+        let search = serde_json::json!({ "search": 0, "kind": kind, "width": 8, "returned": 8, "verified": 7, "selected": 1, "time": 1, "seconds": 630.0,
+            "generation": 1.25, "time_cost": 12.5, "params": { "base": "9b68b05aa", "limit": 5.0 }, "behaviors": [7], "trees": 8, "candidates": [candidate] });
+        let process = serde_json::json!({ "pid": 1, "trace": trace, "outcome": outcome, "time": time, "searches": [search] });
+        serde_json::from_value(serde_json::json!({ "kind": kind, "title": format!("from {commit}"), "outcome": outcome, "time": time, "generation": 1.25, "time_cost": 12.5,
+            "processes": [process] })).unwrap()
+    }
+
+    /// A projection with something in every tab: goals, a pending interrupt, the queue, retired intents, the spec.
+    fn full() -> Projection {
+        let totals = serde_json::json!({ "cost": 1514.97, "generation": 181.66, "time_cost": 1333.31, "rate": 155.0, "per_verified_candidate": 5.12, "per_push": 85.86, "pushes": 16, "pushed": 1373.81,
+                "attempts": [{ "kind": "code", "width": 8, "attempts": 25, "pushed": 13, "blocked": 9, "exited": 3 }, { "kind": "code", "width": 12, "attempts": 9, "pushed": 2, "exited": 7 }],
+                "reasons": [{ "kind": "code", "reason": "none_splits", "count": 4, "inferred": 4 }, { "kind": "code", "reason": "too_few_verified", "count": 3, "inferred": 1 }, { "kind": "code", "reason": "undiscriminating", "count": 2 }],
+                "ended": [{ "kind": "code", "pushed": 15, "exited": 10, "expected": 0.2 }],
+                "success": [{ "kind": "code", "agent_processes": 216, "successes": 205, "ended": 24, "pushed": 15 }],
+                "per_verified": [{ "kind": "counterexample", "program": "claude", "model": "claude-opus-5-5", "agent_processes": 60, "verified": 54, "generation": 18.66, "time_cost": 87.75 }],
+                "run_time": [{ "kind": "code", "pushes": 15, "time": { "median": 653.0, "p90": 7500.0 }, "cost": { "median": 26.89, "p90": 363.75 }, "searches": 26,
+                    "fit": { "time": { "fixed": -198.0, "per_tree": 157.0 }, "cost": { "fixed": -12.44, "per_tree": 7.78 } } }],
+                "utilization": { "wall": 32460.0, "searches": 40, "agent_processes": { "held": 125000.0 }, "check_processes": { "held": 18000.0 } },
+                "turnaround": [{ "kind": "blocked", "resolved": 1, "pending": 1, "time": { "median": 646.0, "p90": 646.0 } }] });
+        let mut p: Projection = serde_json::from_value(serde_json::json!({ "configured": true, "totals": totals,
+            "repo": { "name": "bon", "remote": "origin", "trunk": "main", "remote_head": "499a245c0", "now": 1_000_000, "subject": "view: every trace record has one shape and a long subject that runs on" },
+            "interrupts": [{ "kind": "blocked", "id": "blocked 1", "about": "code from 365e522", "raised": 990000, "what": ["8 of 8 candidates verified; too_few_verified: fewer than two verified candidates", "2 attempts at width 8, 12 · $164.44"],
+                "choices": [{ "choice": "widen", "how": "raise n of [searches] code in .bon/bon.toml (it ran at [8, 12])", "cost": "$0.71 per agent process (the last code search, width 12)" }] }],
+            "queue": (1..30).map(|i| serde_json::json!({ "id": i, "intent": "Each trace records, for every agent process, its program, model, tokens, cost and time, and for every check its time and exit status." })).collect::<Vec<_>>(),
+            "retired": [{ "id": 77, "intent": "Every trace record has one shape.", "commit": "499a245c0", "subject": "view: every trace record has one shape", "time": 999000 },
+                        { "id": 78, "intent": "What only engineer can answer is an interrupt.", "commit": "499a245c0", "subject": "view: every trace record has one shape", "time": 999000 }],
+            "spec": { "path": "src/spec.rs", "items": [{ "kind": "type", "name": "Commit", "doc": "A git commit, by its hash." }, { "kind": "predicate", "name": "verified", "doc": "Passed the vertical bottleneck, and stayed within its authority." }], "fields": [] }
+        })).unwrap();
+        p.groups = vec![goal_at("300", "compaction", "9b68b05", 999_500, "blocked"), goal_at("200", "counterexample", "14444a0", 999_000, "not found"), goal_at("100", "code", "365e522", 998_000, "pushed")];
+        p
+    }
+
+    #[test]
+    fn nothing_runs_past_the_edge_at_any_width_and_nothing_is_cut_without_an_ellipsis() {
+        for (w, h) in [(60, 20), (80, 24), (100, 30), (120, 40), (200, 60), (80, 12)] {
+            for tab in TABS {
+                let mut app = ready();
+                app.p = full();
+                app.tab = tab;
+                buffer(&mut app, w, h);
+                // Every row of the list and every line of the detail fits the pane it is drawn in.
+                let rows_w = app.list_w as usize;
+                for r in rows(&app, app.list_w) { assert!(width_of(&r.line.spans) <= rows_w, "{w}x{h} {:?}: {:?}", tab as u8, plain(Text::from(r.line))); }
+                if app.detail_shown {
+                    let dw = if w >= 100 { w - app.list_w - 1 - 1 - 2 } else { w - 2 };
+                    let d = detail(&app, dw);
+                    for l in d.lines { assert!(width_of(&l.spans) <= dw as usize, "{w}x{h} detail: {}", plain(Text::from(l))); }
+                }
+                let s = screen_of(&mut app, w, h);
+                assert!(s.lines().all(|l| l.chars().count() <= w as usize), "{w}x{h}:\n{s}");
+            }
+        }
+    }
+
+    /// What `app` draws at w×h, as text.
+    fn screen_of(app: &mut App, w: u16, h: u16) -> String {
+        let b = buffer(app, w, h);
+        (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string()).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn the_cursor_stays_on_its_item_when_rows_come_and_go() {
+        let mut app = ready();
+        app.p = full();
+        app.tab = Tab::Traces;
+        let k = |c: KeyCode| KeyEvent::new(c, KeyModifiers::NONE);
+        buffer(&mut app, 120, 30);
+        key(&mut app, k(KeyCode::Down));
+        buffer(&mut app, 120, 30);
+        assert_eq!(app.held[3], Some(Key::Goal("200".into())));
+        app.detail_top = 3;
+        // A bon process starts: its goal comes first, and every row moves down.
+        let mut p = full();
+        p.groups.insert(0, goal_at("400", "code", "aaaaaaa", 999_900, "running"));
+        p.groups[0].running = true;
+        app.p = p;
+        buffer(&mut app, 120, 30);
+        assert_eq!(app.held[3], Some(Key::Goal("200".into())), "the same goal, on another row");
+        assert!(screen_of(&mut app, 120, 30).contains("Counterexample from 14444a0"), "its detail is still shown");
+        assert_eq!(app.detail_top, 3, "and where it was read to");
+        // Resized narrow, it wraps differently; still the same goal.
+        buffer(&mut app, 80, 24);
+        assert_eq!(app.held[3], Some(Key::Goal("200".into())));
+        // Its goal gone, the nearest row; g and G move to the first and last, each opening its detail at the top.
+        app.p = full(); app.p.groups.remove(1);
+        buffer(&mut app, 120, 30);
+        assert!(matches!(app.held[3], Some(Key::Goal(_))) && app.held[3] != Some(Key::Goal("200".into())));
+        app.detail_top = 5;
+        key(&mut app, k(KeyCode::Char('g')));
+        assert_eq!((app.held[3].clone(), app.detail_top), (Some(Key::Goal("300".into())), 0));
+        app.detail_top = 5;
+        key(&mut app, k(KeyCode::Char('G')));
+        assert_eq!((app.held[3].clone(), app.detail_top), (Some(Key::Goal("100".into())), 0));
+        // Queue's intents by id.
+        app.tab = Tab::Queue;
+        buffer(&mut app, 80, 24);
+        key(&mut app, k(KeyCode::Down));
+        assert_eq!(app.held[2], Some(Key::Queue(2)));
+        app.p.queue.as_mut().unwrap().remove(0);
+        buffer(&mut app, 80, 24);
+        assert_eq!(app.held[2], Some(Key::Queue(2)));
+    }
+
+    #[test]
+    fn before_the_first_read_the_view_shows_that_it_is_reading_and_nothing_else() {
+        let mut app = App::new();
+        app.root = std::env::temp_dir();
+        for tab in TABS {
+            app.tab = tab;
+            let s = screen_of(&mut app, 80, 24);
+            for absent in ["Idle", "$0.00", "Queue 0", "Traces 0", "Nothing queued", "No bon process yet", "/ Find", "↑↓"] { assert!(!s.contains(absent), "{absent}:\n{s}"); }
+            assert!(s.lines().next().unwrap().contains("· Reading") && s.contains("Queue") && s.contains("q Quit"), "{s}");
+        }
+        // Under 100 columns it holds the header's second row, where the cost will be: nothing moves when it arrives.
+        let before = buffer(&mut app, 80, 24);
+        app.p = full(); app.loaded = Some(Instant::now());
+        let after = buffer(&mut app, 80, 24);
+        let rule = |b: &ratatui::buffer::Buffer| (0..24).find(|&y| b[(0, y)].symbol() == "─").unwrap();
+        assert_eq!(rule(&before), rule(&after));
+    }
+
+    #[test]
+    fn ctrl_c_quits_whatever_is_open() {
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let mut app = ready();
+        app.input = Some(String::new());
+        assert!(!key(&mut app, ctrl_c), "in Find");
+        assert_eq!(app.input.as_deref(), Some(""), "and types nothing");
+        let mut app = ready(); app.keys = true;
+        assert!(!key(&mut app, ctrl_c), "with Keys open");
+        let mut app = ready(); app.overlay = Overlay::Logs { items: vec![], sel: 0 };
+        assert!(!key(&mut app, ctrl_c), "in Logs");
+        let mut app = ready(); app.overlay = Overlay::Compare { titles: Default::default(), left: vec![], right: vec![], top: 0 };
+        assert!(!key(&mut app, ctrl_c), "in Compare");
+        // Find keeps what was typed as typed; the filter compares without case.
+        let mut app = ready();
+        app.input = Some("Code".into());
+        key(&mut app, KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert_eq!(app.filter.lock().unwrap().find.as_deref(), Some("Code"));
+    }
+
+    #[test]
+    fn a_pane_with_nothing_to_focus_scrolls_with_every_key_keys_lists() {
+        let k = |c: KeyCode, m: KeyModifiers| KeyEvent::new(c, m);
+        let mut app = ready();
+        app.p = full();
+        app.tab = Tab::Project;
+        buffer(&mut app, 80, 24);
+        let len = rows(&app, app.list_w).len();
+        key(&mut app, k(KeyCode::Char('G'), KeyModifiers::NONE));
+        buffer(&mut app, 80, 24);
+        assert_eq!(app.top[0], last_top(len, app.list_h as usize), "G shows the last row");
+        key(&mut app, k(KeyCode::Char('g'), KeyModifiers::NONE));
+        key(&mut app, k(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.top[0], app.list_h as usize - 2, "a page is the rows between the pane's cues");
+        key(&mut app, k(KeyCode::Down, KeyModifiers::SHIFT));
+        assert_eq!(app.top[0], app.list_h as usize - 1, "⇧↓ scrolls the list where no detail shows");
+        // Queue: the last intent's every line can be reached.
+        app.tab = Tab::Queue;
+        buffer(&mut app, 80, 24);
+        key(&mut app, k(KeyCode::Char('G'), KeyModifiers::NONE));
+        let s = screen_of(&mut app, 80, 24);
+        assert!(s.contains("Taken off by 499a245") && !s.contains("↓ more"), "{s}");
+        // The commit's subject once, under the first intent it took off.
+        assert_eq!(s.matches("view: every trace record").count(), 1, "{s}");
+        // An intent taller than its pane: ⇧↓ scrolls through its lines, the focus staying on it.
+        let mut q = ready();
+        q.p = serde_json::from_value(serde_json::json!({ "configured": true, "repo": { "now": 1 },
+            "queue": [{ "id": 7, "intent": format!("{} the end.", "word ".repeat(80)) }, { "id": 8, "intent": "next" }] })).unwrap();
+        q.tab = Tab::Queue;
+        buffer(&mut q, 60, 10);
+        for _ in 0..12 { key(&mut q, k(KeyCode::Down, KeyModifiers::SHIFT)); buffer(&mut q, 60, 10); }
+        let s = screen_of(&mut q, 60, 10);
+        assert!(s.contains("the end."), "{s}");
+    }
+
+    #[test]
+    fn the_footer_offers_only_what_a_key_would_do_now() {
+        let foot = |app: &mut App, w: u16, h: u16| screen_of(app, w, h).lines().last().unwrap().to_string();
+        // An empty project: nothing to move, open, find or range over.
+        let mut app = ready();
+        app.p = serde_json::from_value(serde_json::json!({ "configured": true, "repo": { "now": 1 } })).unwrap();
+        for tab in TABS { app.tab = tab; let f = foot(&mut app, 80, 24); assert!(!f.contains("↑↓") && !f.contains("⏎") && !f.contains("/ Find") && !f.contains("r Range"), "{f}"); }
+        // Spec and Queue filter nothing; Compare only where two behaviors are.
+        let mut app = ready();
+        app.p = full();
+        for tab in [Tab::Spec, Tab::Queue] { app.tab = tab; let f = foot(&mut app, 120, 30); assert!(!f.contains("/ Find") && !f.contains("r Range"), "{f}"); }
+        app.tab = Tab::Traces;
+        let f = foot(&mut app, 120, 30);
+        assert!(f.contains("/ Find") && !f.contains("d Compare"), "{f}");
+        // The range bon was started with is the range shown; All time clears both bounds.
+        *app.filter.lock().unwrap() = view::Filter::new(Some("2026-11-01"), Some("2026-11-02"), None).unwrap();
+        // The footer says the range the shown projection was read over.
+        app.p.filter.since = Some(1_793_491_200); app.p.filter.until = Some(1_793_577_600 + 86399);
+        assert!(foot(&mut app, 200, 30).contains("Range: since 2026-11-01 until 2026-11-02"));
+        for _ in 0..RANGES.len() { key(&mut app, KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)); }
+        let f = app.filter.lock().unwrap().clone();
+        assert_eq!((f.since, f.until, app.range), (None, None, 0));
+    }
+
+    #[test]
+    fn an_agent_process_whose_program_never_started_says_so_in_red() {
+        let mut app = ready();
+        app.p = full();
+        app.tab = Tab::Traces;
+        let b = buffer(&mut app, 140, 40);
+        let y = (0..40).find(|&y| (0..140).map(|x| b[(x, y)].symbol().to_string()).collect::<String>().contains("Exit 126")).expect("the flag");
+        let x = (0..140).find(|&x| b[(x, y)].symbol() == "E" && b[(x + 1, y)].symbol() == "x").unwrap();
+        assert!(tone_colors(Tone::Red).contains(&b[(x, y)].fg));
     }
 }

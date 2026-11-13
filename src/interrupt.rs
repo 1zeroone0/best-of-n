@@ -34,12 +34,9 @@ use std::path::Path;
 use serde_json::{json, Value};
 
 use crate::projection::Interrupt;
-use crate::view::dur;
+use crate::view::{ago, count, money_or as money, share};
 
 fn git(root: &Path, args: &[&str]) -> String { super::git(root, args).unwrap_or_default() }
-
-/// Dollars to the cent; — for none.
-fn money(v: Option<f64>) -> String { v.map_or("—".into(), |d| format!("${:.2}", if d.abs() < 0.005 { 0.0 } else { d })) }
 
 fn now() -> i64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64) }
 
@@ -61,9 +58,6 @@ fn choices_for(reason: Option<&str>) -> &'static [&'static str] {
 fn widened<'a>(reason: Option<&str>, kind: &'a str) -> &'a str {
     match reason { Some("too_few_tests" | "undiscriminating") => "counterexample", _ => kind }
 }
-
-/// A share in words: `50% (1 of 2)`; `none measured` of none.
-fn share(k: u64, n: u64) -> String { if n == 0 { "none measured".into() } else { format!("{:.0}% ({k} of {n})", 100.0 * k as f64 / n as f64) } }
 
 /// The manifest at a commit (`HEAD`: this checkout's).
 fn manifest(root: &Path, at: &str) -> toml::Value {
@@ -208,7 +202,7 @@ fn of(root: &Path, state: &Value) -> Vec<Value> {
         if !matches!(kind, "code" | "compaction") { continue; }
         let Some(reason) = block(p) else { continue };
         let raised = last_time(p);
-        let mut i = base("blocked", format!("blocked {}", p["trace"].as_str().unwrap_or("")), format!("{kind} {}", p["title"].as_str().unwrap_or("")), raised);
+        let mut i = base("blocked", format!("blocked {}", p["trace"].as_str().unwrap_or("")), format!("{} {}", crate::view::cap(kind), p["title"].as_str().unwrap_or("")), raised);
         i["reason"] = json!(reason);
         let mains: Vec<&Value> = p["searches"].as_array().into_iter().flatten().filter(|s| s["kind"] == kind).collect();
         let widths: Vec<String> = mains.iter().filter_map(|s| s["width"].as_u64()).map(|w| w.to_string()).collect();
@@ -237,7 +231,7 @@ fn of(root: &Path, state: &Value) -> Vec<Value> {
                     Some((l, charged, n, a)) => format!("{} of {} spent; its next search reserves {}", money(Some(charged as f64 / 1e6)), money(Some(l as f64 / 1e6)), money(Some((n * a) as f64 / 1e6))),
                     None => format!("≈ {} an attempt", money(Some(last))),
                 }),
-                "change the spec" => (format!("commit to {checks}"), format!("your time{}, then an attempt ≈ {}", rate.map_or(String::new(), |r| format!(" at ${r:.0}/h")), money(Some(last)))),
+                "change the spec" => (format!("commit to {checks}"), format!("your time{}, then an attempt ≈ {}", rate.filter(|r| *r > 0.0).map_or(String::new(), |r| format!(" at ${r:.0}/h")), money(Some(last)))),
                 _ => ("take its line off .bon/queue.tsv".to_string(), format!("nothing more; the {} spent on it stays spent", money(Some(cost("cost"))))),
             };
             json!({ "choice": c, "how": how, "cost": cost })
@@ -290,9 +284,11 @@ fn of(root: &Path, state: &Value) -> Vec<Value> {
                 if contested > 0 { format!("; {contested} cue{} only one agent process cited", if contested == 1 { "" } else { "s" }) } else { String::new() }),
             format!("{}: {}{}", ids.join(", "), intents.first().and_then(|x| x["intent"].as_str()).unwrap_or(""), if intents.len() > 1 { " …" } else { "" }),
         ]);
+        // The transcript's name inside single quotes, a quote in it closed and escaped.
+        let q = source.replace('\'', "'\\''");
         i["choices"] = json!([
             { "choice": "accept", "how": format!("git am {path}"), "cost": format!("{} queued; {}", ids.join(", "), push_cost(state, "code")) },
-            { "choice": "reject", "how": format!("git commit --allow-empty -m 'queue: not {source}' -m 'Source: {source}'"), "cost": "nothing; bon queue will not propose it again" },
+            { "choice": "reject", "how": format!("git commit --allow-empty -m 'queue: not {q}' -m 'Source: {q}'"), "cost": "nothing; bon queue will not propose it again" },
         ]);
         if let Some((hash, time, subject, _)) = cites.iter().find(|(_, _, _, s)| s.iter().any(|s| s == source)) {
             let added = git(root, &["diff-tree", "--no-commit-id", "--numstat", "-r", hash, "--", ".bon/queue.tsv"]).split_whitespace().next().and_then(|n| n.parse::<u64>().ok()).unwrap_or(0);
@@ -391,9 +387,10 @@ fn spec_proposals(root: &Path, cites: &[(String, i64, String, Vec<String>)], bas
         let behaviors: Vec<&Value> = p["behaviors"].as_array().into_iter().flatten().collect();
         let mut i = base("proposal", format!("proposal {source}"), source.clone(), raised);
         i["what"] = json!([
-            format!("bon spec proposes {} spec change{} for {source}: {} of {} agent processes verified, {} decision{}",
-                behaviors.len(), if behaviors.len() == 1 { "" } else { "s" }, p["verified"], p["agent_processes"],
-                p["decisions"], if p["decisions"] == 1 { "" } else { "s" }),
+            format!("bon spec proposes {} for {source}: {} verified, {}",
+                count(behaviors.len(), "spec change", "spec changes"),
+                share(p["verified"].as_u64().unwrap_or(0), p["agent_processes"].as_u64().unwrap_or(0)),
+                count(p["decisions"].as_u64().unwrap_or(0) as usize, "decision", "decisions")),
             p["intent"].as_str().unwrap_or("").to_string(),
             format!("read {}", p["review"].as_str().unwrap_or("")),
         ]);
@@ -444,16 +441,12 @@ pub fn turnaround(interrupts: &[Value]) -> Vec<Value> {
     }).collect()
 }
 
-/// Words, wrapped to `w` columns.
+/// Words, wrapped to `w` columns; a word longer than a line (a path in a
+/// command) is never broken, so the command still runs as shown.
 fn wrap(text: &str, w: usize) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut line = String::new();
-    // A word longer than a line is cut at the line's end.
-    let words = text.split_whitespace().flat_map(|word| {
-        let c: Vec<char> = word.chars().collect();
-        c.chunks(w.max(1)).map(|p| p.iter().collect::<String>()).collect::<Vec<_>>()
-    });
-    for word in words {
+    for word in text.split_whitespace() {
         if !line.is_empty() && line.chars().count() + 1 + word.chars().count() > w { out.push(std::mem::take(&mut line)); }
         if !line.is_empty() { line.push(' '); }
         line.push_str(&word);
@@ -487,11 +480,12 @@ pub fn text(pending: &[&Interrupt], now: i64, width: usize) -> String {
         if k > 0 { out.push('\n'); }
         // The repository, where the listing spans more than one.
         let repo = if pending.iter().all(|x| x.root == i.root) || i.repository.is_empty() { String::new() } else { format!(" · {}", i.repository) };
-        put(&i.kind, &format!("{} · raised {} ago{repo}", i.about, dur((now - i.raised).max(0) as f64)), &mut out);
+        put(&crate::view::cap(&i.kind), &format!("{} · raised {}{repo}", i.about, ago(now, i.raised)), &mut out);
         for w in &i.what { put("", w, &mut out); }
         for c in &i.choices {
             put(&format!("  {}", c.choice), &c.cost, &mut out);
-            put("", &c.how, &mut out);
+            // How it is made: a command stands whole on its own line, so it runs as copied; prose wraps.
+            if c.how.starts_with("git ") || c.how.starts_with("bon ") { out.push_str(&format!("{}{}\n", " ".repeat(at), c.how)); } else { put("", &c.how, &mut out); }
         }
     }
     out.lines().map(str::trim_end).collect::<Vec<_>>().join("\n") + "\n"
@@ -500,7 +494,7 @@ pub fn text(pending: &[&Interrupt], now: i64, width: usize) -> String {
 /// The terminal's width, when standard output is one; else no wrapping.
 fn width() -> usize {
     use std::io::IsTerminal;
-    if !std::io::stdout().is_terminal() { return usize::MAX / 2; }
+    if !std::io::stdout().is_terminal() { return crate::view::REPORT_W; }
     ratatui::crossterm::terminal::size().map_or(80, |(w, _)| w as usize).max(20)
 }
 
@@ -509,22 +503,10 @@ fn width() -> usize {
 /// now recognises for the first time is recorded (`trusted::record_decision`),
 /// with FILE, the transcript of the agent session that runs it, as a pointer
 /// and its hash. Exits 0 when nothing is pending and 2 when something is.
-pub fn run(root: &str, args: &[String]) -> Result<(), String> {
-    let transcript = match args.get(1).map(String::as_str) {
-        None => None,
-        Some("--transcript") => Some(args.get(2).ok_or("--transcript takes the session's transcript file")?.clone()),
-        Some("-h" | "--help") => {
-            // Its lines of the usage, as the README's table says it.
-            let lines: Vec<&str> = super::USAGE.lines().skip_while(|l| !l.starts_with("  bon pending")).take(2).collect();
-            println!("usage:\n{}", lines.join("\n"));
-            return Ok(());
-        }
-        Some(other) => return Err(format!("bon pending takes --transcript FILE, not {other}")),
-    };
-    if let Some(t) = &transcript { if !Path::new(t).is_file() { return Err(format!("{t}: no such transcript file")); } }
+pub fn run(root: &str, transcript: Option<&str>) -> Result<(), String> {
+    if let Some(t) = transcript { if !Path::new(t).is_file() { return Err(format!("--transcript {t}: no such file; name this session's transcript")); } }
     // Outside a repository (root empty), the host's.
     let here = (!root.is_empty()).then(|| Path::new(root));
-    if let Some(path) = here { if git(path, &["show", "HEAD:.bon/bon.toml"]).is_empty() { return Err("no .bon/bon.toml at trunk's head: run bon init".into()); } }
     // First, each transcript dropped in the user layer's folder goes where the host file routes it (queue 80).
     let layer = best_of_n::trusted::user_layer();
     if let Some((user, routes)) = &layer {
@@ -535,7 +517,7 @@ pub fn run(root: &str, args: &[String]) -> Result<(), String> {
     let all: Vec<Interrupt> = serde_json::from_value(host["interrupts"].clone()).map_err(|e| format!("the interrupts do not match their types: {e}"))?;
     let mut recorded: Vec<String> = Vec::new();
     for (r, record) in unrecorded(&all) {
-        best_of_n::trusted::record_decision(Path::new(&r), record, transcript.as_deref().map(Path::new))?;
+        best_of_n::trusted::record_decision(Path::new(&r), record, transcript.map(Path::new))?;
         recorded.push(r);
     }
     // Each repository's traces that gained a record (the user layer's are no repository).
@@ -590,8 +572,10 @@ mod tests {
         long.choices[0].how = format!("git am .bon/traces/proposals/{}.patch", "a".repeat(60));
         for w in [24, 60, 100, 400] {
             let t = text(&[&i, &long], 3600, w);
-            assert!(t.lines().all(|l| l.chars().count() <= w.max(24)), "{w}:\n{t}");
-            assert!(t.contains("widen") && t.contains("raised 1h00m ago"), "{t}");
+            // Every line fits, but a command, which stands whole: it runs as copied.
+            assert!(t.lines().all(|l| l.chars().count() <= w.max(24) || l.trim().starts_with("git ")), "{w}:\n{t}");
+            assert!(t.contains(&format!(".bon/traces/proposals/{}.patch", "a".repeat(60))), "{t}");
+            assert!(t.contains("widen") && t.contains("raised 1h00m ago") && t.contains("Blocked"), "{t}");
         }
         // Two columns: every text starts at one column.
         let t = text(&[&i], 3600, 100);

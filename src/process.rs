@@ -790,14 +790,14 @@ pub fn counterexample(root: &str) -> (r: Result<bool, String>) {
     }
 }
 
-/// bon spec <queue id>: spec searches for an accepted intent, goal, queue line
-/// id. Its spec's files must stand alone on trunk, or nothing is reserved.
+/// bon spec <queue-id>: spec searches for goal, an accepted intent (a queue
+/// line). Its spec's files must stand alone on trunk, or nothing is reserved.
 /// Attempts run along the spec search's width list until one has a verified
 /// candidate, each carrying the previous attempt's unverified ones; that
-/// search's proposal is written for engineer. Nothing is pushed: no
+/// search is returned, for its proposal to engineer. Nothing is pushed: no
 /// transition takes a spec candidate to trunk (spec::proposals_never_reach_trunk).
-/// Ok: the proposal's path.
-pub fn spec(root: &str, id: u64, goal: Intent) -> (r: Result<String, String>) {
+/// Ok: the search, whose proposal trusted code writes (trusted::spec_proposal).
+pub fn spec(root: &str, goal: Intent) -> (r: Result<Search, String>) {
     hide(spec::isolated);
     let head = trusted::head(root)?;
     let m = trusted::manifest(root, &head)?;
@@ -868,7 +868,7 @@ pub fn spec(root: &str, id: u64, goal: Intent) -> (r: Result<String, String>) {
         }
         if any {
             trusted::record_proposal(&m);
-            return trusted::spec_proposal(&m, &s, id);
+            return Ok(s);
         }
         proof { previous_index = a as int; }
         previous = Some(s);

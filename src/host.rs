@@ -77,7 +77,8 @@ fn money(d: f64) -> String { crate::view::money(d) }
 /// What a bon process's attempts did that the journal tells: each push, each
 /// block, each counterexample's test landed, at when its trace says it happened.
 fn events_of(repository: &str, p: &Value, out: &mut Vec<Value>) {
-    let (kind, title) = (p["kind"].as_str().unwrap_or(""), p["title"].as_str().unwrap_or(""));
+    // A kind shown as a value, as everywhere: its first letter upper case.
+    let (kind, title) = (crate::view::cap(p["kind"].as_str().unwrap_or("")), p["title"].as_str().unwrap_or(""));
     let searches: Vec<&Value> = p["searches"].as_array().into_iter().flatten().collect();
     let last = searches.iter().filter_map(|s| s["time"].as_i64()).max().unwrap_or(p["time"].as_i64().unwrap_or(0));
     let event = |time: i64, what: &str, text: String| json!({ "time": time, "repository": repository, "kind": what, "text": text });
@@ -229,61 +230,81 @@ pub fn state(here: Option<&Path>) -> Value {
 /// How many journal lines the plain report prints: the latest.
 const JOURNAL_LINES: usize = 12;
 
-/// The host's projection as text, for `bon` outside every repository: what
-/// waits on engineer first, then what runs and what it holds, what happened,
-/// and each repository.
+/// The host's projection as text, for `bon` outside every repository, in the
+/// report's order and formats (`view::text`): where and what waiting costs
+/// today; what waits on engineer; what runs and what it holds; what happened;
+/// each repository.
 pub fn text(h: &Value) -> String {
+    use crate::view::{ago, cap, count, money, short, size, wrap};
     let Ok(h) = serde_json::from_value::<crate::projection::Host>(h.clone()) else { return "the host's projection does not match its types\n".into() };
     let mut out = String::new();
-    let count = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
-    out.push_str(&format!("this host · {} · user layer {}\n\n", count(h.repositories.len(), "repository", "repositories"),
-        h.user.as_deref().unwrap_or("unset (no host file names user)")));
+    let w = &h.waiting;
+    out += &wrap(&format!("Host · {} · user layer {} · {} of your time today", count(h.repositories.len(), "repository", "repositories"),
+        h.user.as_deref().unwrap_or("unset (no host file names user)"), money(w.today)), 0, 0);
     let pending: Vec<&crate::projection::Interrupt> = h.interrupts.iter().filter(|i| i.resolved.is_none()).collect();
-    if pending.is_empty() { out.push_str("nothing pending\n"); } else {
-        out.push_str(&format!("pending ({}; bon pending has the choices and what each costs)\n", pending.len()));
+    if !pending.is_empty() {
+        out += &format!("\nPending  {} · bon pending has each one's choices and what each costs\n", pending.len());
         for i in &pending {
             let repo = if i.repository.is_empty() { String::new() } else { format!(" · {}", i.repository) };
-            out.push_str(&format!("  {:<10} {}{repo} · raised {} ago\n      {}\n", i.kind, i.about, crate::view::dur((h.now - i.raised).max(0) as f64), i.what.first().map_or("", String::as_str)));
+            out += &wrap(&format!("{:<10} {}{repo} · raised {}", cap(&i.kind), i.about, ago(h.now, i.raised)), 2, 6);
+            out += &wrap(i.what.first().map_or("", String::as_str), 6, 8);
         }
     }
-    let w = &h.waiting;
-    if w.searches > 0 {
-        out.push_str(&format!("you wait on {} · your time {}/h while {} run{}\n", count(w.searches as usize, "search", "searches"), money(w.per_hour),
-            if w.searches == 1 { "it" } else { "they" }, if w.searches == 1 { "s" } else { "" }));
-    }
-    out.push_str(&format!("your time charged today {}\n\n", money(w.today)));
+    out += "\nNow\n";
+    if w.searches > 0 { out += &wrap(&format!("You wait on {} · {}/h of your time", count(w.searches as usize, "search", "searches"), money(w.per_hour)), 2, 4); }
     let p = &h.pools;
-    let pool = |name: &str, s: &crate::projection::Slots| s.size.map_or(format!("{name} unknown (no host file)"), |n| format!("{name} {} of {n} held", s.held));
-    out.push_str(&format!("now\n  {} · {}{}\n", pool("agent_processes", &p.agent_processes), pool("check_processes", &p.check_processes),
-        p.check_threads.map_or(String::new(), |t| format!(" · {t} threads per check"))));
-    out.push_str(&format!("  memory {:.1} GB free of {:.1} GB{}\n", h.memory.free, h.memory.total,
-        if h.trees.is_empty() { String::new() } else { format!(" · bon processes hold {:.1} GB", h.memory.bon) }));
-    if h.trees.is_empty() { out.push_str("  no bon process is running\n"); }
+    let pool = |name: &str, s: &crate::projection::Slots| s.size.map_or(format!("{name} unsized: no host file"), |n| format!("{name} {} of {n} held", s.held));
+    out += &wrap(&format!("{} · {}{}", pool("agent_processes", &p.agent_processes), pool("check_processes", &p.check_processes),
+        p.check_threads.map_or(String::new(), |t| format!(" · {t} threads each"))), 2, 4);
+    if h.memory.total > 0.0 {
+        out += &wrap(&format!("Memory {:.1} of {:.1} GB in use{}", h.memory.total - h.memory.free, h.memory.total, if h.trees.is_empty() { String::new() } else { format!(" · bon {}", size(h.memory.bon)) }), 2, 4);
+    }
+    let n: usize = h.trees.iter().map(|g| g.processes.len()).sum();
+    out += &format!("\nbon Processes{}\n", if n > 0 { format!("  {n}") } else { String::new() });
+    if n == 0 { out += "  No bon process is running\n"; }
     for g in &h.trees {
-        let tree = g.tree.as_deref().map_or("between searches".to_string(), |t| format!("tree {}", &t[..7.min(t.len())]));
-        if g.processes.len() > 1 { out.push_str(&format!("  {} bon processes on {tree}\n", g.processes.len())); }
+        let grouped = g.processes.len() > 1;
+        if grouped { out += &format!("  Tree {} · {} bon processes from one tree\n", short(g.tree.as_deref().unwrap_or("")), g.processes.len()); }
+        let ind = if grouped { 4 } else { 2 };
         for r in &g.processes {
-            out.push_str(&format!("  {}{} {} · pid {} · {:.1} GB · {}{}\n", if g.processes.len() > 1 { "  " } else { "" }, r.repository, r.kind.as_deref().unwrap_or("bon"), r.pid, r.memory,
-                r.sentence, if r.background { " · background" } else { "" }));
+            let what = match (r.kind.as_deref(), r.goal.as_deref()) {
+                (Some(k), Some(goal)) => format!("{} {}", cap(k), if goal.chars().all(|c| c.is_ascii_hexdigit()) { format!("from {}", short(goal)) } else { goal.to_string() }),
+                (Some(k), None) => cap(k),
+                _ => "Between searches".to_string(),
+            };
+            out += &wrap(&format!("{} · {what}{} · {} · pid {} · {} · {}", r.repository, if r.background { " · background" } else { "" },
+                ago(h.now, r.start), r.pid, size(r.memory), r.sentence), ind, ind + 4);
         }
     }
-    if !h.journal.is_empty() {
-        out.push_str("\njournal\n");
-        let off = offset();
-        for e in h.journal.iter().rev().take(JOURNAL_LINES).rev() {
-            out.push_str(&format!("  {} {:<8} {}{}\n", local(e.time, off), e.kind,
-                if e.repository.is_empty() { String::new() } else { format!("{} · ", e.repository) }, e.text));
-        }
+    out += "\nJournal\n";
+    if h.journal.is_empty() { out += "  No push, block or interrupt yet\n"; }
+    // As Traces: a heading for each day, then each event's time.
+    let off = offset();
+    let mut last_day = None;
+    for e in h.journal.iter().rev().take(JOURNAL_LINES).rev() {
+        let day = local(e.time, off);
+        let (date, time) = day.split_once(' ').unwrap_or((&day, ""));
+        if last_day.as_deref() != Some(date) { out += &format!("  {date}\n"); last_day = Some(date.to_string()); }
+        out += &wrap(&format!("{time}  {:<9} {}{}", cap(&e.kind), if e.repository.is_empty() { String::new() } else { format!("{} · ", e.repository) }, e.text), 2, 4);
     }
-    if !h.repositories.is_empty() {
-        out.push_str("\nrepositories\n");
-        let wide = h.repositories.iter().map(|r| r.name.chars().count()).max().unwrap_or(0);
-        // A repository's root where it is not the user layer's own.
-        let under = |r: &str| h.user.as_deref().is_some_and(|u| Path::new(r).parent() == Some(Path::new(u)));
-        for r in &h.repositories {
-            out.push_str(&format!("  {:<wide$}  {} pending · {} running · {} today{}\n", r.name, r.pending, r.running, money(r.today),
-                if under(&r.root) { String::new() } else { format!(" · {}", r.root) }));
-        }
+    out += &format!("\nRepositories{}\n", if h.repositories.is_empty() { String::new() } else { format!("  {}", h.repositories.len()) });
+    if h.repositories.is_empty() {
+        out += &match &h.user { None => "  No host file names the user layer: bon setup writes one\n".to_string(),
+            Some(u) => wrap(&format!("No repository under {u} has a .bon/bon.toml: bon init makes one"), 2, 4) };
+    }
+    let wide = h.repositories.iter().map(|r| r.name.chars().count()).max().unwrap_or(0);
+    // A repository's root where it is not the user layer's own.
+    let under = |r: &str| h.user.as_deref().is_some_and(|u| Path::new(r).parent() == Some(Path::new(u)));
+    for r in &h.repositories {
+        let what = if !r.configured { "no .bon/bon.toml at trunk's head".to_string() } else {
+            let mut parts = Vec::new();
+            if r.pending > 0 { parts.push(format!("{} pending", r.pending)); }
+            if r.running > 0 { parts.push(format!("{} running", r.running)); }
+            parts.push(format!("{} today", money(r.today)));
+            if let Some(t) = r.latest { parts.push(format!("last ran {}", ago(h.now, t))); }
+            parts.join(" · ")
+        };
+        out += &wrap(&format!("{:<wide$}  {what}{}", r.name, if under(&r.root) { String::new() } else { format!(" · {}", r.root) }), 2, 4 + wide);
     }
     out
 }

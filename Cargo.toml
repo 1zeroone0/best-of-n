@@ -38,6 +38,10 @@ path = "checks/new.rs"
 name = "oscal"
 path = "checks/oscal.rs"
 
+[[test]]
+name = "cli"
+path = "checks/cli.rs"
+
 [dependencies]
 vstd = "=0.0.0-2026-10-18-0147"
 verus_state_machines_macros = "=0.0.0-2026-10-18-0147"

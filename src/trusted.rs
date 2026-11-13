@@ -599,9 +599,9 @@ impl Signal {
 
 /// What a supervised command did: exit 0, its stdout, whether its time limit
 /// stopped it, whether it exited with a code of its own (not killed, not a
-/// signal, not a spawn that failed: only such a result may be cached), and its
-/// log as written.
-struct Run { ok: bool, stdout: String, killed: bool, exited: bool, log: String }
+/// signal, not a spawn that failed: only such a result may be cached), that
+/// code, whether it was spawned at all, and its log as written.
+struct Run { ok: bool, stdout: String, killed: bool, exited: bool, exit: Option<i32>, spawned: bool, log: String }
 
 /// Run to completion or kill at `time`, with all it started; the command runs
 /// as `who`. `spoke`, if given, is set when the command first writes to stdout.
@@ -614,7 +614,7 @@ fn supervised(mut c: Command, who: Who, stdin: Option<String>, time: Duration, l
         Err(e) => {
             let text = format!("spawn: {e}");
             write_trace(log, &text);
-            return Run { ok: false, stdout: String::new(), killed: false, exited: false, log: text };
+            return Run { ok: false, stdout: String::new(), killed: false, exited: false, exit: None, spawned: false, log: text };
         }
     };
     if let Some(text) = stdin {
@@ -663,7 +663,8 @@ fn supervised(mut c: Command, who: Who, stdin: Option<String>, time: Duration, l
     let exit = if killed { "killed".to_string() } else { status.and_then(|s| s.code()).map_or("signal".into(), |c| c.to_string()) };
     let text = format!("exit: {exit}\nseconds: {:.1}\n--- stdout\n{stdout}\n--- stderr\n{stderr}", start.elapsed().as_secs_f64());
     write_trace(log, &text);
-    Run { ok: status.is_some_and(|s| s.success()) && !killed, stdout, killed, exited: !killed && status.and_then(|s| s.code()).is_some(), log: text }
+    let code = if killed { None } else { status.and_then(|s| s.code()) };
+    Run { ok: status.is_some_and(|s| s.success()) && !killed, stdout, killed, exited: code.is_some(), exit: code, spawned: true, log: text }
 }
 
 // ── working directories ─────────────────────────────────
@@ -2512,6 +2513,49 @@ pub fn programs_logged_in(m: &Manifest) -> (r: Result<(), String>) {
     Ok(())
 }
 
+/// Whether `$1` runs: a name is looked up on PATH, a path is that file; each
+/// failure says why, on stdout, and exits 1.
+/// A name is looked for as env looks for it, an executable file in a PATH
+/// directory (a shell builtin is no answer); a relative path is the working
+/// directory's, which exists only once the search runs, so it is not checked.
+pub const PROBE: &'static str = "case \"$1\" in /*) p=\"$1\";; */*) exit 0;; *) p=; IFS=:; for d in $PATH; do [ -f \"$d/$1\" ] && [ -x \"$d/$1\" ] && { p=\"$d/$1\"; break; }; done
+  [ -n \"$p\" ] || { echo \"not found on agent's PATH\"; exit 1; };; esac
+[ -e \"$p\" ] || { echo \"$p does not exist\"; exit 1; }; [ -f \"$p\" ] && [ -x \"$p\" ] || { echo \"$p is not executable by agent\"; exit 1; }";
+
+/// Before a search, before anything is reserved: the program of each role
+/// bon.toml names is found and executable as agent, on agent's PATH, the way
+/// an agent process runs it. If one is not, which role and program, and why.
+#[verifier::external_body]
+pub fn programs_executable(m: &Manifest) -> (r: Result<(), String>) {
+    let mut roles: Vec<String> = m.config.searches.all().iter().map(|(_, e)| e.role.clone()).collect();
+    roles.sort(); roles.dedup();
+    for role in roles {
+        let Some(program) = m.config.roles.get(&role).and_then(|r| r.program.first()).cloned() else {
+            return Err(format!("role {role} has no program in the host file; give [roles.{role}] a program"));
+        };
+        let out = as_agent(&m.config, std::path::Path::new("/tmp"), &[], &["/bin/sh".into(), "-c".into(), PROBE.into(), "sh".into(), program.clone()]).output();
+        let why = match out {
+            Ok(o) if o.status.success() => continue,
+            // The probe's own line; what the shell or sudo said, only when it said nothing.
+            Ok(o) => Some(String::from_utf8_lossy(&o.stdout).trim().to_string()).filter(|s| !s.is_empty())
+                .unwrap_or_else(|| String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("").trim().to_string()),
+            Err(e) => format!("bon could not run as agent: {e}"),
+        };
+        return Err(format!("agent cannot execute {program} (role {role}): {why}; make it executable by agent, or name another program in the host file"));
+    }
+    Ok(())
+}
+
+/// Whether an agent process's program never started: it wrote nothing, and
+/// it could not be spawned, or `env` could not run it (126: found but not
+/// executable; 127: not found). It reached no model and is charged nothing;
+/// so is one that wrote nothing and exited non-zero (`silent`): there is no
+/// token count to charge, and its exit is flagged, not a spent limit.
+#[verifier::external]
+fn never_started(run: &Run) -> bool {
+    !run.killed && run.stdout.is_empty() && (!run.spawned || matches!(run.exit, Some(126 | 127)))
+}
+
 /// How many agent processes a search of this kind runs on attempt `a`.
 #[verifier::external_body]
 pub fn width(m: &Manifest, kind: &Kind, a: usize) -> usize {
@@ -3080,7 +3124,8 @@ pub fn end(root: &std::path::Path, result: Result<(), String>) -> ! {
     let _ = std::io::stdout().flush();
     match result {
         Ok(()) => std::process::exit(0),
-        Err(e) => { eprintln!("bon: {e}"); std::process::exit(1) }
+        // One line, whatever the error carried.
+        Err(e) => { eprintln!("bon: {}", e.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join("; ")); std::process::exit(1) }
     }
 }
 
@@ -3374,18 +3419,24 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, p: &Pro
     if let Some(c) = p.run.context { env.push(("BON_CONTEXT", c.to_string())); }
     let c = as_user(config, Who::Agent, &with_wrapper(config, config.path.clone()), &dir, &env, &argv);
     let run = supervised(c, Who::Agent, Some(text), Duration::from_secs(config.agent_process.time), &trace.join("program"), spoke);
-    let (stdout, killed) = (run.stdout, run.killed);
+    let started = !never_started(&run);
+    let silent = !run.killed && run.stdout.is_empty() && run.exit != Some(0);
+    let (stdout, killed, exit) = (run.stdout, run.killed, run.exit);
     drop(session);
     remove_build(config, &build);
-    // Without token counts there is no measured cost: charge the whole limit.
-    let (spent, program_cost, prices) = generation(p, config, &stdout).unwrap_or((micro(config.agent_process.limit), None, HashMap::new()));
+    // Without token counts there is no measured cost: charge the whole limit;
+    // a program that never started reached no model, and costs nothing.
+    let (spent, program_cost, prices) = generation(p, config, &stdout)
+        .unwrap_or((if started && !silent { micro(config.agent_process.limit) } else { 0 }, None, HashMap::new()));
     let over = over_tier(p, config, &stdout);
     if killed { write_trace(&trace.join("killed"), "time limit"); }
     // The judge's build: a fresh clone of trunk's, which no agent process wrote,
     // made only if a check must run (the verdict cache may answer them all).
     let judge = named_build(&format!("{search}.{index}.judge/build"), Start::Trunk);
     // What its checks said is kept with it, for a push or landing to check again.
-    let (captured, decided) = deciding(|| capture(m, kind, search, index, start, &dir, &judge, target, foils, trace));
+    // A program that never started wrote nothing: its untouched directory is no candidate to judge.
+    let (captured, decided) = if started { deciding(|| capture(m, kind, search, index, start, &dir, &judge, target, foils, trace)) }
+        else { (Err(format!("its program never started (exit {}); nothing to judge", exit.map_or("none".to_string(), |c| c.to_string()))), Default::default()) };
     if let Ok(c) = &captured { keep_decided(&c.commit.iter().collect::<String>(), decided); }
     let candidate = captured.map_err(|e| { write_trace(&trace.join("error"), &e); }).ok();
     remove_build(config, &judge);
@@ -3398,6 +3449,8 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, p: &Pro
         // The program by its name (its argv is the trace's `argv`), its role and its client.
         "program": p.name(), "role": p.role, "client": p.run.client, "model": p.run.model,
         "generation_microdollars": spent, "killed": killed,
+        // Its program's exit code (none when killed or never spawned), and whether it started at all.
+        "exit": exit, "started": started,
         "program_generation_microdollars": program_cost,
         // Its requests over its model's tier threshold, where the output says each request's prompt,
         // and what they cost beyond the base price.
@@ -4224,15 +4277,18 @@ pub fn spec_files(m: &Manifest, head: &Commit) -> (r: Result<Vec<Path>, String>)
     Ok(files.iter().map(|f| f.chars().collect()).collect())
 }
 
+
+} // verus!
+
 /// bon spec's proposal for queue id, in its own directory beside the queue's
 /// proposals, `spec-<id>/`: `review.md`, the review form engineer reads first
 /// (new words, decisions, reach, scenarios, in plain words, no diff); one
 /// patch per behavior beside it (`<k>.patch`, a plain diff `git apply` takes,
 /// so the commit is engineer's); and `proposal.json`, which the proposal
 /// interrupt reads. The kernel decides which candidates are verified; this
-/// groups them by `out`, their surface change. Returns the review's path.
-#[verifier::external_body]
-pub fn spec_proposal(m: &Manifest, s: &Search, id: u64) -> (r: Result<String, String>) {
+/// groups them by `out`, their surface change. Prose wraps by `wrap` and counts
+/// read by `count`, the view's own formats. Returns the review's path.
+pub fn spec_proposal(m: &Manifest, s: &Search, id: u64, wrap: &dyn Fn(&str, usize, usize) -> String, count: &dyn Fn(usize, &str, &str) -> String) -> Result<String, String> {
     let root = &m.root;
     let text = |v: &[char]| v.iter().collect::<String>();
     let Kind::Spec { goal, files } = &s.kind else { return Err("not a spec search".into()) };
@@ -4255,7 +4311,10 @@ pub fn spec_proposal(m: &Manifest, s: &Search, id: u64) -> (r: Result<String, St
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let name = |k: usize| format!("{}.patch", k + 1);
-    let who = |is: &[usize]| format!("{} agent process{} ({})", is.len(), if is.len() == 1 { "" } else { "es" }, is.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", "));
+    let who = |is: &[usize]| format!("{} ({})", count(is.len(), "agent process", "agent processes"), is.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", "));
+    // A paragraph, wrapped; a list item, its lines under its text.
+    let para = |text: &str| wrap(text, 0, 0) + "\n";
+    let item = |text: &str| wrap(&format!("- {text}"), 0, 2);
     let mut patches = Vec::new();
     for (k, (_, is)) in behaviors.iter().enumerate() {
         let mut args = vec!["diff".to_string(), base.clone(), commit_of(is[0]), "--".into()];
@@ -4265,11 +4324,11 @@ pub fn spec_proposal(m: &Manifest, s: &Search, id: u64) -> (r: Result<String, St
         patches.push(format!("{at}/{}", name(k)));
     }
     let mut md = format!("# Proposal: queue {id}, a spec change\n\n> {intent}\n\n");
-    md.push_str(&format!("{} agent processes each proposed a spec change; {} verified (the spec verifies alone, and each changed only the spec's files, {}). \
-        They group into {} behavior{} by the surface items they change. Nothing was pushed.\n\n",
-        s.n, verified.len(), files.join(", "), behaviors.len(), if behaviors.len() == 1 { "" } else { "s" }));
-    md.push_str(&format!("To accept behavior k: `git apply {at}/k.patch`, delete line {id} of `{QUEUE}`, \
-        and commit with the trailer `Source: queue {id}`. To accept none: `git commit --allow-empty -m 'spec: not queue {id}' -m 'Source: queue {id}'`.\n\n"));
+    md.push_str(&para(&format!("{} each proposed a spec change; {} verified (the spec verifies alone, and each changed only the spec's files, {}). \
+        They group into {} by the surface items they change. Nothing was pushed.",
+        count(s.n, "agent process", "agent processes"), verified.len(), files.join(", "), count(behaviors.len(), "behavior", "behaviors"))));
+    md.push_str(&para(&format!("To accept behavior k: `git apply {at}/k.patch`, delete line {id} of `{QUEUE}`, \
+        and commit with the trailer `Source: queue {id}`. To accept none: `git commit --allow-empty -m 'spec: not queue {id}' -m 'Source: queue {id}'`.")));
 
     // New words: identifiers new to the surface, each with the sentence each behavior gave it.
     md.push_str("## New words\n\n");
@@ -4288,18 +4347,19 @@ pub fn spec_proposal(m: &Manifest, s: &Search, id: u64) -> (r: Result<String, St
             }
         }
     }
-    if words.is_empty() { md.push_str("None: no identifier is new to the surface.\n\n"); }
+    if words.is_empty() { md.push_str(&para("None: no identifier is new to the surface.")); }
     for (w, said) in &words {
         let mut sentences: Vec<(String, Vec<usize>)> = Vec::new();
         for (i, d) in said { match sentences.iter_mut().find(|x| x.0 == *d) { Some(x) => x.1.push(*i), None => sentences.push((d.clone(), vec![*i])) } }
         for (d, is) in sentences {
-            md.push_str(&format!("- {w}, as {} wrote it: {}\n", who(&is), if d.is_empty() { "(no sentence given)".to_string() } else { d }));
+            md.push_str(&item(&format!("{w}, as {} wrote it: {}", who(&is), if d.is_empty() { "(no sentence given)".to_string() } else { d })));
         }
     }
 
     // Decisions: each item the behaviors wrote differently, or one wrote and another did not.
-    md.push_str("\n## Decisions\n\nA split is an item the verified agent processes wrote differently. bon compares text, without docs, comments or layout, \
-        so two sides may still mean the same: that is for you to judge.\n\n");
+    md.push_str("\n## Decisions\n\n");
+    md.push_str(&para("A split is an item the verified agent processes wrote differently. bon compares text, without docs, comments or layout, \
+        so two sides may still mean the same: that is for you to judge."));
     let keys: std::collections::BTreeSet<String> = changes.iter().flat_map(|c| c.iter().map(|x| x.0.clone())).collect();
     let mut n = 0;
     for key in &keys {
@@ -4317,9 +4377,9 @@ pub fn spec_proposal(m: &Manifest, s: &Search, id: u64) -> (r: Result<String, St
         n += 1;
         md.push_str(&format!("{n}. {key}:\n"));
         for (side, (version, how, ks)) in sides.iter().enumerate() {
-            let count: usize = ks.iter().map(|k| behaviors[*k].1.len()).sum();
-            let label = format!("{} — behavior{} {}, {count} agent process{}", if side == 0 { "either" } else { "or" },
-                if ks.len() == 1 { "" } else { "s" }, ks.iter().map(|k| (k + 1).to_string()).collect::<Vec<_>>().join(", "), if count == 1 { "" } else { "es" });
+            let processes: usize = ks.iter().map(|k| behaviors[*k].1.len()).sum();
+            let label = format!("{} — behavior{} {}, {}", if side == 0 { "either" } else { "or" },
+                if ks.len() == 1 { "" } else { "s" }, ks.iter().map(|k| (k + 1).to_string()).collect::<Vec<_>>().join(", "), count(processes, "agent process", "agent processes"));
             match (how, version) {
                 (&"leaves", _) => md.push_str(&format!("   - {label}: leaves it as trunk has it\n")),
                 (&"removes", _) => md.push_str(&format!("   - {label}: removes it\n")),
@@ -4331,11 +4391,11 @@ pub fn spec_proposal(m: &Manifest, s: &Search, id: u64) -> (r: Result<String, St
         let tokens = |i: &Item| { let mut t: Vec<String> = i.compared.split(|c: char| !(c.is_alphanumeric() || c == '_')).filter(|w| !w.is_empty()).map(String::from).collect(); t.sort(); t };
         let versions: Vec<Vec<String>> = sides.iter().filter_map(|x| x.0.map(tokens)).collect();
         if versions.len() == sides.len() && versions.windows(2).all(|w| w[0] == w[1]) {
-            md.push_str("   These sides use the same words in another order: they may well mean the same.\n");
+            md.push_str(&wrap("These sides use the same words in another order: they may well mean the same.", 3, 3));
         }
         md.push('\n');
     }
-    if n == 0 { md.push_str("None: every verified agent process made the same surface change.\n\n"); }
+    if n == 0 { md.push_str(&para("None: every verified agent process made the same surface change.")); }
 
     // Reach, per behavior: what it changes in full, the kernel's functions that name it, and the rest.
     md.push_str("## Reach\n\n");
@@ -4343,7 +4403,10 @@ pub fn spec_proposal(m: &Manifest, s: &Search, id: u64) -> (r: Result<String, St
     for (k, (_, is)) in behaviors.iter().enumerate() {
         md.push_str(&format!("### Behavior {}: {}, `{}`\n\n", k + 1, who(is), patches[k]));
         for (key, how, _, b) in &changes[k] {
-            md.push_str(&format!("It {how} {key}{}", match b { Some(i) => format!(", which reads:\n\n{}\n", fenced(&i.written)), None => ".\n\n".into() }));
+            match b {
+                Some(i) => { md.push_str(&para(&format!("It {how} {key}, which reads:"))); md.push_str(&fenced(&i.written)); md.push('\n'); }
+                None => md.push_str(&para(&format!("It {how} {key}."))),
+            }
         }
         let names: Vec<String> = changes[k].iter().filter_map(|x| x.3.as_ref().or(x.2.as_ref()).map(|i| i.name.clone())).collect();
         let trace = git(root, &["log", "-1", "--format=%B", &commit_of(is[0])]).unwrap_or_default().lines().find_map(|l| l.strip_prefix("Trace: ").map(|t| root.join(t.trim()))).unwrap_or_default();
@@ -4351,16 +4414,18 @@ pub fn spec_proposal(m: &Manifest, s: &Search, id: u64) -> (r: Result<String, St
         let deps = dependents(root, &commit_of(is[0]), &files, &names, &log);
         if !log.contains("verification results") {
             let first = log.lines().find(|l| l.starts_with("error")).unwrap_or("it did not finish");
-            md.push_str(&format!("The kernel does not build with this change ({first}): code must follow it before anything proves.\n"));
+            md.push_str(&para(&format!("The kernel does not build with this change ({first}): code must follow it before anything proves.")));
         }
-        let count = |st: &str| deps.iter().filter(|d| d.2 == st).count();
-        md.push_str(&format!("The kernel's functions that name what it changes: {} ({} still prove, {} fail, {} not built).\n",
-            deps.len(), count("still proves"), count("fails"), count("not built")));
-        for (f, name, st) in deps.iter().filter(|d| d.2 != "still proves").take(40) { md.push_str(&format!("- {f}: `{name}` {st}\n")); }
+        let with = |st: &str| deps.iter().filter(|d| d.2 == st).count();
+        md.push_str(&para(&format!("The kernel's functions that name what it changes: {} ({} still prove, {} fail, {} not built).",
+            deps.len(), with("still proves"), with("fails"), with("not built"))));
+        for (f, name, st) in deps.iter().filter(|d| d.2 != "still proves").take(40) { md.push_str(&item(&format!("{f}: `{name}` {st}"))); }
         let rest = surface_count.saturating_sub(changes[k].iter().filter(|x| x.1 != "adds").count());
-        md.push_str(&format!("\nThe rest of the spec's surface, {rest} item{}, is unchanged.\n\n", if rest == 1 { "" } else { "s" }));
+        md.push('\n');
+        md.push_str(&para(&format!("The rest of the spec's surface, {}, is unchanged.", count(rest, "item", "items"))));
     }
-    md.push_str("## Scenarios\n\nNone derived: bon does not yet write the cases that tell two specs apart.\n");
+    md.push_str("## Scenarios\n\n");
+    md.push_str(&wrap("None derived: bon does not yet write the cases that tell two specs apart.", 0, 0));
     let review = dir.join("review.md");
     std::fs::write(&review, &md).map_err(|e| e.to_string())?;
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
@@ -4373,7 +4438,6 @@ pub fn spec_proposal(m: &Manifest, s: &Search, id: u64) -> (r: Result<String, St
     Ok(format!("{at}/review.md"))
 }
 
-} // verus!
 
 #[cfg(test)]
 mod tests {
@@ -5167,6 +5231,35 @@ mod tests {
         assert!(!ok && killed, "{}", std::fs::read_to_string(&log).unwrap_or_default());
         assert!(start.elapsed() < Duration::from_secs(6), "{:?}", start.elapsed());
         let _ = std::fs::remove_file(&log);
+    }
+
+    #[test]
+    fn a_program_that_never_started_is_told_apart_and_why_it_cannot_run_is_said() {
+        // M3: spawn failed, or env could not run it (126, 127), with no output: never started.
+        let log = std::env::temp_dir().join(format!("bon-started-test-{}", std::process::id()));
+        let run = |c: Command| supervised(c, Who::Agent, None, Duration::from_secs(10), &log, None);
+        assert!(never_started(&run(Command::new("/nonexistent/program"))));
+        let mut c = Command::new("/usr/bin/env"); c.arg("/etc/hosts");
+        let r = run(c);
+        assert!(r.exit == Some(126) && never_started(&r), "{}", r.log);
+        let mut c = Command::new("/usr/bin/env"); c.arg("no-such-program-anywhere");
+        assert!(never_started(&run(c)));
+        // A program that ran and failed, or printed anything, started.
+        let mut c = Command::new("/bin/sh"); c.args(["-c", "echo token; exit 127"]);
+        assert!(!never_started(&run(c)));
+        let mut c = Command::new("/bin/sh"); c.args(["-c", "exit 1"]);
+        assert!(!never_started(&run(c)));
+        let _ = std::fs::remove_file(&log);
+        // The probe says why, in one line.
+        let probe = |p: &str| { let o = Command::new("/bin/sh").args(["-c", PROBE, "sh", p]).env("PATH", "/usr/bin:/bin").output().unwrap(); (o.status.success(), String::from_utf8_lossy(&o.stdout).trim().to_string()) };
+        assert_eq!(probe("sh"), (true, String::new()));
+        // A builtin is found only as the file env would run.
+        assert_eq!(probe("true"), (true, String::new()));
+        assert_eq!(probe("./relative"), (true, String::new()));
+        assert_eq!(probe("/bin/sh"), (true, String::new()));
+        assert_eq!(probe("no-such-program-anywhere"), (false, "not found on agent's PATH".to_string()));
+        assert_eq!(probe("/etc/hosts"), (false, "/etc/hosts is not executable by agent".to_string()));
+        assert_eq!(probe("/nonexistent/program"), (false, "/nonexistent/program does not exist".to_string()));
     }
 
     /// Trunk with a landed test (accepts only good code) and its evidence (bad
