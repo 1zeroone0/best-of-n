@@ -16,7 +16,7 @@
               "hashes": [
                 {
                   "algorithm": "SHA-256",
-                  "value": "230152350c0d81432f0417d54ad3e16402c4f2f8f5eed037383ef6b826189453"
+                  "value": "0feb083786a3510b7d79c8ef6d7490400f1923937232daebcec123d883a3928e"
                 }
               ],
               "href": "sbom.json",
@@ -643,7 +643,7 @@
         "props": [
           {
             "name": "version",
-            "value": "2.1.318 (Claude Code)"
+            "value": "absent"
           },
           {
             "class": "tool",
@@ -840,12 +840,12 @@
       }
     ],
     "metadata": {
-      "last-modified": "2026-11-13T06:40:30Z",
+      "last-modified": "2026-11-13T07:47:28Z",
       "oscal-version": "1.2.3",
       "remarks": "proven: in the kernel, verified by Verus. trusted: reviewed by the owner, not verified. configured: a fact of the manifest. tested: program code and every other file, judged by the checks. Every control claim is proposed and awaits GRC review.",
       "title": "best-of-n",
-      "version": "c56b488362fc"
+      "version": "b6e501ec9041"
     },
-    "uuid": "3872ed73-6d1d-4961-a919-4e9809190d3e"
+    "uuid": "a76dfa2d-26f5-4165-822a-8b4413b7f319"
   }
 }
