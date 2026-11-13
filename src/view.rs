@@ -431,10 +431,15 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
     let mut processes = Vec::new();
     let mut last_push: Option<Value> = None;
     let (mut earliest, mut latest) = (u64::MAX, 0u64);
+    // The traces of this repository's bon processes the user layer's process
+    // list says are running. This bon process, reading its own traces after a
+    // push (for cost.toml), has ended its work: only another is running.
+    let me = u64::from(std::process::id());
+    let live: Vec<String> = best_of_n::trusted::processes().into_iter()
+        .filter(|p| p["repository"].as_str().map(Path::new) == Some(root) && p["pid"].as_u64() != Some(me))
+        .filter_map(|p| p["trace"].as_str().map(String::from)).collect();
     for (pid, trace, dir) in pids.into_iter() {
-        // This bon process, reading its own traces after a push (for cost.toml),
-        // has ended its work: only another live process is running.
-        let running = best_of_n::trusted::trace_running(&traces, &trace);
+        let running = live.contains(&trace);
         let transitions: Vec<String> = std::fs::read_to_string(dir.join("transitions")).unwrap_or_default()
             .lines().map(String::from).collect();
         if !running && !transitions.iter().any(|t| t.starts_with("grant ")) { continue; }

@@ -13,7 +13,8 @@ Three roles, three words. **engineer** (the owner) holds the demos and the
 transcripts with customers, and the spec, with you. **The model** (you) runs
 bon and resolves what its searches turn up, including a change a search found
 but may not make; engineer hears only what you cannot resolve. **agent** is the
-POSIX user every agent process runs as; never call yourself that.
+POSIX user every agent process runs as; never call yourself that. Each check
+runs as its check slot's own user, `check0`, `check1`, ….
 
 ## Working with the owner
 
@@ -150,9 +151,11 @@ The repository holds the words; this skill does not repeat them.
   `limit` and `time`), `rate`, `[counterexample]` (`path`, `build`, `run`,
   `tests`, `visible`), `[account]`, `[types]`, the `transcripts` directory,
   and `trunk` on `remote`.
-- `/etc/bon/host.toml`, the host file: agent's `path`, the toolchain's homes
-  (`rustup_home`, `cargo_home`), the verdict cache's place (`verdicts`) and
-  which working directories a bon process removes (`cleanup`),
+- `/etc/bon/host.toml`, the host file: `user`, the user layer's root (bon's
+  state that outlives a bon process is its `.bon`: the verdict cache and the
+  process list, `processes/<pid>.<start>.json`, one plain JSON file per
+  running bon process), agent's `path`, the toolchain's homes
+  (`rustup_home`, `cargo_home`),
   `[roles]` (each role's `program`, an argv bon appends `--model` to; its
   `client`, claude, codex or api; its `model`; a one-shot program's
   `context`, the largest prompt in tokens; a role with no client and no model
@@ -162,8 +165,8 @@ The repository holds the words; this skill does not repeat them.
   `multiplier` and `output_multiplier`), and two
   semaphores shared by every bon process on the host: `agent_processes` and
   `check_processes` (checks at once, the judge's and every cargo an agent
-  process runs), with `check_threads` per check. `BON_HOST` names another
-  host file, as a benchmark does.
+  process runs; `bon setup` makes a user per slot), with `check_threads` per
+  check. `BON_HOST` names another host file, as a benchmark does.
 - `bon-sample`: a program that makes one model call (context in, edits out)
   through its client: the API, the claude CLI or the codex CLI. Program code:
   bon's checks judge what it writes.
@@ -177,7 +180,7 @@ proofs, the gates' contracts, the tests. A spec change verifies
 (`cargo verus verify`, alone if the code lags) before the owner sees it.
 Trusted code and the checks are yours to keep passing: no search may change
 them. Before a search, `bon check`: it runs every check on the working tree as
-agent, without `.git`, the way candidates are judged, decides by exit codes,
+a check slot's user, without `.git`, the way candidates are judged, decides by exit codes,
 and says whether a failure is in protected files (yours to fix) or in files a
 code search may change. What builds after a failing file is hidden until it
 compiles: check again then. It also fails, one line per file and rule, where
@@ -222,8 +225,10 @@ Two ways in: a **new** project started with bon, or an **existing**
 repository the owner is migrating. Assess, then bring the owner one decision
 at a time.
 
-1. **Host:** `host.toml` exists and `sudo -u agent -i true` works. If not,
-   the owner runs `bon setup`; show its dry run.
+1. **Host:** `host.toml` exists and `sudo -u agent -i true` and `sudo -u
+   check0 true` work. If not, the owner runs `bon setup`; show its dry run. A
+   repository's dependencies are fetched by the owner (`CARGO_HOME=/opt/bon/cargo-home
+   cargo fetch`), never by a check.
 2. **Assess.** *New:* ask what it is for, and what will decide (choose,
    validate, schedule) versus do effects (I/O, UI, network). *Existing:*
    language and build; what is already checked, and how long checks take;
@@ -375,7 +380,9 @@ when an earlier bon process of the same pid left a trace.
   blocked, not found, proposal) say what the bon process concluded, and
   `exited: <error>` that it ended on an error.
 - `.bon/traces/<pid>/searches.jsonl`: each search's `agent_processes`,
-  `verified`, `generation_dollars`, `seconds`, `rate`, `time_dollars`,
+  `verified`, `generation_dollars`, `seconds`, `charged_seconds` (engineer's
+  time charged to it: each second split among the searches he waits on that
+  run then, every repository's), `rate`, `time_dollars`,
   `cost_per_verified_candidate`, and `host` (the `agent_processes` and
   `check_processes` in force).
 - `.bon/traces/<pid>/<search>/<index>/facts.json`: each agent process's
@@ -391,8 +398,9 @@ when an earlier bon process of the same pid left a trace.
   again once built (`seconds-k`), timed by bon and kept with the verdict.
 - `.bon/traces/<pid>/trunk-test-k`, `trunk-verify-k`, `trunk-build`: trunk's
   check logs. A log whose first line is `cached: <key>` was answered by the
-  verdict cache (`/tmp/bon/verdicts`, keyed by tree, command, test,
-  toolchain and the dependency sources the lockfile names), not run. What
+  verdict cache (the user layer's `.bon/verdicts`, keyed by tree, command,
+  test, toolchain and which dependency sources the lockfile names are
+  unpacked), not run. What
   decides a push or a landing runs again from a clean build
   (`recheck-<commit>-k`); a result that differs stops bon with the check
   named suspect, and nothing is pushed. Beside it the staged checks run on

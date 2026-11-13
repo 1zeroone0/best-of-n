@@ -16,7 +16,7 @@
               "hashes": [
                 {
                   "algorithm": "SHA-256",
-                  "value": "230152350c0d81432f0417d54ad3e16402c4f2f8f5eed037383ef6b826189453"
+                  "value": "72c46e3f083360701913f520ab70c91b16b33cc738631dbf3b8619430cababff"
                 }
               ],
               "href": "sbom.json",
@@ -639,42 +639,6 @@
         "uuid": "af286170-032e-4cbc-a195-87e46588c540"
       },
       {
-        "description": "claude --version",
-        "props": [
-          {
-            "name": "version",
-            "value": "2.1.318 (Claude Code)"
-          },
-          {
-            "class": "tool",
-            "name": "configured",
-            "ns": "https://github.com/1zeroone0/best-of-n/account",
-            "value": "claude"
-          }
-        ],
-        "title": "claude",
-        "type": "software",
-        "uuid": "18248229-a557-4d46-9fb5-697ff44677a3"
-      },
-      {
-        "description": "codex --version",
-        "props": [
-          {
-            "name": "version",
-            "value": "codex-cli 0.166.0"
-          },
-          {
-            "class": "tool",
-            "name": "configured",
-            "ns": "https://github.com/1zeroone0/best-of-n/account",
-            "value": "codex"
-          }
-        ],
-        "title": "codex",
-        "type": "software",
-        "uuid": "02f8cced-72f7-4773-bc97-4e87a6ba4dc2"
-      },
-      {
         "description": "git --version",
         "props": [
           {
@@ -840,12 +804,12 @@
       }
     ],
     "metadata": {
-      "last-modified": "2026-11-13T06:40:30Z",
+      "last-modified": "2026-11-13T07:50:02Z",
       "oscal-version": "1.2.3",
       "remarks": "proven: in the kernel, verified by Verus. trusted: reviewed by the owner, not verified. configured: a fact of the manifest. tested: program code and every other file, judged by the checks. Every control claim is proposed and awaits GRC review.",
       "title": "best-of-n",
-      "version": "c56b488362fc"
+      "version": "d81a49146051"
     },
-    "uuid": "3872ed73-6d1d-4961-a919-4e9809190d3e"
+    "uuid": "f162578d-9168-4bf2-bf68-40a4916c67bd"
   }
 }

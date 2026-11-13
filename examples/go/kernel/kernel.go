@@ -4,6 +4,13 @@ package kernel
 
 import "encoding/json"
 
+// POSIX permission bits.
+type Permission struct {
+	Read    bool `json:"read"`
+	Write   bool `json:"write"`
+	Execute bool `json:"execute"`
+}
+
 // A git commit, by its hash. Its own type: a commit is never a path.
 type Commit = string
 
@@ -101,6 +108,21 @@ type Search struct {
 	Trusted []Path       `json:"trusted"`
 	Limit   uint64       `json:"limit"`
 	Results []*Candidate `json:"results"`
+}
+
+// One confined user's permissions on each object the policy names, path by
+// path, as trusted code observed them: None where a path does not exist.
+// `build_directories[slot]` is check slot `slot`'s build directory.
+type Observation struct {
+	Checks             []*Permission   `json:"checks"`
+	Transcripts        []*Permission   `json:"transcripts"`
+	WorkingDirectory   []*Permission   `json:"working_directory"`
+	Repository         []*Permission   `json:"repository"`
+	WorkingDirectories []*Permission   `json:"working_directories"`
+	Toolchain          []*Permission   `json:"toolchain"`
+	Builds             []*Permission   `json:"builds"`
+	State              []*Permission   `json:"state"`
+	BuildDirectories   [][]*Permission `json:"build_directories"`
 }
 
 // Everything bon shows, over the time range in `filter`.

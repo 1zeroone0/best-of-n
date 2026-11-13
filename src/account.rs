@@ -180,11 +180,11 @@ fn read(r: &Path) -> Result<Account, String> {
     let catalog = key("catalog");
     if !controls.is_empty() && catalog.is_none() { return Err("account.catalog: name the catalog the controls are from".into()); }
 
-    // The tools, at the version each reports, as agent runs them; then the host's own.
+    // The tools, at the version each reports, as a check runs them; then the host's own.
     let mut tools = Vec::new();
     for (n, command) in table.get("tools").and_then(|v| v.as_table()).into_iter().flatten() {
         let command = command.as_str().ok_or_else(|| format!("account.tools.{n} must be a command string"))?;
-        let out = as_agent(command);
+        let out = as_check(command);
         let version = if n == "verus" { out.lines().find_map(|l| l.split_once("Version:").map(|(_, v)| v.trim().to_string())) } else { out.lines().next().map(|l| l.trim().to_string()) };
         tools.push((n.clone(), command.to_string(), version.filter(|v| !v.is_empty()).unwrap_or_else(|| "absent".into())));
     }
@@ -250,7 +250,7 @@ fn in_root_package(r: &Path, f: &str) -> bool {
 }
 
 fn output(program: &str, args: &[&str]) -> String {
-    // From /tmp: agent cannot enter engineer's repository, and rustup reads the current directory.
+    // From /tmp: a check slot's user cannot enter engineer's repository, and rustup reads the current directory.
     Command::new(program).args(args).current_dir("/tmp").output().ok().filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(if o.stdout.is_empty() { &o.stderr } else { &o.stdout }).trim().to_string())
         .filter(|v| !v.is_empty()).unwrap_or_else(|| "absent".into())
@@ -258,10 +258,17 @@ fn output(program: &str, args: &[&str]) -> String {
 
 fn first(s: &str) -> String { s.lines().next().unwrap_or("absent").trim().to_string() }
 
-/// A tool's version command, run as agent runs it: checks judge with agent's tools.
-fn as_agent(command: &str) -> String {
-    let a = ["env", "-i", "PATH=/Users/agent/.local/bin:/Users/agent/.cargo/bin:/opt/homebrew/bin:/usr/bin:/bin", "HOME=/Users/agent", "sh", "-c", command];
-    if output("id", &["-un"]) == "agent" { output(a[0], &a[1..]) } else { output("sudo", &[&["-n", "-u", "agent"][..], &a[..]].concat()) }
+/// A tool's version command, as this process's user, in the environment a
+/// check runs with (the checks' PATH and the toolchain's homes, from the host
+/// file): what the checks judge with, the same whether engineer asks or a
+/// check slot's user does, in one of bon's own checks. A tool no check can
+/// run (one under agent's home) is absent.
+fn as_check(command: &str) -> String {
+    let env = best_of_n::trusted::check_environment();
+    let mut a: Vec<&str> = vec!["-i"];
+    a.extend(env.iter().map(String::as_str));
+    a.extend(["sh", "-c", command]);
+    output("env", &a)
 }
 
 /// The dependencies the lockfiles at the root pin, as CycloneDX components.

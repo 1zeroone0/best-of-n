@@ -72,14 +72,14 @@ fn clone_paths(paths: &Vec<Path>) -> (r: Vec<Path>)
 fn search(
     m: &trusted::Manifest, index: usize, a: usize, kind: Kind, start: Commit, checks: &Vec<Path>, tests: &Vec<Path>, trusted: &Vec<Path>,
     l: u64, limit: u64, spent: &mut u64, target: Option<&Search>, foils: Option<&Search>,
-    Ghost(checks_accept): Ghost<bool>, Ghost(observed): Ghost<Map<Object, Seq<Option<Permission>>>>, Tracked(t): Tracked<&mut Tokens>,
+    Ghost(checks_accept): Ghost<bool>, Ghost(observed): Ghost<IMap<(User, Object), Seq<Option<Permission>>>>, Ghost(slots): Ghost<nat>, Tracked(t): Tracked<&mut Tokens>,
 ) -> (r: Result<Search, String>)
     requires
         old(t).wf(),
         index as int == old(t).searches.value().len(),
         kind@ is Code ==> !checks_accept,
         kind@ is Compaction || kind@ == (spec::Kind::Counterexample { goal: None }) ==> checks_accept,
-        spec::isolated(observed),
+        spec::isolated(observed, slots),
         forall|k: int| 0 <= k < old(t).searches.value().len() ==> spec::complete(#[trigger] old(t).searches.value()[k]),
         old(t).checks.value() == paths(checks@),
         old(t).tests.value() == paths(tests@),
@@ -129,7 +129,7 @@ fn search(
     }
     let ghost k = t.searches.value().len() as int;
     let ghost before = t.searches.value();
-    let tracked mut capability = t.instance.grant(kind@, n as nat, l as nat, observed, checks_accept,
+    let tracked mut capability = t.instance.grant(kind@, n as nat, l as nat, observed, slots, checks_accept,
         &t.checks, &t.tests, &t.trusted, &t.trunk, &mut t.searches, &t.limit, &t.spent, &mut t.reserved);
     trusted::record_grant(m, &kind, n, l, Ghost(checks_accept), Ghost(t.searches.value()));
     let started = trusted::clock();
@@ -270,10 +270,10 @@ proof fn all_complete_push(before: Seq<spec::Search>, after: Seq<spec::Search>, 
 
 /// What holds between to_push's attempts: no search is running, every search
 /// so far is complete, and trunk's head is head.
-pub open spec fn between(t: Tokens, observed: Map<Object, Seq<Option<Permission>>>, index: int, spent: u64, head: spec::Commit,
+pub open spec fn between(t: Tokens, observed: IMap<(User, Object), Seq<Option<Permission>>>, slots: nat, index: int, spent: u64, head: spec::Commit,
     checks: Set<spec::Path>, tests: Set<spec::Path>, trusted: Set<spec::Path>, limit: u64) -> bool {
     &&& t.wf()
-    &&& spec::isolated(observed)
+    &&& spec::isolated(observed, slots)
     &&& t.searches.value().len() == index
     &&& all_complete(t.searches.value())
     &&& t.reserved.value() == 0
@@ -302,11 +302,12 @@ pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
     let trusted = trusted::trusted(&m);
     let limit = trusted::limit(&m);
     let l = trusted::agent_process_limit(&m);
-    let (pc, pt, pw, pr, pd, pe) = trusted::observe(&m, &head)?;
-    if !isolated(&pc, &pt, &pw, &pr, &pd, &pe) {
-        return Err("agent is not isolated: its permissions differ from the policy; run bon setup".into());
+    let (agent, observations) = trusted::observe(&m, &head)?;
+    if !isolated(&agent, &observations) {
+        return Err("agent or a check slot's user is not isolated: their permissions differ from the policy; run bon setup".into());
     }
-    let ghost observed = observed(pc@, pt@, pw@, pr@, pd@, pe@);
+    let ghost observed = observed(agent, observations@);
+    let ghost slots = observations.len() as nat;
     let tracked (Tracked(instance), Tracked(checks_t), Tracked(tests_t), Tracked(trusted_t), Tracked(trunk), Tracked(authors),
                  Tracked(searches), Tracked(limit_t), Tracked(spent_t), Tracked(reserved), Tracked(generation), Tracked(capability))
         = spec::bon::Instance::initialize(head@, paths(checks@), paths(tests@), paths(trusted@), limit as nat);
@@ -319,12 +320,12 @@ pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
     let mut index: usize = 0;
     while a < attempts
         invariant
-            between(t, observed, index as int, spent, head@, paths(checks@), paths(tests@), paths(trusted@), limit),
+            between(t, observed, slots, index as int, spent, head@, paths(checks@), paths(tests@), paths(trusted@), limit),
             index <= 3 * a,
         decreases attempts - a,
     {
         if index > usize::MAX - 3 { return Err("too many searches".into()); }
-        match attempt(&m, root, compaction, &mut head, a, index, &checks, &tests, &trusted, l, limit, &mut spent, Ghost(observed), Tracked(&mut t))? {
+        match attempt(&m, root, compaction, &mut head, a, index, &checks, &tests, &trusted, l, limit, &mut spent, Ghost(observed), Ghost(slots), Tracked(&mut t))? {
             None => { return Ok(()); }
             Some(next) => { index = next; }
         }
@@ -341,14 +342,14 @@ pub fn to_push(root: &str, compaction: bool) -> (r: Result<(), String>) {
 fn attempt(
     m: &trusted::Manifest, root: &str, compaction: bool, head: &mut Commit, a: usize, index: usize,
     checks: &Vec<Path>, tests: &Vec<Path>, trusted: &Vec<Path>, l: u64, limit: u64, spent: &mut u64,
-    Ghost(observed): Ghost<Map<Object, Seq<Option<Permission>>>>, Tracked(t): Tracked<&mut Tokens>,
+    Ghost(observed): Ghost<IMap<(User, Object), Seq<Option<Permission>>>>, Ghost(slots): Ghost<nat>, Tracked(t): Tracked<&mut Tokens>,
 ) -> (r: Result<Option<usize>, String>)
     requires
         index <= usize::MAX - 3,
-        between(*old(t), observed, index as int, *old(spent), old(head)@, paths(checks@), paths(tests@), paths(trusted@), limit),
+        between(*old(t), observed, slots, index as int, *old(spent), old(head)@, paths(checks@), paths(tests@), paths(trusted@), limit),
     ensures
         r matches Ok(Some(next)) ==> next <= index + 3
-            && between(*final(t), observed, next as int, *final(spent), final(head)@, paths(checks@), paths(tests@), paths(trusted@), limit),
+            && between(*final(t), observed, slots, next as int, *final(spent), final(head)@, paths(checks@), paths(tests@), paths(trusted@), limit),
 {
     hide(spec::isolated);
     hide(spec::verified);
@@ -368,7 +369,7 @@ fn attempt(
     };
     let ghost before = t.searches.value();
     let s0 = search(m, index, a, kind, Commit(head.0.clone()), checks, tests, trusted, l, limit, spent, None, None,
-                    Ghost(accepted), Ghost(observed), Tracked(&mut *t))?;
+                    Ghost(accepted), Ghost(observed), Ghost(slots), Tracked(&mut *t))?;
     proof { all_complete_push(before, t.searches.value(), s0@); }
     match selected(&s0) {
         None => {
@@ -383,13 +384,13 @@ fn attempt(
                 reveal(spec::complete);
             }
             match first_verified(&s0) {
-                Some(f) => on_disagreement(m, head, &s0, f, a, index, checks, tests, trusted, l, limit, spent, Ghost(observed), Tracked(t)),
+                Some(f) => on_disagreement(m, head, &s0, f, a, index, checks, tests, trusted, l, limit, spent, Ghost(observed), Ghost(slots), Tracked(t)),
                 None => vstd::pervasive::unreached(),
             }
         }
         Some(i) => {
             assert(spec::verified_at(s0@, i as int)) by { reveal(spec::selected); }
-            on_selection(m, root, head, &s0, i, a, index, checks, tests, trusted, l, limit, spent, Ghost(accepted), Ghost(observed), Tracked(t))
+            on_selection(m, root, head, &s0, i, a, index, checks, tests, trusted, l, limit, spent, Ghost(accepted), Ghost(observed), Ghost(slots), Tracked(t))
         }
     }
 }
@@ -400,11 +401,11 @@ fn attempt(
 fn on_disagreement(
     m: &trusted::Manifest, head: &mut Commit, s0: &Search, f: usize, a: usize, index: usize,
     checks: &Vec<Path>, tests: &Vec<Path>, trusted: &Vec<Path>, l: u64, limit: u64, spent: &mut u64,
-    Ghost(observed): Ghost<Map<Object, Seq<Option<Permission>>>>, Tracked(t): Tracked<&mut Tokens>,
+    Ghost(observed): Ghost<IMap<(User, Object), Seq<Option<Permission>>>>, Ghost(slots): Ghost<nat>, Tracked(t): Tracked<&mut Tokens>,
 ) -> (r: Result<Option<usize>, String>)
     requires
         index <= usize::MAX - 3,
-        between(*old(t), observed, index as int + 1, *old(spent), old(head)@, paths(checks@), paths(tests@), paths(trusted@), limit),
+        between(*old(t), observed, slots, index as int + 1, *old(spent), old(head)@, paths(checks@), paths(tests@), paths(trusted@), limit),
         old(t).searches.value()[index as int] == s0@,
         s0.results.len() == s0.n,
         s0@.base == old(head)@,
@@ -412,7 +413,7 @@ fn on_disagreement(
         spec::first_verified(s0@) == Some(f as int),
     ensures
         r matches Ok(Some(next)) ==> next <= index + 3
-            && between(*final(t), observed, next as int, *final(spent), final(head)@, paths(checks@), paths(tests@), paths(trusted@), limit),
+            && between(*final(t), observed, slots, next as int, *final(spent), final(head)@, paths(checks@), paths(tests@), paths(trusted@), limit),
 {
     hide(spec::isolated);
     hide(spec::verified);
@@ -428,7 +429,7 @@ fn on_disagreement(
     let ghost before = t.searches.value();
     let s1 = search(m, index + 1, a, Kind::Counterexample { goal: Some(AgentProcess { search: index, index: f }) },
                     Commit(head.0.clone()), checks, tests, trusted, l, limit, spent, Some(s0), None,
-                    Ghost(false), Ghost(observed), Tracked(&mut *t))?;
+                    Ghost(false), Ghost(observed), Ghost(slots), Tracked(&mut *t))?;
     proof {
         all_complete_push(before, t.searches.value(), s1@);
         assert(t.searches.value()[index as int] == s0@);
@@ -464,11 +465,11 @@ fn on_disagreement(
 fn on_selection(
     m: &trusted::Manifest, root: &str, head: &mut Commit, s0: &Search, i: usize, a: usize, index: usize,
     checks: &Vec<Path>, tests: &Vec<Path>, trusted: &Vec<Path>, l: u64, limit: u64, spent: &mut u64,
-    Ghost(accepted): Ghost<bool>, Ghost(observed): Ghost<Map<Object, Seq<Option<Permission>>>>, Tracked(t): Tracked<&mut Tokens>,
+    Ghost(accepted): Ghost<bool>, Ghost(observed): Ghost<IMap<(User, Object), Seq<Option<Permission>>>>, Ghost(slots): Ghost<nat>, Tracked(t): Tracked<&mut Tokens>,
 ) -> (r: Result<Option<usize>, String>)
     requires
         index <= usize::MAX - 3,
-        between(*old(t), observed, index as int + 1, *old(spent), old(head)@, paths(checks@), paths(tests@), paths(trusted@), limit),
+        between(*old(t), observed, slots, index as int + 1, *old(spent), old(head)@, paths(checks@), paths(tests@), paths(trusted@), limit),
         old(t).searches.value()[index as int] == s0@,
         s0.results.len() == s0.n,
         s0@.base == old(head)@,
@@ -476,7 +477,7 @@ fn on_selection(
         spec::verified_at(s0@, i as int),
     ensures
         r matches Ok(Some(next)) ==> next <= index + 3
-            && between(*final(t), observed, next as int, *final(spent), final(head)@, paths(checks@), paths(tests@), paths(trusted@), limit),
+            && between(*final(t), observed, slots, next as int, *final(spent), final(head)@, paths(checks@), paths(tests@), paths(trusted@), limit),
 {
     hide(spec::isolated);
     hide(spec::verified);
@@ -487,7 +488,7 @@ fn on_selection(
     let ghost before1 = t.searches.value();
     let sf = search(m, index + 1, a, Kind::Foil { goal: AgentProcess { search: index, index: i }, changed: clone_paths(&candidate(s0, i).changed) },
                     Commit(candidate(s0, i).commit.0.clone()), checks, tests, trusted, l, limit, spent, Some(s0), None,
-                    Ghost(accepted), Ghost(observed), Tracked(&mut *t))?;
+                    Ghost(accepted), Ghost(observed), Ghost(slots), Tracked(&mut *t))?;
     proof {
         all_complete_push(before1, t.searches.value(), sf@);
         assert(t.searches.value()[index as int] == s0@);
@@ -495,7 +496,7 @@ fn on_selection(
     let ghost before2 = t.searches.value();
     let s1 = search(m, index + 2, a, Kind::Counterexample { goal: Some(AgentProcess { search: index, index: i }) },
                     Commit(head.0.clone()), checks, tests, trusted, l, limit, spent, Some(s0), Some(&sf),
-                    Ghost(accepted), Ghost(observed), Tracked(&mut *t))?;
+                    Ghost(accepted), Ghost(observed), Ghost(slots), Tracked(&mut *t))?;
     proof {
         all_complete_push(before2, t.searches.value(), s1@);
         assert(t.searches.value()[index as int] == s0@);
@@ -503,7 +504,7 @@ fn on_selection(
         assert(t.searches.value()[index as int + 2] == s1@);
     }
     conclude(m, root, head, s0, &sf, &s1, i, index, Ghost(*spent), Ghost(paths(checks@)), Ghost(paths(tests@)), Ghost(paths(trusted@)), Ghost(limit),
-             Ghost(observed), Tracked(t))
+             Ghost(observed), Ghost(slots), Tracked(t))
 }
 
 /// The end of an attempt: tested search s0, at index, selected i, and the
@@ -512,11 +513,11 @@ fn on_selection(
 fn conclude(
     m: &trusted::Manifest, root: &str, head: &mut Commit, s0: &Search, sf: &Search, s1: &Search, i: usize, index: usize,
     Ghost(spent): Ghost<u64>, Ghost(checks): Ghost<Set<spec::Path>>, Ghost(tests): Ghost<Set<spec::Path>>, Ghost(trusted): Ghost<Set<spec::Path>>,
-    Ghost(limit): Ghost<u64>, Ghost(observed): Ghost<Map<Object, Seq<Option<Permission>>>>, Tracked(t): Tracked<&mut Tokens>,
+    Ghost(limit): Ghost<u64>, Ghost(observed): Ghost<IMap<(User, Object), Seq<Option<Permission>>>>, Ghost(slots): Ghost<nat>, Tracked(t): Tracked<&mut Tokens>,
 ) -> (r: Result<Option<usize>, String>)
     requires
         index <= usize::MAX - 3,
-        between(*old(t), observed, index as int + 3, spent, old(head)@, checks, tests, trusted, limit),
+        between(*old(t), observed, slots, index as int + 3, spent, old(head)@, checks, tests, trusted, limit),
         old(t).searches.value()[index as int] == s0@,
         old(t).searches.value()[index as int + 1] == sf@,
         old(t).searches.value()[index as int + 2] == s1@,
@@ -528,7 +529,7 @@ fn conclude(
         spec::foils_on(sf@, index as int, i as int),
     ensures
         r matches Ok(Some(next)) ==> next == index + 3
-            && between(*final(t), observed, next as int, spent, final(head)@, checks, tests, trusted, limit),
+            && between(*final(t), observed, slots, next as int, spent, final(head)@, checks, tests, trusted, limit),
 {
     hide(spec::isolated);
     hide(spec::verified);
@@ -597,13 +598,14 @@ pub fn counterexample(root: &str) -> (r: Result<bool, String>) {
     let trusted = trusted::trusted(&m);
     let limit = trusted::limit(&m);
     let l = trusted::agent_process_limit(&m);
-    let (pc, pt, pw, pr, pd, pe) = trusted::observe(&m, &head)?;
-    if !isolated(&pc, &pt, &pw, &pr, &pd, &pe) {
-        return Err("agent is not isolated: its permissions differ from the policy; run bon setup".into());
+    let (agent, observations) = trusted::observe(&m, &head)?;
+    if !isolated(&agent, &observations) {
+        return Err("agent or a check slot's user is not isolated: their permissions differ from the policy; run bon setup".into());
     }
     let accepted = trusted::trunk_accepted(&m, &head);
     if !accepted { return Err("trunk's checks reject it: run bon code first".into()); }
-    let ghost observed = observed(pc@, pt@, pw@, pr@, pd@, pe@);
+    let ghost observed = observed(agent, observations@);
+    let ghost slots = observations.len() as nat;
     let tracked (Tracked(instance), Tracked(checks_t), Tracked(tests_t), Tracked(trusted_t), Tracked(trunk), Tracked(authors),
                  Tracked(searches), Tracked(limit_t), Tracked(spent_t), Tracked(reserved), Tracked(generation), Tracked(capability))
         = spec::bon::Instance::initialize(head@, paths(checks@), paths(tests@), paths(trusted@), limit as nat);
@@ -611,7 +613,7 @@ pub fn counterexample(root: &str) -> (r: Result<bool, String>) {
     let mut spent: u64 = 0;
     trusted::record_initialize(&m, &head, limit);
     let s = search(&m, 0, 0, Kind::Counterexample { goal: None }, Commit(head.0.clone()), &checks, &tests, &trusted, l, limit, &mut spent,
-                   None, None, Ghost(accepted), Ghost(observed), Tracked(&mut t))?;
+                   None, None, Ghost(accepted), Ghost(observed), Ghost(slots), Tracked(&mut t))?;
     match found_on_trunk(&s) {
         Some(i) => {
             trusted::record_selected(&m, i);
@@ -642,11 +644,12 @@ pub fn queue(root: &str, transcripts: &Vec<Transcript>) -> (r: Result<Vec<(Vec<(
     let trusted = trusted::trusted(&m);
     let limit = trusted::limit(&m);
     let l = trusted::agent_process_limit(&m);
-    let (pc, pt, pw, pr, pd, pe) = trusted::observe(&m, &head)?;
-    if !isolated(&pc, &pt, &pw, &pr, &pd, &pe) {
-        return Err("agent is not isolated: its permissions differ from the policy; run bon setup".into());
+    let (agent, observations) = trusted::observe(&m, &head)?;
+    if !isolated(&agent, &observations) {
+        return Err("agent or a check slot's user is not isolated: their permissions differ from the policy; run bon setup".into());
     }
-    let ghost observed = observed(pc@, pt@, pw@, pr@, pd@, pe@);
+    let ghost observed = observed(agent, observations@);
+    let ghost slots = observations.len() as nat;
     let tracked (Tracked(instance), Tracked(checks_t), Tracked(tests_t), Tracked(trusted_t), Tracked(trunk), Tracked(authors),
                  Tracked(searches), Tracked(limit_t), Tracked(spent_t), Tracked(reserved), Tracked(generation), Tracked(capability))
         = spec::bon::Instance::initialize(head@, paths(checks@), paths(tests@), paths(trusted@), limit as nat);
@@ -658,7 +661,7 @@ pub fn queue(root: &str, transcripts: &Vec<Transcript>) -> (r: Result<Vec<(Vec<(
     while k < transcripts.len()
         invariant
             t.wf(),
-            spec::isolated(observed),
+            spec::isolated(observed, slots),
             t.searches.value().len() == k as int,
             forall|j: int| 0 <= j < t.searches.value().len() ==> spec::complete(#[trigger] t.searches.value()[j]),
             t.reserved.value() == 0,
@@ -673,7 +676,7 @@ pub fn queue(root: &str, transcripts: &Vec<Transcript>) -> (r: Result<Vec<(Vec<(
     {
         let ghost before = t.searches.value();
         let s = search(&m, k, 0, Kind::Queue { goal: Transcript(Path(transcripts[k].0.0.clone())) }, Commit(head.0.clone()), &checks, &tests, &trusted, l, limit, &mut spent,
-                       None, None, Ghost(false), Ghost(observed), Tracked(&mut t))?;
+                       None, None, Ghost(false), Ghost(observed), Ghost(slots), Tracked(&mut t))?;
         proof {
             assert forall|j: int| 0 <= j < t.searches.value().len() implies spec::complete(#[trigger] t.searches.value()[j]) by {
                 if j < k { assert(t.searches.value()[j] == before[j]); }

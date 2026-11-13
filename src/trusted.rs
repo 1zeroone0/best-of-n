@@ -18,7 +18,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use vstd::prelude::*;
 
-use crate::gates::{Candidate, Commit, Cue, Hash, Intent, Kind, Path, Permission, Search};
+use crate::gates::{Candidate, Commit, Cue, Hash, Intent, Kind, Observation, Path, Permission, Search};
 use crate::spec;
 use crate::gates::Transcript;
 
@@ -93,7 +93,7 @@ pub struct Config {
 
 /// Keys bon no longer reads, each with what says it now: a manifest or host
 /// file that still has one is refused with that, not a bare unknown field.
-const RENAMED: [(&str, &str); 8] = [
+const RENAMED: [(&str, &str); 10] = [
     ("harness", "[searches]: each search kind's role and width list n; the host file's [roles] say what each role runs (queue 53)"),
     ("counterexample.harness", "[searches] counterexample and foil: each a role and its width list n (queue 53)"),
     ("programs", "[types] (queue 52)"),
@@ -102,6 +102,8 @@ const RENAMED: [(&str, &str); 8] = [
     ("checks", "check_processes (queue 54)"),
     ("cores", "nothing: set check_processes (queue 54)"),
     ("memory_gb", "nothing: set check_processes (queue 54)"),
+    ("verdicts", "user: the verdict cache is <user>/.bon/verdicts, in the user layer's state (queue 56)"),
+    ("cleanup", "nothing: a bon process removes its own working directories, and those of a bon process the process list says ended (queue 58)"),
 ];
 
 /// The first key of `text` that RENAMED names, as an error naming what replaced it.
@@ -155,9 +157,9 @@ fn checked_host(named: Option<String>) -> Result<PathBuf, String> {
     Ok(PathBuf::from(p))
 }
 
-/// The host file's verdict cache and cleanup, for the code that has no manifest at hand.
-static VERDICTS: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
-static CLEANUP_OWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The host file's user layer root and check slots, for the code that has no manifest at hand.
+static USER: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+static SLOTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -176,14 +178,10 @@ struct Host {
     /// Threads one check may use (CARGO_BUILD_JOBS, Verus --num-threads). Default 2.
     #[serde(default)]
     check_threads: Option<usize>,
-    /// The verdict cache's directory, engineer's alone. Default /tmp/bon/verdicts.
-    #[serde(default)]
-    verdicts: Option<String>,
-    /// Which working directories a bon process removes when it ends: "own", only
-    /// its own (a host shared with other bon processes); default, also those of
-    /// any bon process no longer running.
-    #[serde(default)]
-    cleanup: Option<String>,
+    /// The user layer's root, between the host and its repositories: bon's
+    /// state that outlives a bon process lives in its `.bon` (`state_dir`),
+    /// engineer's alone. Required.
+    user: String,
     /// The toolchain checks judge with, where no agent process can write it
     /// (/opt/bon, root's all the way up): rustup's home, and a cargo home whose
     /// root is root's, only its caches agent's. Required.
@@ -248,13 +246,14 @@ fn read_host(file: &std::path::Path) -> Result<Host, String> {
 }
 
 /// A manifest's settings with the host file's facts: its pools, PATH, prices,
-/// toolchain, roles and API, and its verdict cache and cleanup. Each role the
+/// toolchain, roles and API, and the user layer's root. Each role the
 /// manifest names must be the host's, and each model priced.
 fn with_host(mut config: Config, host: Host, file: &std::path::Path) -> Result<Config, String> {
     let shown = file.display().to_string();
     config.pools = Pools::of(&host);
-    let _ = VERDICTS.set(host.verdicts.as_ref().map(PathBuf::from));
-    CLEANUP_OWN.store(host.cleanup.as_deref() == Some("own"), std::sync::atomic::Ordering::SeqCst);
+    if !std::path::Path::new(&host.user).is_absolute() { return Err(format!("{shown}: user is the user layer's root, an absolute path")); }
+    let _ = USER.set(PathBuf::from(&host.user));
+    SLOTS.store(config.pools.check_processes, std::sync::atomic::Ordering::SeqCst);
     config.path = host.path;
     config.prices = host.prices;
     config.toolchain = vec![("RUSTUP_HOME".to_string(), host.rustup_home), ("CARGO_HOME".to_string(), host.cargo_home)];
@@ -473,26 +472,57 @@ fn checks_path(config: &Config) -> Vec<String> {
     config.path.iter().filter(|d| !std::path::Path::new(d).starts_with(AGENT_HOME)).cloned().collect()
 }
 
+/// The home of every check slot's user: none it may write. (bon setup makes them so.)
+const CHECK_HOME: &str = "/var/empty";
+
+/// Who a command bon confines runs as: agent, which every agent process runs
+/// as, or the user of check slot k, `check<k>`, which the check that holds
+/// the slot runs as (`spec::User`).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+enum Who { Agent, Check(usize) }
+
+impl Who {
+    /// Its POSIX user's name.
+    fn name(self) -> String { match self { Who::Agent => "agent".into(), Who::Check(k) => format!("check{k}") } }
+    fn home(self) -> &'static str { match self { Who::Agent => AGENT_HOME, Who::Check(_) => CHECK_HOME } }
+}
+
 /// A command run as user agent with a cleared environment: only PATH, HOME and
 /// what bon sets. (TCB: sudo)
 fn as_agent(config: &Config, dir: &std::path::Path, env: &[(&str, String)], argv: &[String]) -> Command {
-    as_agent_on(config, &config.path, dir, env, argv)
+    as_user(config, Who::Agent, &config.path, dir, env, argv)
 }
 
-/// Whether this process already runs as agent.
-fn is_agent() -> bool {
-    static AGENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *AGENT.get_or_init(|| Command::new("id").arg("-un").output().is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "agent"))
+/// The user this process runs as, by name.
+fn whoami() -> &'static str {
+    static ME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    ME.get_or_init(|| Command::new("id").arg("-un").output().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default())
 }
 
-/// as_agent, with PATH path.
-fn as_agent_on(config: &Config, path: &[String], dir: &std::path::Path, env: &[(&str, String)], argv: &[String]) -> Command {
-    // Already agent (a candidate's tests run as agent): the same cleared
-    // environment, without sudo, which agent may not use.
-    let mut c = if is_agent() { Command::new("env") } else { let mut c = Command::new("sudo"); c.args(["-n", "-u", "agent", "env"]); c };
+/// Whether this process already runs as a user bon confines: agent, or a
+/// check slot's user (bon's own tests, run as a candidate's checks).
+fn confined() -> bool {
+    let me = whoami();
+    me == "agent" || me.strip_prefix("check").is_some_and(|k| !k.is_empty() && k.chars().all(|c| c.is_ascii_digit()))
+}
+
+/// A plain command run as `who` (with sudo, unless this process is confined
+/// and so runs it as itself), its output discarded: bon's own housekeeping
+/// in what `who` wrote (rm, chmod, kill).
+fn run_as(who: Who, argv: &[&str]) -> Command {
+    let mut c = if confined() { Command::new(argv[0]) } else { let mut c = Command::new("sudo"); c.args(["-n", "-u", &who.name(), argv[0]]); c };
+    c.args(&argv[1..]).current_dir("/tmp").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    c
+}
+
+/// A command run as `who`, with PATH path and a cleared environment.
+fn as_user(config: &Config, who: Who, path: &[String], dir: &std::path::Path, env: &[(&str, String)], argv: &[String]) -> Command {
+    // Already confined (a candidate's tests): the same cleared environment, as
+    // itself, without sudo, which no confined user may use.
+    let mut c = if confined() { Command::new("env") } else { let mut c = Command::new("sudo"); c.args(["-n", "-u", &who.name(), "env"]); c };
     c.arg("-i");
     c.arg(format!("PATH={}", path.join(":")));
-    c.arg(format!("HOME={AGENT_HOME}"));
+    c.arg(format!("HOME={}", who.home()));
     c.arg("LANG=en_US.UTF-8");
     c.arg("TERM=dumb");
     for (k, v) in &config.toolchain { c.arg(format!("{k}={v}")); }
@@ -521,9 +551,9 @@ impl Signal {
 /// code, whether it was spawned at all, and its log as written.
 struct Run { ok: bool, stdout: String, killed: bool, exited: bool, exit: Option<i32>, spawned: bool, log: String }
 
-/// Run to completion or kill at `time`, with all it started. `spoke`, if
-/// given, is set when the command first writes to stdout.
-fn supervised(mut c: Command, stdin: Option<String>, time: Duration, log: &std::path::Path, spoke: Option<std::sync::Arc<Signal>>) -> Run {
+/// Run to completion or kill at `time`, with all it started; the command runs
+/// as `who`. `spoke`, if given, is set when the command first writes to stdout.
+fn supervised(mut c: Command, who: Who, stdin: Option<String>, time: Duration, log: &std::path::Path, spoke: Option<std::sync::Arc<Signal>>) -> Run {
     std::os::unix::process::CommandExt::process_group(&mut c, 0);
     c.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
     let start = Instant::now();
@@ -564,12 +594,11 @@ fn supervised(mut c: Command, stdin: Option<String>, time: Duration, log: &std::
         std::thread::sleep(Duration::from_millis(200));
     };
     if killed {
-        // The command is its own process group, and agent's: agent signals the
-        // whole group (sudo, root's, is spared), so nothing it started outlives it.
+        // The command is its own process group, and its user's: that user
+        // signals the whole group (sudo, root's, is spared), so nothing it
+        // started outlives it.
         let group = format!("-{}", child.id());
-        let signal = |s: &str| { let _ = (if is_agent() { let mut c = Command::new("/bin/kill"); c.args([s, "--", &group]); c }
-                                          else { let mut c = Command::new("sudo"); c.args(["-n", "-u", "agent", "/bin/kill", s, "--", &group]); c })
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status(); };
+        let signal = |s: &str| { let _ = run_as(who, &["/bin/kill", s, "--", &group]).status(); };
         signal("-TERM");
         let grace = Instant::now();
         while !(o.is_finished() && e.is_finished()) && grace.elapsed() < Duration::from_secs(2) { std::thread::sleep(Duration::from_millis(100)); }
@@ -606,9 +635,7 @@ fn repository_name(root: &std::path::Path) -> String {
 /// directory is engineer's, group bon, mode 2750: agent may enter it, not add
 /// to it.
 fn scratch(name: &str) -> PathBuf {
-    // bon runs as engineer; only a candidate's tests run bon's code as agent,
-    // which cannot write the host's working directories: they get agent's own.
-    let base = if is_agent() { std::env::temp_dir().join("bon-agent") } else { PathBuf::from(WORKING_DIRECTORIES) };
+    let base = base();
     if !base.exists() {
         let _ = std::fs::create_dir_all(&base);
     }
@@ -623,6 +650,18 @@ fn scratch(name: &str) -> PathBuf {
         let _ = Command::new("chmod").arg("2750").arg(&dir).status();
     }
     if rest.is_empty() { dir } else { dir.join(rest) }
+}
+
+/// Make `d`, a directory of scratch's, agent's alone of the users bon
+/// confines: engineer's, mode 0700, and agent may list and search it. No
+/// check slot's user reaches what is under it, whatever its modes (agent
+/// writes there through group bon, and every check slot's user is in group bon).
+fn agents_alone(d: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700)).map_err(|e| format!("{}: {e}", d.display()))?;
+    // Confined (a candidate's tests), there is no agent to admit: the directory is the user's own.
+    if confined() { return Ok(()); }
+    sh(d, "chmod", &["+a", "user:agent allow list,search,readattr,readextattr,readsecurity", &d.to_string_lossy()]).map(|_| ())
 }
 
 /// A directory made by engineer that agent (through group bon) may write in.
@@ -718,6 +757,8 @@ fn working_directory(root: &std::path::Path, config: &Config, commit: &str, dir:
 fn working_directory_except(root: &std::path::Path, config: &Config, commit: &str, dir: &std::path::Path,
                             writable: Option<&str>, more: &[String]) -> Result<(), String> {
     materialize(root, commit, dir)?;
+    // Its owner's directory is agent's alone: no check slot's user reaches it.
+    if let Some(owner) = dir.parent() { agents_alone(owner)?; }
     sh(dir, "chmod", &["-R", "g+rwX", "."])?;
     sh(dir, "find", &[".", "-type", "d", "-exec", "chmod", "g+s", "{}", "+"])?;
     // The checks, their build configuration, the transcripts and .bon/: agent may read them, never change them.
@@ -759,7 +800,7 @@ fn check_directory(root: &std::path::Path, commit: &str, dir: &std::path::Path) 
     Ok(())
 }
 
-/// Trunk's build: made as agent by trunk's checks, then copied to one of
+/// Trunk's build: made by trunk's checks, as a check slot's user, then copied to one of
 /// engineer's that no agent process can write, kept for later bon processes
 /// (see `kept`). Every build directory (an agent process's own, and its
 /// judge's) starts as a clone of it (see CLONE), so cargo rebuilds only what
@@ -830,19 +871,6 @@ pub fn trace_process(name: &str) -> Option<(u64, u64)> {
     Some((pid.parse().ok()?, start.parse().ok()?))
 }
 
-/// Whether the trace directory `name` under `traces` is another bon process's
-/// that is still running: its pid is alive, is not this process's, and no later
-/// run of that pid has a trace (else its pid was reused and it ended).
-pub fn trace_running(traces: &std::path::Path, name: &str) -> bool {
-    let Some((pid, start)) = trace_process(name) else { return false };
-    if pid == u64::from(std::process::id()) { return false; }
-    let later = std::fs::read_dir(traces).into_iter().flatten().flatten()
-        .filter_map(|e| trace_process(&e.file_name().to_string_lossy()))
-        .any(|(p, s)| p == pid && s > start);
-    // ps, not kill -0: kill -0 fails on another user's live process (EPERM).
-    !later && process_running(&pid.to_string())
-}
-
 /// Check liveness even when the sandbox denies ps; ps covers other users.
 fn process_running(pid: &str) -> bool {
     Command::new("/bin/kill").args(["-0", pid]).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
@@ -875,7 +903,7 @@ fn append_line(file: &std::path::Path, line: &str) {
 /// index in the kernel (from 0 at initialize) plus it names its trace directory.
 static FIRST_RUN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-/// Run trunk's checks, as agent: (every test accepts trunk, Verus verifies it).
+/// Run trunk's checks, as a check slot's user: (every test accepts trunk, Verus verifies it).
 /// Each candidate's build starts from trunk's, so they build it, unless a bon
 /// process before kept one for the same key (`trunk_key`): then the verdict
 /// cache answers them, or they run in a clone of it. Trunk's checks run alone,
@@ -884,29 +912,29 @@ fn warm(m: &Manifest, head: &str) -> (bool, bool) {
     WARMING.store(true, std::sync::atomic::Ordering::SeqCst);
     let (config, root) = (&m.config, &m.root);
     let tree = tree_of(root, head);
-    // bon run as agent (a candidate's tests) keeps nothing in engineer's directories.
-    let key = if is_agent() { None } else { trunk_key(config, &tree) };
+    // bon run confined (a candidate's tests) keeps nothing in engineer's directories.
+    let key = if confined() { None } else { trunk_key(config, &tree) };
     let kept_build = key.as_deref().and_then(reuse);
     let mut result = (false, false);
     let dir = scratch(&format!("trunk/{}", repository_name(root)));
     let made = (|| -> Option<PathBuf> {
         check_directory(root, head, &dir).ok()?;
-        let build = scratch("trunk.build/build");
+        // A kept build is the one the checks clone, made by the first that must run.
+        if let Some(k) = &kept_build { *WARM.lock().unwrap_or_else(|e| e.into_inner()) = Some(k.clone()); }
+        let build = named_build("trunk.build/build", if kept_build.is_some() { Start::Trunk } else { Start::Empty });
         let log = trace_dir(root);
         traced(&log, std::fs::create_dir_all(&log));
-        // A kept build is the one the checks clone, made by the first that must run.
-        match &kept_build {
-            Some(k) => *WARM.lock().unwrap_or_else(|e| e.into_inner()) = Some(k.clone()),
-            None => writable_dir(&build).ok()?,
-        }
         let on = On { tree: tree.clone(), test: None, cache: if kept_build.is_some() { Cache::Use } else { Cache::Refresh } };
         let run = |v: &String, name: String| run_check_with(config, &on, cores(), &dir, &build, v, &log.join(name)).0;
-        let tests = config.checks.test.iter().enumerate().all(|(k, v)| run(v, format!("trunk-test-{k}")));
-        let proved = config.checks.verify.iter().enumerate().all(|(k, v)| run(v, format!("trunk-verify-{k}")));
-        result = (tests, proved);
+        // One slot for them all: they build in one directory, its user's.
+        result = holding(|| {
+            let tests = config.checks.test.iter().enumerate().all(|(k, v)| run(v, format!("trunk-test-{k}")));
+            let proved = config.checks.verify.iter().enumerate().all(|(k, v)| run(v, format!("trunk-verify-{k}")));
+            (tests, proved)
+        });
         if kept_build.is_some() { remove_build(config, &build); return kept_build.clone(); }
-        // agent wrote that build, and every agent process runs as agent: what
-        // every build clones is engineer's copy of it, which none can change.
+        // A check slot's user wrote that build: what every build clones is
+        // engineer's copy of it, which no agent process and no check can change.
         let staging = scratch("trunk.snapshot");
         if std::fs::read_dir(&staging).is_ok_and(|mut e| e.next().is_some()) {
             let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&staging).status();
@@ -914,11 +942,12 @@ fn warm(m: &Manifest, head: &str) -> (bool, bool) {
             scratch("trunk.snapshot");
         }
         let snapshot = staging.join("build");
-        // agent's files there that only agent may read (rustc's incremental session
-        // locks are 0600) are made readable first, or the copy fails. (The directory
-        // itself is engineer's, so agent's chmod reports failure on it: the copy decides.)
-        let _ = as_agent(config, std::path::Path::new("/tmp"), &[], &["chmod".into(), "-R".into(), "a+rX".into(), build.to_string_lossy().into()])
-            .stderr(Stdio::null()).status();
+        // Its user's files there that only it may read (rustc's incremental
+        // session locks are 0600) are made readable first, or the copy fails.
+        // (The directory itself is engineer's, so that chmod reports failure on
+        // it: the copy decides.) Never run: nothing to copy.
+        let Some((_, Some(who))) = build_of(&build) else { return None };
+        let _ = run_as(who, &["/bin/chmod", "-R", "a+rX", &build.to_string_lossy()]).status();
         let copy = Command::new("cp").arg("-cR").arg(format!("{}/", build.display())).arg(&snapshot).output();
         let copied = copy.as_ref().is_ok_and(|o| o.status.success());
         remove_build(config, &build);
@@ -930,8 +959,11 @@ fn warm(m: &Manifest, head: &str) -> (bool, bool) {
             let _ = std::fs::remove_dir_all(&snapshot);
             return None;
         }
-        // Writable by engineer alone, whatever bon's umask.
-        let _ = Command::new("chmod").args(["-R", "go-w"]).arg(&staging).status();
+        // Writable by engineer alone, whatever bon's umask, and readable by
+        // group bon (agent and every slot's user): the copy took the slot's
+        // build directory's mode (0700), and no ACL of it stays.
+        let _ = Command::new("chmod").args(["-R", "-N"]).arg(&staging).stderr(Stdio::null()).status();
+        let _ = Command::new("chmod").args(["-R", "go-w,g+rX"]).arg(&staging).status();
         write_links(&snapshot, &dir);
         // No tree, no key: this process's alone, removed with its directories.
         let Some(key) = key else { return Some(snapshot) };
@@ -1057,7 +1089,7 @@ fn prune_kept(keep: usize) {
     }
 }
 
-/// How a build directory is made from trunk's (as agent: `sh -c CLONE from to`):
+/// How a build directory is made from trunk's (as the build's user: `sh -c CLONE from to`):
 /// a copy-on-write clone of it, then each file `links` (beside it) names is
 /// hard-linked instead. A clone is a new file to macOS, which scans every new
 /// executable and library once, host-wide and one at a time, when it is first
@@ -1074,11 +1106,12 @@ exit 0"#;
 /// 14 at once 1.2, and 14 take longer at once than two at a time.
 const CLONES: usize = 2;
 
-/// Make `to` from `from` as CLONE says, as agent, in one of the CLONES slots.
-fn clone_into(config: &Config, from: &std::path::Path, to: &std::path::Path) -> bool {
+/// Make `to` from `from` as CLONE says, as `who`, in one of the CLONES slots.
+/// A clone is a new file, so its owner is who makes it: `who`.
+fn clone_into(config: &Config, from: &std::path::Path, to: &std::path::Path, who: Who) -> bool {
     let argv: Vec<String> = vec!["/bin/sh".into(), "-c".into(), CLONE.into(), "sh".into(), from.to_string_lossy().into(), to.to_string_lossy().into()];
     let _slot = Slot::take_in(&slots_dir(), "clone", CLONES);
-    as_agent(config, std::path::Path::new("/tmp"), &[], &argv).status().is_ok_and(|s| s.success())
+    as_user(config, who, &config.path, std::path::Path::new("/tmp"), &[], &argv).status().is_ok_and(|s| s.success())
 }
 
 /// Name, beside trunk's build `snapshot`, the files every build may share with
@@ -1128,85 +1161,147 @@ fn shared_in(snapshot: &std::path::Path, deps: &std::path::Path, checkout: &std:
     out
 }
 
-/// A build directory that starts as a copy-on-write clone of trunk's build:
-/// an agent process's own, or a fresh one for its judge.
+/// What a build directory starts as, when the first check that runs in it makes it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Start {
+    /// A copy-on-write clone of trunk's build, if there is one yet (`warm_build`).
+    Trunk,
+    /// Empty: trunk's own first build, and a re-check from a clean build.
+    Empty,
+}
+
+/// Every build directory this bon process names: what it starts as, and whose
+/// it is once made (agent's, an agent process's own; or a check slot's
+/// user's). A build directory is its user's alone: a check slot's is
+/// engineer's, mode 0700, with an ACL that lets that slot's user, and no
+/// other, list, add and delete in it (`Object::BuildDirectory`); what that
+/// user builds there is its own.
+static BUILDS: std::sync::Mutex<Option<HashMap<PathBuf, (Start, Option<Who>)>>> = std::sync::Mutex::new(None);
+
+/// What BUILDS says of `d`, if it names it.
+fn build_of(d: &std::path::Path) -> Option<(Start, Option<Who>)> {
+    BUILDS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|b| b.get(d).copied())
+}
+
+fn set_build(d: &std::path::Path, entry: (Start, Option<Who>)) {
+    BUILDS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(d.to_path_buf(), entry);
+}
+
+/// A build directory named `name`, not yet made: the first check that runs
+/// in it makes it, as that check's slot's user (`ensure_build`), so a judge
+/// whose checks the verdict cache answers costs no clone and no removal.
+fn named_build(name: &str, start: Start) -> PathBuf {
+    let d = scratch(name);
+    set_build(&d, (start, None));
+    d
+}
+
+/// A build directory that starts as a copy-on-write clone of trunk's build,
+/// agent's: an agent process's own, when there is no bon's cargo to clone it
+/// at its first cargo.
 fn build_directory(config: &Config, name: &str) -> Result<PathBuf, String> {
     // Once trunk's build is under way, wait for it and start from a clone of it.
-    clone_build(config, wait_warm(config).as_deref(), name)
-}
-
-/// A session's build directory, empty, and trunk's build for bon's cargo to
-/// clone into it at the session's first cargo (once trunk's build is ready).
-fn session_build(config: &Config, name: &str) -> Result<(PathBuf, Option<PathBuf>), String> {
-    let warm = wait_warm(config);
-    let d = scratch(name);
-    writable_dir(&d)?;
-    Ok((d, warm))
-}
-
-/// A build directory named `name`: empty, or a copy-on-write clone of `from`.
-fn clone_build(config: &Config, from: Option<&std::path::Path>, name: &str) -> Result<PathBuf, String> {
-    let d = scratch(name);
-    // engineer makes the directory; agent fills it with a clone.
-    writable_dir(&d)?;
-    if let Some(w) = from {
-        if !clone_into(config, w, &d) { return Err(format!("cannot clone {} into {} as agent", w.display(), d.display())); }
+    let (d, warm) = session_build(config, name)?;
+    if let Some(w) = warm {
+        if !clone_into(config, &w, &d, Who::Agent) { return Err(format!("cannot clone {} into {} as agent", w.display(), d.display())); }
     }
     Ok(d)
 }
 
-/// A judge's build directory, named but not yet made: it is made (a fresh
-/// clone of trunk's) by the first check that must run in it, so a judge whose
-/// checks the verdict cache answers costs no clone and no removal.
-fn judge_build(name: &str) -> PathBuf { scratch(name) }
+/// A session's build directory, agent's (under a directory agent's alone),
+/// empty, and trunk's build for bon's cargo to clone into it at the session's
+/// first cargo (once trunk's build is ready).
+fn session_build(config: &Config, name: &str) -> Result<(PathBuf, Option<PathBuf>), String> {
+    let warm = wait_warm(config);
+    let d = scratch(name);
+    if let Some(owner) = d.parent() { agents_alone(owner)?; }
+    writable_dir(&d)?;
+    set_build(&d, (Start::Empty, Some(Who::Agent)));
+    Ok((d, warm))
+}
 
-/// Make `d` a fresh clone of trunk's build unless it exists. One at a time per directory.
-fn ensure_build(config: &Config, d: &std::path::Path) -> bool {
+/// Make `d`, a build directory BUILDS names, `who`'s, as it says it starts,
+/// unless it is `who`'s already; one made by another user is emptied and made
+/// again. A directory BUILDS does not name is used as it is. One at a time
+/// per directory.
+fn ensure_build(config: &Config, d: &std::path::Path, who: Who) -> bool {
     let one = flight(&format!("build\0{}", d.display()));
     let _one = one.lock().unwrap_or_else(|e| e.into_inner());
-    if d.exists() { return true; }
-    let warm = warm_build();
-    let made = writable_dir(d).is_ok() && warm.is_none_or(|w| clone_into(config, &w, d));
-    if !made { remove_build(config, d); let _ = std::fs::remove_dir(d); }
+    let Some((start, owner)) = build_of(d) else { return d.exists() };
+    if owner == Some(who) { return true; }
+    if owner.is_some() { remove_build(config, d); }
+    let made = slots_alone(d, who).is_ok()
+        && (start == Start::Empty || warm_build().is_none_or(|w| clone_into(config, &w, d, who)));
+    set_build(d, (start, Some(who)));
+    if !made { remove_build(config, d); }
     made
 }
 
-/// agent empties a build directory; engineer removes the directory itself at cleanup.
-fn remove_build(config: &Config, d: &std::path::Path) {
-    // Missing, or empty (a session that never built): nothing of agent's to remove.
-    if std::fs::read_dir(d).map_or(true, |mut e| e.next().is_none()) { return; }
-    let _ = as_agent(config, std::path::Path::new("/tmp"), &[], &["rm".into(), "-rf".into(), d.to_string_lossy().into()])
-        .stderr(Stdio::null()).status();
+/// Make `d` `who`'s alone: engineer's, mode 0700, and an ACL that lets `who`
+/// list, add and delete in it (`chmod +a`: one ACL entry, on the directory
+/// alone; what `who` makes in it is its own).
+fn slots_alone(d: &std::path::Path, who: Who) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o700)).map_err(|e| e.to_string())?;
+    if confined() { return Ok(()); }
+    let ace = format!("user:{} allow list,add_file,search,add_subdirectory,delete_child,readattr,writeattr,readextattr,writeextattr,readsecurity", who.name());
+    sh(d, "chmod", &["+a", &ace, &d.to_string_lossy()]).map(|_| ())
 }
 
-/// Remove this bon process's directories under /tmp/bon, and any left by a bon
-/// process no longer running. Each holds files of two owners: engineer's check
-/// files (with an ACL denying agent) and agent's build output. So: engineer
-/// removes its ACLs, agent removes what it can, engineer removes the rest.
-/// With `cleanup = "own"` in the host file, only this process's own (a host
-/// shared with other bon processes, as the benchmark's is).
+/// Its user empties a build directory, and engineer removes it, so the next
+/// check that runs in it makes it again.
+fn remove_build(config: &Config, d: &std::path::Path) {
+    let _ = config;
+    let Some((start, owner)) = build_of(d) else { return };
+    if let Some(who) = owner {
+        // Empty (a session that never built): nothing of its user's to remove.
+        if std::fs::read_dir(d).is_ok_and(|mut e| e.next().is_some()) {
+            let _ = run_as(who, &["/bin/rm", "-rf", &d.to_string_lossy()]).status();
+        }
+        let _ = Command::new("chmod").arg("-N").arg(d).stderr(Stdio::null()).status();
+        let _ = std::fs::remove_dir_all(d);
+    }
+    set_build(d, (start, None));
+}
+
+/// Stop every process of check slot k's user, before a check takes the slot:
+/// nothing a check left running reaches the next one in the slot. Asked
+/// until no process is left (`kill -1` signals every process of its sender's
+/// user but itself, and fails when there is none). Never confined.
+fn vacate(k: usize) {
+    if confined() { return; }
+    for _ in 0..10 {
+        if !run_as(Who::Check(k), &["/bin/kill", "-9", "-1"]).status().is_ok_and(|s| s.success()) { break; }
+    }
+}
+
+/// Remove this bon process's directories under /tmp/bon, and any of a bon
+/// process the process list says ended (its entry stale, and its pid no
+/// longer a live process): never another live one's, of any user layer. Each
+/// holds files of several owners: engineer's check files (with an ACL
+/// denying agent), agent's, and each check slot's user's build output. So:
+/// each of those users removes what it can, then engineer removes the rest.
 pub fn cleanup(path: &[String]) {
     let me = std::process::id().to_string();
-    let own = CLEANUP_OWN.load(std::sync::atomic::Ordering::SeqCst);
-    // ps, not kill -0: kill -0 fails on another user's live process (EPERM),
-    // which would read as dead.
-    // Each pid's liveness asked once, not once per directory.
-    let mut alive: HashMap<String, bool> = HashMap::new();
+    let ended: Vec<String> = ended_processes().into_iter().filter(|p| !process_running(p)).collect();
     let mut gone: Vec<PathBuf> = Vec::new();
     for e in std::fs::read_dir(WORKING_DIRECTORIES).into_iter().flatten().flatten() {
         let name = e.file_name().to_string_lossy().to_string();
-        // <pid>.<owner>; <pid>-<name> from before the working directories were 0711.
-        let Some(pid) = name.split(['.', '-']).next() else { continue };
-        if !pid.chars().all(|c| c.is_ascii_digit()) { continue; }
-        if pid != me && (own || *alive.entry(pid.to_string()).or_insert_with(|| process_running(pid))) { continue; }
-        gone.push(e.path());
+        // <pid>.<owner>
+        let Some(pid) = name.split('.').next() else { continue };
+        if pid == me || ended.iter().any(|p| p == pid) { gone.push(e.path()); }
     }
-    // All of them at once: three processes in all, not three per directory.
+    // All of them at once: a few processes in all, not a few per directory.
+    let users: Vec<Who> = std::iter::once(Who::Agent).chain((0..SLOTS.load(std::sync::atomic::Ordering::SeqCst)).map(Who::Check)).collect();
     for chunk in gone.chunks(200) {
+        for who in &users {
+            let mut c = Command::new("sudo");
+            c.args(["-n", "-u", &who.name(), "env", "-i", &format!("PATH={}", path.join(":")), "rm", "-rf"]);
+            let _ = c.args(chunk).current_dir("/tmp").stdout(Stdio::null()).stderr(Stdio::null()).status();
+        }
         let _ = Command::new("chmod").args(["-R", "-N"]).args(chunk).stderr(Stdio::null()).status();
         let _ = Command::new("chmod").args(["-R", "u+w"]).args(chunk).stderr(Stdio::null()).status();
-        let _ = Command::new("sudo").args(["-n", "-u", "agent", "env", "-i", &format!("PATH={}", path.join(":")), "rm", "-rf"])
-            .args(chunk).current_dir("/tmp").stderr(Stdio::null()).status();
         for p in chunk { let _ = std::fs::remove_dir_all(p); }
     }
 }
@@ -1253,6 +1348,31 @@ impl Pools {
     }
 }
 
+/// The environment a check runs with on this host, as `env -i` arguments:
+/// the checks' PATH (the host file's, without agent's home), the toolchain's
+/// homes, and a check slot's user's home. Whoever asks with it (engineer, or
+/// a check slot's user in a check) sees the tools the checks run (`bon account`).
+pub fn check_environment() -> Vec<String> {
+    let host = host_file().ok().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| toml::from_str::<toml::Value>(&t).ok());
+    let text = |k: &str| host.as_ref().and_then(|h| h.get(k)).and_then(|v| v.as_str()).map(String::from);
+    let path: Vec<String> = host.as_ref().and_then(|h| h.get("path")).and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|d| d.as_str()).filter(|d| !std::path::Path::new(d).starts_with(AGENT_HOME)).map(String::from).collect())
+        .unwrap_or_else(|| vec!["/usr/bin".into(), "/bin".into()]);
+    let mut env = vec![format!("PATH={}", path.join(":")), format!("HOME={CHECK_HOME}")];
+    for (k, v) in [("RUSTUP_HOME", text("rustup_home")), ("CARGO_HOME", text("cargo_home"))] { if let Some(v) = v { env.push(format!("{k}={v}")); } }
+    env
+}
+
+/// How many check slots this host may have, so how many slot users `bon
+/// setup` makes: the host file's check_processes; unset (or no host file
+/// yet), the most the default pool can come to here, whatever memory is free.
+pub fn check_slots() -> usize {
+    let host = host_file().ok().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| toml::from_str::<toml::Value>(&t).ok());
+    let get = |k: &str| host.as_ref().and_then(|h| h.get(k)).and_then(|v| v.as_integer()).map(|v| v.max(1) as usize);
+    let cores = std::thread::available_parallelism().map_or(1, |c| c.get());
+    get("check_processes").unwrap_or_else(|| (THREADS_PER_CORE * cores / get("check_threads").unwrap_or(2)).max(1))
+}
+
 /// The default check pool: as many checks as free memory holds at CHECK_GB
 /// each, and no more than THREADS_PER_CORE threads per core among them; at
 /// least one. Memory is what a check holds whether it computes or waits, so
@@ -1276,19 +1396,25 @@ fn free_memory_gb() -> f64 {
     }
 }
 
-/// Where slots, bon's cargo and the verdict cache live: the working
-/// directories, or agent's own when bon runs as agent (a candidate's tests).
+/// Where working directories, slots and bon's cargo live: the working
+/// directories; or, when bon runs confined (a candidate's tests, as agent or a
+/// check slot's user), which cannot write the host's, that user's own.
 fn base() -> PathBuf {
-    if is_agent() { std::env::temp_dir().join("bon-agent") } else { PathBuf::from(WORKING_DIRECTORIES) }
+    if confined() { std::env::temp_dir().join(format!("bon-{}", whoami())) } else { PathBuf::from(WORKING_DIRECTORIES) }
 }
 
-/// The check pool's slot files: engineer's directory, which agent (through
-/// group bon) may write, since bon's cargo takes slots as agent.
+/// The check pool's slot files: engineer's directory, which no user bon
+/// confines may write: bon's cargo takes slots as agent, opening the files
+/// read-only. A slot's file is the slot: were it replaced, two checks could
+/// hold one slot, so run as one slot's user at once.
 fn slots_dir() -> PathBuf {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
         let d = base().join("checks");
-        if let Err(e) = writable_dir(&d) { eprintln!("bon: {}: {e}", d.display()); }
+        let made = std::fs::create_dir_all(&d).is_ok()
+            && Command::new("chgrp").arg("bon").arg(&d).stderr(Stdio::null()).status().is_ok_and(|s| s.success())
+            && Command::new("chmod").arg("2755").arg(&d).status().is_ok_and(|s| s.success());
+        if !made && !confined() { eprintln!("bon: {}: cannot make it engineer's, group bon, 2755", d.display()); }
         // Made here, so agent opens them read-only (a sandboxed program may not create files).
         for p in (0..256).map(|k| d.join(format!("check.{k}"))).chain((0..CLONES).map(|k| d.join(format!("clone.{k}")))) {
             if !p.exists() && std::fs::write(&p, "").is_ok() {
@@ -1302,8 +1428,8 @@ fn slots_dir() -> PathBuf {
 /// One slot of a host-wide pool: an flock on the file `<name>.<k>` under a
 /// directory, k below the pool's size. The kernel frees a lock when its
 /// holder's last descriptor closes, so a slot a dead process held is free at
-/// once. bon's cargo takes check slots the same way, as agent.
-struct Slot(std::fs::File);
+/// once. bon's cargo takes check slots the same way, as agent. Its k is the slot.
+struct Slot(std::fs::File, usize);
 
 /// A slot this process freed: its own waiters look again at once, not at
 /// their next poll (another process's freed slot is found by polling).
@@ -1320,7 +1446,12 @@ impl Drop for Slot {
 /// A pool's slot as this process holds it: first a place among the process's
 /// own waiters (at most the pool's size of them look for a host-wide slot, so
 /// a wide search does not poll the slot files from every thread), then the slot.
-struct Held { _slot: Slot, _gate: Ticket }
+struct Held { slot: Slot, _gate: Ticket }
+
+impl Held {
+    /// The slot's index: a check that holds check slot k runs as `check<k>`.
+    fn slot(&self) -> usize { self.slot.1 }
+}
 
 /// In-process admission to a pool: how many of this process's threads hold or
 /// seek one of its slots.
@@ -1350,13 +1481,16 @@ impl Slot {
     /// An agent process's slot: agent_process.<k> in the working directories.
     fn agent_process(config: &Config) -> Held {
         let gate = AGENT_PROCESS_GATE.enter(config.pools.agent_processes);
-        Held { _slot: Slot::take_in(&base(), "agent_process", config.pools.agent_processes), _gate: gate }
+        Held { slot: Slot::take_in(&base(), "agent_process", config.pools.agent_processes), _gate: gate }
     }
 
-    /// A check's slot: check.<k> in the slots directory.
+    /// A check's slot: check.<k> in the slots directory, taken for a check bon
+    /// runs as `check<k>`, which nothing an earlier holder ran still runs as.
     fn check(config: &Config) -> Held {
         let gate = CHECK_GATE.enter(config.pools.check_processes);
-        Held { _slot: Slot::take_in(&slots_dir(), "check", config.pools.check_processes), _gate: gate }
+        let slot = Slot::take_in(&slots_dir(), "check", config.pools.check_processes);
+        vacate(slot.1);
+        Held { slot, _gate: gate }
     }
 
     fn take_in(dir: &std::path::Path, name: &str, n: usize) -> Slot {
@@ -1370,7 +1504,7 @@ impl Slot {
                     let _ = std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o644));
                     f
                 });
-                if let Ok(f) = f { if f.try_lock().is_ok() { return Slot(f); } }
+                if let Ok(f) = f { if f.try_lock().is_ok() { return Slot(f, k); } }
             }
             let freed = FREED.0.lock().unwrap_or_else(|e| e.into_inner());
             if *freed == seen { let _ = FREED.1.wait_timeout(freed, Duration::from_millis(250)); }
@@ -1448,7 +1582,7 @@ fn cargo_text() -> String { CARGO.replace("@CLONE@", CLONE).replace("@CLONES@", 
 fn wrapper(config: &Config) -> Option<PathBuf> {
     static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
-        if is_agent() { return None; }
+        if confined() { return None; }
         let d = scratch("bin");
         let text = cargo_text().replace("@SLOTS@", &slots_dir().to_string_lossy()).replace("@N@", &config.pools.check_processes.to_string())
             .replace("@THREADS@", &config.pools.threads.to_string()).replace("@SELF@", &d.to_string_lossy());
@@ -1493,26 +1627,45 @@ fn tree_of(root: &std::path::Path, commit: &str) -> String {
     git(root, &["rev-parse", &format!("{commit}^{{tree}}")]).unwrap_or_default()
 }
 
-/// The cache of check results: engineer's alone (0700), never agent's.
-/// The host file's `verdicts` names another (a benchmark's own, so runs do not share).
-/// None, so nothing is cached, if it cannot be made so, or another can write it.
-fn cache_dir() -> Option<PathBuf> {
+/// bon's state that outlives a bon process: `.bon` under the user layer's
+/// root the host file names (`user`), made when missing, engineer's alone
+/// (0700): no agent process and no check may read or write it
+/// (`Object::State`; the isolated gate observes it). It holds the verdict cache
+/// and the process list. None when no host file names a root, or the
+/// directory cannot be made so (bon run confined, in a candidate's tests).
+pub fn state_dir() -> Option<PathBuf> {
     static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        let d = VERDICTS.get().cloned().flatten().unwrap_or_else(|| PathBuf::from(WORKING_DIRECTORIES).join("verdicts"));
+        let root = USER.get().cloned().or_else(|| read_host(&host_file().ok()?).ok().map(|h| PathBuf::from(h.user)))?;
+        let d = root.join(BON);
         std::fs::create_dir_all(&d).ok()?;
+        // Only its owner may set its mode: then it is this process's user's.
         std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).ok()?;
-        // Owned by whoever owns the working directories (engineer), and by no group or other.
-        let (it, base) = (std::fs::metadata(&d).ok()?, std::fs::metadata(WORKING_DIRECTORIES).ok()?);
-        (it.uid() == base.uid() && it.mode() & 0o077 == 0).then_some(d)
+        (std::fs::metadata(&d).ok()?.mode() & 0o077 == 0).then_some(d)
     }).clone()
+}
+
+/// A directory of the state's, made when missing, its owner's alone.
+fn state(name: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let d = state_dir()?.join(name);
+    std::fs::create_dir_all(&d).ok()?;
+    std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o700)).ok()?;
+    Some(d)
+}
+
+/// The cache of check results: the user layer's state's `verdicts`. None, so
+/// nothing is cached, when there is no state.
+fn cache_dir() -> Option<PathBuf> {
+    static DIR: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| state("verdicts")).clone()
 }
 
 /// The toolchain as the checks see it: their PATH and homes, the versions of
 /// rustc, cargo and Verus, and bon's cargo. Computed once per PATH. Not the
-/// host file: its other facts (prices, pools, roles, the verdict cache's
-/// place) change no check's result.
+/// host file: its other facts (prices, pools, roles, the user layer's root)
+/// change no check's result.
 fn toolchain_identity(config: &Config) -> String {
     static MEMO: std::sync::Mutex<Option<HashMap<String, String>>> = std::sync::Mutex::new(None);
     let path = checks_path(config).join(":");
@@ -1553,69 +1706,38 @@ fn dependency_dirs(config: &Config, lockfile: &str) -> Vec<PathBuf> {
     dirs
 }
 
-/// Every file and link under `dirs`, sorted, with what `f` makes of it.
-fn walk_files(dirs: &[PathBuf], f: &mut dyn FnMut(&std::path::Path, &std::fs::Metadata)) {
-    for d in dirs {
-        let mut stack = vec![d.clone()];
-        let mut files = Vec::new();
-        while let Some(p) = stack.pop() {
-            let Ok(m) = std::fs::symlink_metadata(&p) else { continue };
-            if m.is_dir() { stack.extend(std::fs::read_dir(&p).into_iter().flatten().flatten().map(|e| e.path())); }
-            else { files.push((p, m)); }
-        }
-        files.sort_by(|a, b| a.0.cmp(&b.0));
-        for (p, m) in files { f(&p, &m); }
-    }
-}
-
 /// What the checks compile besides the tree and the toolchain: the
-/// dependency sources the tree's Cargo.lock names (`dependency_dirs`), as a
-/// digest of every file's path and bytes (a link's target). The bytes are
-/// read again only when a stat of the files (path, size, inode, change time,
-/// which the kernel sets on every write and no user can set back) differs
-/// from the last one: `fresh` takes that stat now, as a check that runs does
-/// before and after; otherwise the last digest this process took stands. A
-/// tree with no Cargo.lock compiles none: empty.
+/// dependency sources the tree's Cargo.lock names (`dependency_dirs`), as which
+/// of them are unpacked (each by its `.cargo-ok`, which cargo writes last). No
+/// agent process and no check can write them: they are engineer's, part of
+/// the toolchain (`Object::Toolchain`, which the isolated gate observes), and
+/// cargo unpacks each package once, from the bytes whose checksum the
+/// lockfile pins. So the lockfile, which is the tree's, says what each holds;
+/// what it cannot say is whether each is there yet. Taken again when `fresh`
+/// (as a check that runs does before and after), else the last this process
+/// took for the lockfile stands. A tree with no Cargo.lock compiles none: empty.
 fn dependencies(config: &Config, tree: &str, fresh: bool) -> String {
-    use std::os::unix::fs::MetadataExt;
-    type Memo = HashMap<String, (String, String)>;
     static LOCKFILES: std::sync::Mutex<Option<HashMap<String, Option<String>>>> = std::sync::Mutex::new(None);
-    static DIGESTS: std::sync::Mutex<Option<Memo>> = std::sync::Mutex::new(None);
+    static PRESENT: std::sync::Mutex<Option<HashMap<String, String>>> = std::sync::Mutex::new(None);
     if tree.is_empty() { return String::new(); }
-    // The tree's lockfile, once per tree: its blob, and its text.
+    // The tree's lockfile, once per tree: its blob.
     let blob = LOCKFILES.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).entry(tree.to_string())
         .or_insert_with(|| git(&config.root, &["rev-parse", "--verify", "-q", &format!("{tree}:Cargo.lock")]).ok()).clone();
     let Some(blob) = blob else { return String::new() };
     if !fresh {
-        if let Some((_, d)) = DIGESTS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&blob)) { return d.clone(); }
+        if let Some(p) = PRESENT.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&blob)) { return p.clone(); }
     }
     let dirs = dependency_dirs(config, &git(&config.root, &["cat-file", "blob", &blob]).unwrap_or_default());
-    let mut stat = Sha256::new();
-    for d in &dirs { stat.update(d.as_os_str().as_encoded_bytes()); stat.update([u8::from(d.exists())]); }
-    walk_files(&dirs, &mut |p, m| {
-        stat.update(p.as_os_str().as_encoded_bytes());
-        stat.update(format!("\0{} {} {} {}\0", m.len(), m.ino(), m.ctime(), m.ctime_nsec()).as_bytes());
-    });
-    let stat: String = stat.finalize().iter().map(|b| format!("{b:02x}")).collect();
-    if let Some((s, d)) = DIGESTS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(&blob)) {
-        if *s == stat { return d.clone(); }
-    }
-    let mut content = Sha256::new();
-    for d in &dirs { content.update(d.as_os_str().as_encoded_bytes()); content.update([u8::from(d.exists())]); }
-    walk_files(&dirs, &mut |p, m| {
-        content.update(p.as_os_str().as_encoded_bytes());
-        content.update([0u8]);
-        let bytes = if m.file_type().is_symlink() { std::fs::read_link(p).map(|t| t.as_os_str().as_encoded_bytes().to_vec()) } else { std::fs::read(p) };
-        content.update(bytes.unwrap_or_else(|e| e.to_string().into_bytes()));
-        content.update([0u8]);
-    });
-    let digest: String = content.finalize().iter().map(|b| format!("{b:02x}")).collect();
-    DIGESTS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(blob, (stat, digest.clone()));
-    digest
+    let mut h = Sha256::new();
+    h.update(blob.as_bytes());
+    for d in &dirs { h.update(d.as_os_str().as_encoded_bytes()); h.update([u8::from(d.join(".cargo-ok").exists())]); }
+    let present: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+    PRESENT.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(blob, present.clone());
+    present
 }
 
 /// The cache key of a command on `on`, or None when it may not be cached: no
-/// tree, or bon running as agent (which may not keep engineer's cache). What
+/// tree, or bon running confined (which may not keep engineer's cache). What
 /// the check sees: the toolchain, the dependency sources, the tree, the test
 /// written into it, and the command.
 fn verdict_key(config: &Config, on: &On, command: &str) -> Option<String> {
@@ -1623,7 +1745,7 @@ fn verdict_key(config: &Config, on: &On, command: &str) -> Option<String> {
 }
 
 fn verdict_key_with(config: &Config, on: &On, command: &str, dependencies: &str) -> Option<String> {
-    if on.tree.is_empty() || is_agent() { return None; }
+    if on.tree.is_empty() || confined() { return None; }
     let mut h = Sha256::new();
     for part in [toolchain_identity(config).as_bytes(), dependencies.as_bytes(), on.tree.as_bytes(), command.as_bytes()] { h.update(part); h.update([0u8]); }
     if let Some((path, bytes)) = on.test { h.update(path.as_bytes()); h.update([0u8]); h.update(bytes); }
@@ -1663,7 +1785,7 @@ fn flight(key: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
     FLIGHTS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).entry(key.to_string()).or_default().clone()
 }
 
-/// Run a check as agent in a read-only checkout, holding a check slot, with the
+/// Run a check in a read-only checkout, holding a check slot, as the slot's user, with the
 /// pool's threads; or answer it from the cache. A check's exit (0 or not), its
 /// output, and whether its cutoff (`[checks] time`) stopped it. Only a run that
 /// exited with a code of its own is cached: never one killed, signalled or not
@@ -1684,22 +1806,24 @@ fn run_check_with(config: &Config, on: &On, threads: usize, dir: &std::path::Pat
     let before = dependencies(config, &on.tree, true);
     let key = verdict_key_with(config, on, command, &before);
     if let Some((ok, out)) = key.as_deref().and_then(|_| answer(config, on, command, log)) { return (ok, out, false); }
-    // A judge's build is made now, when a check must run in it.
-    if !ensure_build(config, target) {
-        write_trace(log, check_record(command, on, &format!("no build directory: {} could not be made", target.display()), ""));
+    // The slot the thread holds for its checks (see `holding`), or one for
+    // this check alone: the check runs as the slot's user.
+    let (_slot, k) = HOLDING.with(|h| match &mut *h.borrow_mut() {
+        Some(held) => { let held = held.get_or_insert_with(|| Slot::check(config)); (None, held.slot()) }
+        None => { let s = Slot::check(config); let k = s.slot(); (Some(s), k) }
+    });
+    let who = Who::Check(k);
+    // A judge's build is made now, when a check must run in it, as the slot's user's.
+    if !ensure_build(config, target, who) {
+        write_trace(log, check_record(command, on, &format!("no build directory: {} could not be made {}'s", target.display(), who.name()), ""));
         return (false, String::new(), false);
     }
     let argv = vec!["/bin/sh".to_string(), "-c".to_string(), command.to_string()];
     let t = target.to_string_lossy().to_string();
     let env = [("BON_BUILD", t.clone()), ("CARGO_TARGET_DIR", t), ("CARGO_BUILD_JOBS", threads.to_string()), ("BON_CHECK_SLOT", "held".to_string())];
-    let c = as_agent_on(config, &with_wrapper(config, checks_path(config)), dir, &env, &argv);
-    // The slot the thread holds for its checks (see `holding`), or one for this check alone.
-    let _slot = HOLDING.with(|h| match &mut *h.borrow_mut() {
-        Some(held) => { if held.is_none() { *held = Some(Slot::check(config)); } None }
-        None => Some(Slot::check(config)),
-    });
+    let c = as_user(config, who, &with_wrapper(config, checks_path(config)), dir, &env, &argv);
     let started = Instant::now();
-    let mut r = supervised(c, None, Duration::from_secs(config.checks.time), log, None);
+    let mut r = supervised(c, who, None, Duration::from_secs(config.checks.time), log, None);
     RAN.with(|s| s.set(started.elapsed().as_secs_f64()));
     r.log = check_record(command, on, &r.log, &r.stdout);
     write_trace(log, &r.log);
@@ -1801,15 +1925,14 @@ fn recheck(m: &Manifest, commit: &str) -> Result<(), String> {
             scope.spawn(move || {
                 let name = format!("recheck.{}", n + k);
                 let dir = scratch(&format!("{name}/{}", repository_name(&m.root)));
-                let build = scratch(&format!("{name}.build/build"));
+                let build = named_build(&format!("{name}.build/build"), Start::Empty);
                 let made = materialize(&m.root, &d.tree, &dir).and_then(|_| {
                     if let Some((p, bytes)) = &d.test {
                         let p = dir.join(p);
                         std::fs::create_dir_all(p.parent().unwrap_or(&dir)).map_err(|e| e.to_string())?;
                         std::fs::write(&p, bytes).map_err(|e| e.to_string())?;
                     }
-                    sh(&dir, "chmod", &["-R", "a-w,g+rX", "."])?;
-                    writable_dir(&build)
+                    sh(&dir, "chmod", &["-R", "a-w,g+rX", "."]).map(|_| ())
                 });
                 let on = On { tree: d.tree.clone(), test: d.test.as_ref().map(|(p, b)| (p.as_str(), b.as_slice())), cache: Cache::Off };
                 let r = match made {
@@ -1857,18 +1980,19 @@ fn staged(m: &Manifest, commit: &str) -> Result<(), String> {
     let log = trace_dir(&m.root);
     let name = format!("recheck.{}", RECHECKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
     let dir = scratch(&format!("{name}/{}", repository_name(&m.root)));
-    let build = scratch(&format!("{name}.build/build"));
+    let build = named_build(&format!("{name}.build/build"), Start::Empty);
     let tree = tree_of(&m.root, commit);
-    let made = materialize(&m.root, &tree, &dir).and_then(|_| sh(&dir, "chmod", &["-R", "a-w,g+rX", "."])).and_then(|_| writable_dir(&build));
+    let made = materialize(&m.root, &tree, &dir).and_then(|_| sh(&dir, "chmod", &["-R", "a-w,g+rX", "."]).map(|_| ()));
     let on = On { tree, test: None, cache: Cache::Off };
     let mut r = made.map_err(|e| format!("the staged checks could not be set up on {short}: {e}; nothing was pushed"));
-    for (k, command) in config.checks.staged.iter().enumerate() {
+    // One slot for them all: they build in one directory, its user's.
+    holding(|| for (k, command) in config.checks.staged.iter().enumerate() {
         if r.is_err() { break; }
         let path = log.join(format!("staged-{short}-{k}"));
         if !run_check(config, &on, &dir, &build, command, &path).0 {
             r = Err(format!("staged check `{command}` rejects {short}, the selected candidate, from a clean build; nothing was pushed (log: {})", path.display()));
         }
-    }
+    });
     remove_build(config, &build);
     for p in [dir.parent(), build.parent()].into_iter().flatten() {
         let _ = Command::new("chmod").args(["-R", "u+w"]).arg(p).stderr(Stdio::null()).status();
@@ -1888,7 +2012,7 @@ thread_local! {
 /// the suite, not what its change made cargo rebuild. bon times each run; a
 /// tree's time is kept in the verdict cache beside its verdict (the command's
 /// key with `seconds` added), so a tree is timed once per verdict cache and
-/// every bon process on the host ranks it alike. None if a run fails: then the
+/// every bon process of the user layer ranks it alike. None if a run fails: then the
 /// rank is not measured. Each run's log is `seconds-<k>` in the trace.
 fn suite_seconds(config: &Config, on: &On, dir: &std::path::Path, build: &std::path::Path, trace: &std::path::Path) -> Option<f64> {
     let mut total = 0.0;
@@ -2401,7 +2525,7 @@ pub fn on_trunk(m: &Manifest) -> (r: Result<(), String>) {
     Ok(())
 }
 
-/// Every test, verify and staged check on a commit, run as agent in a
+/// Every test, verify and staged check on a commit, run as a check slot's user in a
 /// checkout without `.git`, the way candidates are judged; each one's name,
 /// whether it exited 0, and its log. All of them run, not only until one fails.
 #[verifier::external]
@@ -2410,20 +2534,21 @@ pub fn check(m: &Manifest, commit: &Commit) -> Result<Vec<(String, bool, PathBuf
     let c: String = commit.iter().collect();
     let dir = scratch(&format!("check/{}", repository_name(root)));
     check_directory(root, &c, &dir)?;
-    let build = scratch("check.build/build");
-    writable_dir(&build)?;
+    let build = named_build("check.build/build", Start::Empty);
     let log = trace_dir(root);
     traced(&log, std::fs::create_dir_all(&log));
     let mut out = Vec::new();
     let on = On::commit(root, &c);
-    for (kind, list) in [("test", &config.checks.test), ("verify", &config.checks.verify), ("staged", &config.checks.staged)] {
+    // One slot for them all: they build in one directory, its user's.
+    holding(|| for (kind, list) in [("test", &config.checks.test), ("verify", &config.checks.verify), ("staged", &config.checks.staged)] {
         for (k, v) in list.iter().enumerate() {
             let path = log.join(format!("check-{kind}-{k}"));
             // engineer waits on it alone: every core.
             let ok = run_check_with(config, &on, cores(), &dir, &build, v, &path).0;
             out.push((v.clone(), ok, path));
         }
-    }
+    });
+    remove_build(config, &build);
     let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
     let _ = std::fs::remove_dir_all(&dir);
     Ok(out)
@@ -2438,77 +2563,115 @@ pub fn trunk_accepted(m: &Manifest, head: &Commit) -> bool {
     tests && proved
 }
 
-/// The permissions trusted code observed for agent on each object the policy
-/// names, path by path, in the order of `gates::observed`: the checks, the
-/// transcripts, a working directory, the repository, the working directories,
-/// the toolchain. None is a path that does not exist.
-pub type Observed = (Vec<Option<Permission>>, Vec<Option<Permission>>, Vec<Option<Permission>>,
-                     Vec<Option<Permission>>, Vec<Option<Permission>>, Vec<Option<Permission>>);
-
-/// agent's effective permissions on every path of each object the policy
-/// names, observed by asking as agent, on a probe working directory made the
-/// same way as real ones. A path that does not exist is reported as missing
-/// (None), never as the policy's value. Err is an observation that could not
-/// be made (agent cannot be asked, a path cannot be looked at), never a denial.
+/// Each confined user's effective permissions on every path of each object
+/// the policy names, observed by asking as that user: agent's, and each check
+/// slot's user's (`check<k>`, k below the host's check_processes), on probes
+/// made the way real ones are (a working directory, a check's checkout, a
+/// kept build, each slot's build directory). A path that does not exist is
+/// reported as missing (None), never as the policy's value. Err is an
+/// observation that could not be made (a user cannot be asked, a path cannot
+/// be looked at), never a denial.
 #[verifier::external_body]
-pub fn observe(m: &Manifest, commit: &Commit) -> (r: Result<Observed, String>) {
+pub fn observe(m: &Manifest, commit: &Commit) -> (r: Result<(Observation, Vec<Observation>), String>) {
     let c: String = commit.iter().collect();
-    // Asking as agent must work before any answer counts as a denial.
-    let asks = Command::new("sudo").args(["-n", "-u", "agent", "true"]).status().map_err(|e| format!("cannot ask as agent: {e}; run bon setup"))?;
-    if !asks.success() { return Err("cannot ask as agent (sudo -n -u agent); run bon setup".into()); }
-    let probe = scratch(&format!("probe/{}", repository_name(&m.root)));
-    if let Err(e) = working_directory(&m.root, &m.config, &c, &probe) {
-        let _ = std::fs::remove_dir_all(&probe);
-        return Err(format!("agent is not set up ({e}); run bon setup"));
+    let name = repository_name(&m.root);
+    let slots = m.config.pools.check_processes;
+    let probes: Vec<PathBuf> = ["probe", "probe.check", "probe.builds"].iter().map(|p| scratch(p))
+        .chain((0..slots).map(|j| scratch(&format!("probe.{j}.build")))).collect();
+    let r = (|| -> Result<(Observation, Vec<Observation>), String> {
+        let working = probes[0].join(&name);
+        working_directory(&m.root, &m.config, &c, &working).map_err(|e| format!("agent is not set up ({e}); run bon setup"))?;
+        let checkout = probes[1].join(&name);
+        check_directory(&m.root, &c, &checkout)?;
+        // A kept build, as `keep` leaves one: engineer's, group bon, writable by no one else.
+        let builds = probes[2].join("build");
+        std::fs::create_dir_all(builds.join("debug")).map_err(|e| e.to_string())?;
+        std::fs::write(builds.join("debug/libkept.rlib"), "").map_err(|e| e.to_string())?;
+        sh(&probes[2], "chmod", &["-R", "go-w", "."])?;
+        let mut kept = vec![probes[2].clone(), builds];
+        for e in std::fs::read_dir(WORKING_DIRECTORIES).into_iter().flatten().flatten() {
+            if e.file_name().to_string_lossy().starts_with("trunk-") { kept.extend([e.path(), e.path().join("build")].into_iter().filter(|p| p.exists())); }
+        }
+        // Each slot's build directory, as `ensure_build` makes one (empty).
+        let slot_builds: Vec<Vec<PathBuf>> = (0..slots).map(|j| {
+            let d = probes[3 + j].join("build");
+            slots_alone(&d, Who::Check(j)).map(|_| vec![d])
+        }).collect::<Result<_, _>>()?;
+        let state = vec![state_dir().ok_or("no state for the user layer: the host file's `user` names its root, which must be a directory bon can make its own `.bon` in")?];
+        // The toolchain: the host file's homes, the dependency sources in cargo's
+        // (its registry, each registry's unpacked sources, its git checkouts),
+        // and every directory on the checks' PATH.
+        let mut toolchain: Vec<PathBuf> = m.config.toolchain.iter().map(|(_, v)| PathBuf::from(v)).collect();
+        if let Some((_, home)) = m.config.toolchain.iter().find(|(k, _)| k == "CARGO_HOME") {
+            let home = PathBuf::from(home);
+            toolchain.extend([home.join("registry"), home.join("registry/src"), home.join("git")]);
+            toolchain.extend(std::fs::read_dir(home.join("registry/src")).into_iter().flatten().flatten().map(|e| e.path()));
+        }
+        toolchain.extend(checks_path(&m.config).iter().map(PathBuf::from));
+        let transcripts = m.config.transcripts.clone().unwrap_or("transcripts".into());
+        // The checks and the transcripts as each user meets them: agent in a
+        // working directory, a check slot's user in a check's checkout. A
+        // repository without transcripts observes them on no path.
+        let met = |at: &std::path::Path| -> (Vec<PathBuf>, Vec<PathBuf>) {
+            (m.config.checks.paths.iter().map(|p| at.join(p.trim_end_matches('/'))).collect(),
+             Some(at.join(&transcripts)).filter(|t| t.exists()).into_iter().collect())
+        };
+        let ask = |who: Who, at: &std::path::Path| -> Result<Observation, String> {
+            let (checks, transcripts) = met(at);
+            let objects = [checks, transcripts, vec![working.clone()], vec![m.root.join(".git")], vec![PathBuf::from(WORKING_DIRECTORIES)],
+                           toolchain.clone(), kept.clone(), state.clone()];
+            let all: Vec<PathBuf> = objects.iter().chain(slot_builds.iter()).flatten().cloned().collect();
+            let mut seen = permissions_as(who, &all)?.into_iter();
+            let mut take = |paths: &Vec<PathBuf>| -> Vec<Option<Permission>> { paths.iter().filter_map(|_| seen.next()).collect() };
+            let [a, b, c, d, e, f, g, h] = objects.each_ref().map(&mut take);
+            let build_directories = slot_builds.iter().map(&mut take).collect();
+            Ok(Observation { checks: a, transcripts: b, working_directory: c, repository: d, working_directories: e, toolchain: f, builds: g, state: h, build_directories })
+        };
+        let agent = ask(Who::Agent, &working)?;
+        let checks = (0..slots).map(|k| ask(Who::Check(k), &checkout)).collect::<Result<Vec<_>, _>>()?;
+        Ok((agent, checks))
+    })();
+    for p in &probes {
+        let _ = Command::new("chmod").args(["-R", "-N"]).arg(p).stderr(Stdio::null()).status();
+        let _ = Command::new("chmod").args(["-R", "u+w"]).arg(p).stderr(Stdio::null()).status();
+        let _ = std::fs::remove_dir_all(p);
     }
-    let r = observe_in(m, &probe);
-    let _ = std::fs::remove_dir_all(&probe);
     r
 }
 
 } // verus!
 
-fn observe_in(m: &Manifest, probe: &std::path::Path) -> Result<Observed, String> {
-    // test(1) exits 0 (allowed) or 1 (denied); anything else is no answer.
-    let ask = |path: &std::path::Path, flag: &str| -> Result<bool, String> {
-        let s = Command::new("sudo").args(["-n", "-u", "agent", "test", flag]).arg(path).status()
-            .map_err(|e| format!("cannot ask as agent about {}: {e}", path.display()))?;
-        match s.code() {
-            Some(0) => Ok(true),
-            Some(1) => Ok(false),
-            _ => Err(format!("cannot ask as agent about {}: {s}", path.display())),
-        }
-    };
-    // Whether a path exists, as bon's own process sees it: missing is reported
-    // as missing; a path that cannot be looked at is an error.
+/// `who`'s permissions on each path, asked as `who` in one process: test(1)
+/// exits 0 (allowed) or 1 (denied), anything else is no answer. A path that
+/// does not exist, as bon's own process sees it, is None; one that cannot be
+/// looked at is an error. A check that is a file is run by an interpreter that
+/// reads it (sh, cargo), so for a file, execute is whether `who` can read it.
+fn permissions_as(who: Who, paths: &[PathBuf]) -> Result<Vec<Option<Permission>>, String> {
     let present = |path: &std::path::Path| -> Result<bool, String> {
-        match std::fs::metadata(path) {
+        match std::fs::symlink_metadata(path) {
             Ok(_) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
             Err(e) => Err(format!("cannot observe {}: {e}", path.display())),
         }
     };
-    // A check that is a file is run by an interpreter that reads it (sh, cargo),
-    // so for a file, execute is whether agent can read it.
-    let perm = |object: &str, path: &std::path::Path| -> Result<Option<Permission>, String> {
+    const ASK: &str = r#"for p; do test -r "$p"; r=$?; test -w "$p"; w=$?; test -x "$p"; x=$?; echo "$r $w $x"; done"#;
+    let out = Command::new("sudo").args(["-n", "-u", &who.name(), "/bin/sh", "-c", ASK, "sh"]).args(paths)
+        .current_dir("/tmp").stdin(Stdio::null()).output().map_err(|e| format!("cannot ask as {}: {e}; run bon setup", who.name()))?;
+    let lines: Vec<String> = String::from_utf8_lossy(&out.stdout).lines().map(String::from).collect();
+    if !out.status.success() || lines.len() != paths.len() {
+        return Err(format!("cannot ask as {} (sudo -n -u {}): {}; run bon setup", who.name(), who.name(), String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    paths.iter().zip(lines).map(|(path, line)| {
         if !present(path)? {
-            eprintln!("bon: missing: {object} {}", path.display());
+            eprintln!("bon: missing, as {}: {}", who.name(), path.display());
             return Ok(None);
         }
-        let p = Permission { read: ask(path, "-r")?, write: ask(path, "-w")?, execute: ask(path, "-x")? };        Ok(Some(if path.is_dir() { p } else { Permission { execute: p.read, ..p } }))
-    };
-    let mut checks = Vec::new();
-    for p in &m.config.checks.paths { checks.push(perm("check", &probe.join(p.trim_end_matches('/')))?); }
-    // The transcripts as agent meets them: in a working directory. A
-    // repository without them observes them on no path.
-    let transcripts = probe.join(m.config.transcripts.clone().unwrap_or("transcripts".into()));
-    let transcripts = if present(&transcripts)? { vec![perm("transcripts", &transcripts)?] } else { Vec::new() };
-    // The toolchain: the host file's homes, and every directory on the checks' PATH.
-    let mut toolchain = Vec::new();
-    for (k, v) in &m.config.toolchain { toolchain.push(perm(&format!("toolchain {k}"), std::path::Path::new(v))?); }
-    for d in checks_path(&m.config) { toolchain.push(perm("toolchain", std::path::Path::new(&d))?); }
-    Ok((checks, transcripts, vec![perm("working directory", probe)?],
-        vec![perm("repository", &m.root.join(".git"))?], vec![perm("working directories", std::path::Path::new(WORKING_DIRECTORIES))?], toolchain))
+        let bit = |code: &str| match code { "0" => Ok(true), "1" => Ok(false), _ => Err(format!("cannot ask as {} about {}: {line}", who.name(), path.display())) };
+        let codes: Vec<&str> = line.split(' ').collect();
+        let [r, w, x] = codes[..] else { return Err(format!("cannot ask as {} about {}: {line}", who.name(), path.display())) };
+        let p = Permission { read: bit(r)?, write: bit(w)?, execute: bit(x)? };
+        Ok(Some(if path.is_dir() { p } else { Permission { execute: p.read, ..p } }))
+    }).collect()
 }
 
 verus! {
@@ -2524,6 +2687,7 @@ pub fn run(m: &Manifest, kind: &Kind, a: usize, start: &Commit, target: Option<&
     let search = RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     if let Ok(mut l) = LATEST.lock() { *l = label(kind); }
     let start: String = start.iter().collect();
+    search_started(&m.root, search, kind, a, &tree_of(&m.root, &start));
     if !WARMING.load(std::sync::atomic::Ordering::SeqCst) { warm(m, &start); }
     let p = program(&m.config, kind);
     let slots: Vec<Program> = std::iter::repeat(p).take(width(m, kind, a)).collect();
@@ -2611,21 +2775,24 @@ pub fn clock() -> Clock { Clock { at: Instant::now() } }
 /// One search's cost per verified candidate, printed and recorded:
 /// (Σ_c (g(c) + k(c)) + r·t) / v. g(c) is each agent process's measured cost; k(c)
 /// is 0 because checks run locally and their time is inside t; r is bon.toml's
-/// rate; t is the search's wall time; v is how many candidates the verified gate
+/// rate; t is engineer's time charged to the search: each interval of its wall
+/// time split equally among the searches he waits on that run in it, on the
+/// process list (`search_ended`); v is how many candidates the verified gate
 /// passed.
 #[verifier::external_body]
 pub fn report(m: &Manifest, s: &Search, verified: usize, generation: u64, started: Clock) {
     let n = s.n;
     let search = RUNS.load(std::sync::atomic::Ordering::SeqCst).saturating_sub(1);
+    let charged = search_ended();
     let hours = started.at.elapsed().as_secs_f64() / 3600.0;
     let generation = generation as f64 / 1_000_000.0;
     // Background work is charged no time: no one waited on it.
     let background = BACKGROUND.load(std::sync::atomic::Ordering::SeqCst);
     let rate = if background { 0.0 } else { m.config.rate };
-    let time = rate * hours;
+    let time = rate * charged / 3600.0;
     let per = if verified == 0 { None } else { Some((generation + time) / verified as f64) };
     let line = format!(
-        "search {search}: {n} agent processes, {verified} verified; generation ${generation:.4} + time ${time:.4} ({:.0}s at ${}/h) = {}",
+        "search {search}: {n} agent processes, {verified} verified; generation ${generation:.4} + time ${time:.4} ({charged:.0}s of {:.0}s at ${}/h) = {}",
         hours * 3600.0, rate,
         per.map_or("no verified candidate".to_string(), |p| format!("${p:.4} per verified candidate")));
     eprintln!("bon: {line}");
@@ -2635,7 +2802,7 @@ pub fn report(m: &Manifest, s: &Search, verified: usize, generation: u64, starte
         "search": search, "kind": kind, "goal": goal,
         "time": std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()),
         "agent_processes": n, "limit": s.limit as f64 / 1_000_000.0, "verified": verified, "generation_dollars": generation,
-        "seconds": hours * 3600.0, "rate": rate, "background": background, "time_dollars": time,
+        "seconds": hours * 3600.0, "charged_seconds": charged, "rate": rate, "background": background, "time_dollars": time,
         "cost_per_verified_candidate": per,
         // The host's semaphores in force for this search.
         "host": { "agent_processes": m.config.pools.agent_processes, "check_processes": m.config.pools.check_processes },
@@ -2782,14 +2949,16 @@ pub fn agree_outputs(m: &Manifest, commit: &Commit) -> (r: Result<Vec<Hash>, Str
     let c: String = commit.iter().collect();
     let dir = scratch(&format!("goal/{}", repository_name(&m.root)));
     check_directory(&m.root, &c, &dir)?;
-    let build = build_directory(&m.config, "goal/build")?;
+    let _ = wait_warm(&m.config);
+    let build = named_build("goal.build/build", Start::Trunk);
     let log = trace_dir(&m.root);
     traced(&log, std::fs::create_dir_all(&log));
     let mut out = Vec::new();
     let on = On::commit(&m.root, &c);
-    for (k, a) in m.config.checks.agree.iter().enumerate() {
+    holding(|| for (k, a) in m.config.checks.agree.iter().enumerate() {
         out.push(Hash(hash(&run_check(&m.config, &on, &dir, &build, a, &log.join(format!("goal-agree-{k}"))).1)));
-    }
+    });
+    remove_build(&m.config, &build);
     let _ = Command::new("chmod").args(["-R", "u+w"]).arg(&dir).status();
     let _ = std::fs::remove_dir_all(&dir);
     Ok(out)
@@ -2805,12 +2974,14 @@ pub const BON: &str = ".bon";
 /// A bon process that searches ends here: on an error it records `exited:
 /// <error>` in its transitions (unless its last line, a block, already says
 /// why it ended), removes its working directories, commits its traces (and
-/// pushes them to the manifest's `traces` remote), and exits 1 with the error;
+/// pushes them to the manifest's `traces` remote), takes itself off the process
+/// list, and exits 1 with the error;
 /// otherwise 0.
 pub fn end(root: &std::path::Path, result: Result<(), String>) -> ! {
     if let Err(e) = &result { record_exited(root, e); }
     cleanup(&["/usr/bin".into(), "/bin".into()]);
     if let Err(e) = persist(root) { eprintln!("bon: traces not persisted: {e}"); }
+    leave();
     let _ = std::io::stdout().flush();
     match result {
         Ok(()) => std::process::exit(0),
@@ -2858,6 +3029,191 @@ pub fn persist(root: &std::path::Path) -> Result<(), String> {
     if remote.is_some() { git(&d, &["push", "-q", "origin", "main"])?; }
     Ok(())
 }
+// ── the process list ────────────────────────────────────
+//
+// Each bon process that searches writes itself to the user layer's process
+// list (OSTEP: a process list), by pid and start time, and takes itself off
+// when it ends. An entry is a plain JSON file, `<state>/processes/<pid>.<start>.json`,
+// another program can read:
+//   pid, start         the process, and when it started (unix seconds)
+//   repository         the repository it searches
+//   trace              its trace directory's name, under the repository's .bon/traces
+//   background         whether no one waits on it (bon background), so it is charged no time
+//   search, kind, goal, attempt, tree, started
+//                      the search it runs now: its index in this process's
+//                      traces, its kind and goal, the attempt, the tree it
+//                      starts from, and when it started; null between searches
+// An entry whose pid and start time no longer match a live process is stale:
+// it is ignored and removed.
+
+/// This process's entry, once it has one.
+static ENTRY: std::sync::Mutex<Option<(PathBuf, serde_json::Value)>> = std::sync::Mutex::new(None);
+
+/// When each of `pids` started, by ps: unix seconds, now less its elapsed
+/// time (`etime`), so to the second. A pid ps does not list is no live process.
+fn started_at(pids: &[u64]) -> HashMap<u64, u64> {
+    if pids.is_empty() { return HashMap::new(); }
+    let list: Vec<String> = pids.iter().map(u64::to_string).collect();
+    let out = Command::new("ps").args(["-o", "pid=,etime=", "-p", &list.join(",")]).stdin(Stdio::null()).stderr(Stdio::null()).output();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    // [[dd-]hh:]mm:ss
+    let elapsed = |t: &str| -> Option<u64> {
+        let (days, rest) = match t.split_once('-') { Some((d, r)) => (d.parse::<u64>().ok()?, r), None => (0, t) };
+        Some(days * 86400 + rest.split(':').try_fold(0u64, |a, p| Some(a * 60 + p.parse::<u64>().ok()?))?)
+    };
+    out.map(|o| String::from_utf8_lossy(&o.stdout).lines().filter_map(|l| {
+        let mut f = l.split_whitespace();
+        Some((f.next()?.parse().ok()?, now.saturating_sub(elapsed(f.next()?)?)))
+    }).collect()).unwrap_or_default()
+}
+
+/// Whether an entry's pid and start time match a live process: the pid is
+/// one, started within a second or two of the entry's start (ps says the
+/// start to the second, from the elapsed time).
+fn matches_live(entry: &serde_json::Value, live: &HashMap<u64, u64>) -> bool {
+    let (Some(pid), Some(start)) = (entry["pid"].as_u64(), entry["start"].as_u64()) else { return false };
+    live.get(&pid).is_some_and(|s| s.abs_diff(start) <= 2)
+}
+
+/// The process list's directory, in the user layer's state.
+fn process_list() -> Option<PathBuf> { state("processes") }
+
+/// Every entry of the process list, read: those whose pid and start time
+/// match a live process, and the pids of the stale ones, which are removed.
+fn read_processes() -> (Vec<serde_json::Value>, Vec<u64>) {
+    let Some(d) = process_list() else { return (Vec::new(), Vec::new()) };
+    let entries: Vec<(PathBuf, serde_json::Value)> = std::fs::read_dir(&d).into_iter().flatten().flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+        .filter_map(|e| Some((e.path(), serde_json::from_slice(&std::fs::read(e.path()).ok()?).ok()?))).collect();
+    let live = started_at(&entries.iter().filter_map(|(_, v)| v["pid"].as_u64()).collect::<Vec<_>>());
+    let (mut running, mut ended) = (Vec::new(), Vec::new());
+    for (p, v) in entries {
+        if matches_live(&v, &live) { running.push(v); } else {
+            let _ = std::fs::remove_file(&p);
+            if let Some(pid) = v["pid"].as_u64() { ended.push(pid); }
+        }
+    }
+    (running, ended)
+}
+
+/// The bon processes the process list says are running, every repository's.
+pub fn processes() -> Vec<serde_json::Value> { read_processes().0 }
+
+/// The pids of the bon processes the process list says ended without taking
+/// themselves off (their entries, stale, are removed).
+fn ended_processes() -> Vec<String> { read_processes().1.iter().map(u64::to_string).collect() }
+
+/// Write this process's entry, whole, then renamed into place.
+fn write_entry(path: &std::path::Path, entry: &serde_json::Value) {
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, entry.to_string()).is_ok() { let _ = std::fs::rename(&tmp, path); }
+}
+
+/// This bon process, which searches in `root`, enters the process list, and
+/// its time starts being charged as its searches run (`CHARGE`).
+pub fn enter(root: &std::path::Path) {
+    let pid = std::process::id();
+    let Some(start) = started_at(&[u64::from(pid)]).get(&u64::from(pid)).copied() else { return };
+    let entry = serde_json::json!({
+        "pid": pid, "start": start, "repository": root.to_string_lossy(), "trace": null,
+        "background": BACKGROUND.load(std::sync::atomic::Ordering::SeqCst),
+        "search": null, "kind": null, "goal": null, "attempt": null, "tree": null, "started": null,
+    });
+    if let Some(d) = process_list() {
+        let path = d.join(format!("{pid}.{start}.json"));
+        write_entry(&path, &entry);
+        *ENTRY.lock().unwrap_or_else(|e| e.into_inner()) = Some((path, entry));
+    }
+    std::thread::spawn(|| loop { std::thread::sleep(Duration::from_secs(1)); charge(); });
+}
+
+/// Change this process's entry (a search starts or ends), and write it.
+fn update_entry(f: impl FnOnce(&mut serde_json::Value)) {
+    if let Some((path, entry)) = ENTRY.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        f(entry);
+        entry["background"] = serde_json::json!(BACKGROUND.load(std::sync::atomic::Ordering::SeqCst));
+        write_entry(path, entry);
+    }
+}
+
+/// This bon process takes itself off the process list.
+fn leave() {
+    if let Some((path, _)) = ENTRY.lock().unwrap_or_else(|e| e.into_inner()).take() { let _ = std::fs::remove_file(path); }
+}
+
+// ── engineer's time ─────────────────────────────────────
+//
+// Engineer's time is charged once per wall-clock interval in which a search
+// he waits on runs, split equally among the searches running in it: those of
+// every bon process on the process list (every repository's) that is not
+// background. A background search is charged nothing, and counts in no split.
+
+/// The running search's charge: the seconds charged to it so far, and since
+/// when, split among how many waited-on searches.
+struct Charge { charged: f64, since: Instant, among: f64 }
+
+static CHARGE: std::sync::Mutex<Option<Charge>> = std::sync::Mutex::new(None);
+
+/// How many searches someone waits on run now, by the process list, this
+/// process's own counted; at least one. Whether each entry's process is live
+/// is asked (one ps) every thirty seconds; between, the entries as they are.
+fn waited_on() -> f64 {
+    static ASKED: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    let ask = { let mut a = ASKED.lock().unwrap_or_else(|e| e.into_inner());
+        let due = a.is_none_or(|t| t.elapsed() >= Duration::from_secs(30)); if due { *a = Some(Instant::now()); } due };
+    let entries: Vec<serde_json::Value> = if ask { processes() } else {
+        process_list().map(|d| std::fs::read_dir(d).into_iter().flatten().flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".json"))
+            .filter_map(|e| serde_json::from_slice(&std::fs::read(e.path()).ok()?).ok()).collect()).unwrap_or_default()
+    };
+    waiting(&entries)
+}
+
+/// How many of `entries`' searches someone waits on: those running (started)
+/// that are not background; at least one, the search being charged.
+fn waiting(entries: &[serde_json::Value]) -> f64 {
+    entries.iter().filter(|p| !p["started"].is_null() && p["background"] != true).count().max(1) as f64
+}
+
+impl Charge {
+    /// Charge the time since the last charge, split `among` the searches that
+    /// ran in it; from now on, split among `next`.
+    fn to(&mut self, now: Instant, next: f64) {
+        self.charged += (now - self.since).as_secs_f64() / self.among;
+        self.since = now;
+        self.among = next;
+    }
+}
+
+/// Charge the running search the time since the last charge, its share of it.
+fn charge() {
+    let among = if CHARGE.lock().unwrap_or_else(|e| e.into_inner()).is_some() { waited_on() } else { return };
+    if let Some(c) = CHARGE.lock().unwrap_or_else(|e| e.into_inner()).as_mut() { c.to(Instant::now(), among); }
+}
+
+/// A search starts: its entry says so, and its charge starts at nothing.
+fn search_started(root: &std::path::Path, search: usize, kind: &Kind, a: usize, tree: &str) {
+    let (k, goal) = label(kind);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let trace = trace_dir(root).file_name().map_or(String::new(), |n| n.to_string_lossy().to_string());
+    update_entry(|e| {
+        e["trace"] = serde_json::json!(trace);
+        e["search"] = serde_json::json!(search); e["kind"] = serde_json::json!(k); e["goal"] = serde_json::json!(goal);
+        e["attempt"] = serde_json::json!(a); e["tree"] = serde_json::json!(tree); e["started"] = serde_json::json!(now);
+    });
+    let among = waited_on();
+    *CHARGE.lock().unwrap_or_else(|e| e.into_inner()) = Some(Charge { charged: 0.0, since: Instant::now(), among });
+}
+
+/// A search ends: what engineer's time it was charged, in seconds (none
+/// for background work), and its entry says no search runs.
+fn search_ended() -> f64 {
+    charge();
+    let charged = CHARGE.lock().unwrap_or_else(|e| e.into_inner()).take().map_or(0.0, |c| c.charged);
+    update_entry(|e| for k in ["search", "kind", "goal", "attempt", "tree", "started"] { e[k] = serde_json::Value::Null; });
+    if BACKGROUND.load(std::sync::atomic::Ordering::SeqCst) { 0.0 } else { charged }
+}
+
 pub const MANIFEST: &str = ".bon/bon.toml";
 pub const QUEUE: &str = ".bon/queue.tsv";
 pub const SBOM: &str = ".bon/sbom.json";
@@ -2920,8 +3276,8 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, p: &Pro
     env.push(("BON_HOST", config.host.to_string_lossy().to_string()));
     if let Some(c) = &p.run.client { env.push(("BON_CLIENT", c.clone())); }
     if let Some(c) = p.run.context { env.push(("BON_CONTEXT", c.to_string())); }
-    let c = as_agent_on(config, &with_wrapper(config, config.path.clone()), &dir, &env, &argv);
-    let run = supervised(c, Some(text), Duration::from_secs(config.agent_process.time), &trace.join("program"), spoke);
+    let c = as_user(config, Who::Agent, &with_wrapper(config, config.path.clone()), &dir, &env, &argv);
+    let run = supervised(c, Who::Agent, Some(text), Duration::from_secs(config.agent_process.time), &trace.join("program"), spoke);
     let started = !never_started(&run);
     let silent = !run.killed && run.stdout.is_empty() && run.exit != Some(0);
     let (stdout, killed, exit) = (run.stdout, run.killed, run.exit);
@@ -2934,7 +3290,7 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, p: &Pro
     if killed { write_trace(&trace.join("killed"), "time limit"); }
     // The judge's build: a fresh clone of trunk's, which no agent process wrote,
     // made only if a check must run (the verdict cache may answer them all).
-    let judge = judge_build(&format!("{search}.{index}.judge/build"));
+    let judge = named_build(&format!("{search}.{index}.judge/build"), Start::Trunk);
     // What its checks said is kept with it, for a push or landing to check again.
     let (captured, decided) = deciding(|| capture(m, kind, search, index, start, &dir, &judge, target, foils, trace));
     if let Ok(c) = &captured { keep_decided(&c.commit.iter().collect::<String>(), decided); }
@@ -3066,7 +3422,7 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
     let mut commit = commit;
     let mut written: Option<Vec<u8>> = None;
 
-    // Checks run in a read-only checkout, as agent.
+    // Checks run in a read-only checkout, as the slot's user.
     let cdir = scratch(&format!("{search}.{index}.check/{}", repository_name(root)));
     check_directory(root, &commit, &cdir)?;
     // Keyed by the candidate's tree: a byte-identical sibling's checks run once.
@@ -3352,8 +3708,7 @@ fn verdicts(m: &Manifest, tasks: &[(String, PathBuf)], test: &[u8], name: &str) 
                     let make = || {
                         // From trunk's build, whose shared files it links (a judge's
                         // build's copy of them would be new files again).
-                        let warm = warm_build();
-                        let d = clone_build(config, warm.as_deref(), &format!("{name}.verdict.{i}/build")).ok()?;
+                        let d = named_build(&format!("{name}.verdict.{i}/build"), Start::Trunk);
                         *made.lock().unwrap() = Some(d.clone());
                         Some(d)
                     };
@@ -3367,7 +3722,7 @@ fn verdicts(m: &Manifest, tasks: &[(String, PathBuf)], test: &[u8], name: &str) 
 }
 
 /// Whether a test accepts `commit`: a read-only checkout of it with the test at
-/// the counterexample path, run as agent.
+/// the counterexample path, run as a check slot's user.
 /// The tree a counterexample's test builds on: the selected candidate it tests,
 /// or trunk's head.
 fn tested_tree(kind: &Kind, target: Option<&Search>, start: &str) -> String {
@@ -3508,7 +3863,7 @@ mod tests {
 
     #[test]
     fn the_pools_are_sized_from_the_host_file() {
-        let host = |keys: &str| -> Host { toml::from_str(&format!("{keys}\npath = []\nrustup_home = \"\"\ncargo_home = \"\"\n[prices]\n")).unwrap() };
+        let host = |keys: &str| -> Host { toml::from_str(&format!("{keys}\nuser = \"/u\"\npath = []\nrustup_home = \"\"\ncargo_home = \"\"\n[prices]\n")).unwrap() };
         // queue 26: width stays what bon.toml says; the pools bound what runs at once.
         // queue 54: the host file sets both pools directly.
         assert_eq!(Pools::of(&host("agent_processes = 500\ncheck_processes = 3\ncheck_threads = 4")), Pools { agent_processes: 500, check_processes: 3, threads: 4 });
@@ -3653,8 +4008,8 @@ mod tests {
         c.checks.time = 2;
         let tree = format!("test-tree-{}-{:?}", std::process::id(), Instant::now());
         let on = On { tree: tree.clone(), test: None, cache: Cache::Use };
-        // Run as agent (bon's judge runs bon's own tests so), bon keeps no cache at all.
-        if is_agent() { assert_eq!(verdict_key(&c, &on, "echo hi"), None); return; }
+        // Run confined (bon's judge runs bon's own tests as a slot's user), bon keeps no cache at all.
+        if confined() { assert_eq!(verdict_key(&c, &on, "echo hi"), None); return; }
         let key = verdict_key(&c, &on, "echo hi").unwrap();
         // Each part of the key changes it; no tree, no key.
         assert_ne!(Some(key.clone()), verdict_key(&c, &on, "echo ho"));
@@ -3835,6 +4190,7 @@ mod tests {
 
     /// The tests' host file: no prices beyond these, a verdict cache of their own (never /tmp/bon's).
     const TEST_HOST: &str = r#"
+            user = "/the-tests-user-layer"
             path = ["/usr/bin", "/bin"]
             rustup_home = "/opt/bon/rustup"
             cargo_home = "/opt/bon/cargo-home"
@@ -3867,12 +4223,13 @@ mod tests {
             foil = { role = "deep", n = [3] }
         "#;
 
-    /// The tests' verdict cache: under the system's temporary directory, so
-    /// bon's tests leave nothing in /tmp/bon (queue 86).
-    fn test_verdicts() -> PathBuf { std::env::temp_dir().join(format!("bon-test-verdicts-{}", std::process::id())) }
+    /// The tests' user layer (its state: their verdict cache, their process
+    /// list): under the system's temporary directory, so bon's tests leave
+    /// nothing in /tmp/bon (queue 86) or in the host's user layer.
+    fn test_user() -> PathBuf { std::env::temp_dir().join(format!("bon-test-user-{}", std::process::id())) }
 
     fn config() -> Config {
-        let host: Host = toml::from_str(&format!("verdicts = {:?}\n{TEST_HOST}", test_verdicts().to_string_lossy())).unwrap();
+        let host: Host = toml::from_str(&TEST_HOST.replace("/the-tests-user-layer", &test_user().to_string_lossy())).unwrap();
         with_host(toml::from_str(TEST_MANIFEST).unwrap(), host, std::path::Path::new("/test/host.toml")).unwrap()
     }
 
@@ -4103,17 +4460,105 @@ mod tests {
         assert_eq!(claim(&d, 4242, 1000), "4242.1001");
         assert_eq!((trace_process("4242"), trace_process("4242.1000"), trace_process("proposals"), trace_process("1.x")),
                    (Some((4242, 0)), Some((4242, 1000)), None, None));
-        // Of a live pid, only its latest run is running: the earlier one ended.
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn a_check_slot_s_user_writes_its_own_build_directory_alone() {
+        // queue 62, 57, 56: what a candidate's check runs as (its slot's user) writes its own build directory, and
+        // neither another slot's nor a kept trunk build; agent writes none of them; neither reads bon's state.
+        let mut c = config();
+        let asks = |who: Who| !confined() && run_as(who, &["/usr/bin/true"]).status().is_ok_and(|s| s.success());
+        // Confined (a candidate's tests), there is no one to ask as; otherwise bon setup made the slot users.
+        if confined() { return; }
+        // Two slots held, as checks hold them: their users run nothing else meanwhile.
+        c.pools.check_processes = c.pools.check_processes.max(2);
+        let held = [Slot::check(&c), Slot::check(&c)];
+        let (one, two) = (Who::Check(held[0].slot()), Who::Check(held[1].slot()));
+        assert!(asks(one) && asks(two), "no check slot users: run bon setup");
+        let can = |who: Who, argv: &[&str]| run_as(who, argv).status().is_ok_and(|s| s.success());
+        let (b0, b1) = (named_build("slot-test.0/build", Start::Empty), named_build("slot-test.1/build", Start::Empty));
+        assert!(ensure_build(&c, &b0, one) && ensure_build(&c, &b1, two));
+        let file = |d: &PathBuf| d.join("x").to_string_lossy().to_string();
+        assert!(can(one, &["/usr/bin/touch", &file(&b0)]), "a slot's user writes its own build directory");
+        assert!(!can(one, &["/usr/bin/touch", &file(&b1)]), "and not another slot's");
+        assert!(!can(one, &["/bin/ls", &b1.to_string_lossy()]), "nor reads it");
+        assert!(!can(Who::Agent, &["/usr/bin/touch", &file(&b0)]), "agent writes no slot's build directory");
+        // A slot's build is made again, empty, for another slot's user: nothing of the first stays.
+        assert!(ensure_build(&c, &b0, two) && !b0.join("x").exists());
+        assert!(can(two, &["/usr/bin/touch", &file(&b0)]) && !can(one, &["/usr/bin/touch", &file(&b0)]));
+        remove_build(&c, &b0);
+        remove_build(&c, &b1);
+        assert!(!b0.exists() && !b1.exists(), "removed by its user, then engineer");
+        // A kept build, as `keep` leaves one: read, never written.
+        let kept = scratch("slot-test.kept");
+        std::fs::create_dir_all(kept.join("build")).unwrap();
+        std::fs::write(kept.join("build/lib.rlib"), "").unwrap();
+        sh(&kept, "chmod", &["-R", "go-w", "."]).unwrap();
+        for who in [Who::Agent, one] {
+            assert!(can(who, &["/bin/cat", &kept.join("build/lib.rlib").to_string_lossy()]), "{who:?} reads a kept build");
+            assert!(!can(who, &["/usr/bin/touch", &kept.join("build/lib.rlib").to_string_lossy()]), "{who:?} writes no kept build");
+            assert!(!can(who, &["/usr/bin/touch", &kept.join("build/new").to_string_lossy()]), "{who:?} adds to no kept build");
+        }
+        // bon's state, in the user layer: no confined user reads, writes or searches it.
+        let state = state_dir().unwrap();
+        for who in [Who::Agent, one, two] {
+            assert!(!can(who, &["/bin/ls", &state.to_string_lossy()]), "{who:?} lists no state");
+            assert!(!can(who, &["/usr/bin/touch", &state.join("x").to_string_lossy()]), "{who:?} writes no state");
+        }
+        // What a check leaves running is stopped before the slot's next check.
+        let mut left = Command::new("sudo").args(["-n", "-u", &one.name(), "/bin/sleep", "60"]).spawn().unwrap();
+        std::thread::sleep(Duration::from_millis(500));
+        vacate(held[0].slot());
+        let start = Instant::now();
+        while left.try_wait().unwrap().is_none() && start.elapsed() < Duration::from_secs(5) { std::thread::sleep(Duration::from_millis(100)); }
+        assert!(left.try_wait().unwrap().is_some(), "vacate stops what a slot's user left running");
+        let _ = std::fs::remove_dir_all(&kept);
+        for p in ["slot-test.0", "slot-test.1"] { let _ = std::fs::remove_dir_all(scratch(p)); }
+    }
+
+    #[test]
+    fn engineers_time_is_charged_once_split_among_the_searches_he_waits_on() {
+        // queue 59: every running search but a background one is waited on, across bon processes and repositories.
+        let e = |started: Option<u64>, background: bool| serde_json::json!({ "started": started, "background": background });
+        assert_eq!(waiting(&[e(Some(1), false), e(Some(2), false), e(Some(3), true), e(None, false)]), 2.0);
+        assert_eq!(waiting(&[]), 1.0);
+        // 2 s alone, then 4 s beside another, then 2 s alone again: 2 + 4/2 + 2 = 6 s charged.
+        let t = Instant::now();
+        let mut c = Charge { charged: 0.0, since: t, among: 1.0 };
+        c.to(t + Duration::from_secs(2), 2.0);
+        c.to(t + Duration::from_secs(6), 1.0);
+        c.to(t + Duration::from_secs(8), 1.0);
+        assert!((c.charged - 6.0).abs() < 1e-9, "{}", c.charged);
+        // The other search, over the same 4 s, is charged the other half: the interval once.
+        let mut d = Charge { charged: 0.0, since: t + Duration::from_secs(2), among: 2.0 };
+        d.to(t + Duration::from_secs(6), 1.0);
+        assert!((c.charged + d.charged - 8.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_process_list_holds_each_running_bon_process_and_drops_a_stale_one() {
+        // queue 58: an entry by pid and start time; one whose pid and start no longer match a live process is ignored and removed.
+        let _ = config();
+        let Some(list) = process_list() else { assert!(confined(), "the tests' user layer has a state"); return };
         let mut live = Command::new("sleep").arg("30").spawn().unwrap();
-        let pid = live.id();
-        std::fs::create_dir_all(d.join(pid.to_string())).unwrap();
-        assert!(trace_running(&d, &pid.to_string()));
-        std::fs::create_dir_all(d.join(format!("{pid}.5"))).unwrap();
-        assert!(!trace_running(&d, &pid.to_string()) && trace_running(&d, &format!("{pid}.5")));
+        let mut dead = Command::new("true").spawn().unwrap();
+        let _ = dead.wait();
+        let (pid, gone) = (u64::from(live.id()), u64::from(dead.id()));
+        let start = started_at(&[pid])[&pid];
+        let entry = |pid: u64, start: u64, started: Option<u64>, background: bool| serde_json::json!({ "pid": pid, "start": start,
+            "repository": "/r", "trace": pid.to_string(), "background": background, "started": started });
+        let files = [(pid, start, Some(1), false), (pid, start + 100, Some(1), false), (gone, start, Some(1), false)]
+            .map(|(p, s, st, b)| { let f = list.join(format!("{p}.{s}.json")); write_entry(&f, &entry(p, s, st, b)); f });
+        let (running, ended) = read_processes();
+        // The live one is running; the same pid with another start (a reused pid), and a dead pid, ended.
+        assert!(running.iter().any(|e| e["pid"] == pid && e["start"] == start));
+        assert!(!running.iter().any(|e| e["start"] == start + 100 || e["pid"] == gone));
+        assert!(ended.contains(&pid) && ended.contains(&gone));
+        assert!(files[0].exists() && !files[1].exists() && !files[2].exists(), "a stale entry is removed");
+        let _ = std::fs::remove_file(&files[0]);
         let _ = live.kill();
         let _ = live.wait();
-        assert!(!trace_running(&d, &format!("{pid}.5")));
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -4135,7 +4580,7 @@ mod tests {
         let waiter = std::thread::spawn(move || { s.wait(); start.elapsed() });
         let mut c = Command::new("/bin/sh");
         c.args(["-c", "echo replying; sleep 2; echo done"]);
-        let r = supervised(c, None, Duration::from_secs(10), &log, Some(spoke));
+        let r = supervised(c, Who::Agent, None, Duration::from_secs(10), &log, Some(spoke));
         let heard = waiter.join().unwrap();
         assert!(r.ok && r.stdout == "replying\ndone\n", "{}", r.stdout);
         assert!(heard < Duration::from_millis(1500), "{heard:?}");
@@ -4148,7 +4593,7 @@ mod tests {
         let log = std::env::temp_dir().join(format!("bon-supervise-test-{}", std::process::id()));
         let c = as_agent(&config(), std::path::Path::new("/tmp"), &[], &["/bin/sh".into(), "-c".into(), "/bin/sleep 60 & wait".into()]);
         let start = Instant::now();
-        let Run { ok, killed, .. } = supervised(c, None, Duration::from_secs(1), &log, None);
+        let Run { ok, killed, .. } = supervised(c, Who::Agent, None, Duration::from_secs(1), &log, None);
         assert!(!ok && killed, "{}", std::fs::read_to_string(&log).unwrap_or_default());
         assert!(start.elapsed() < Duration::from_secs(6), "{:?}", start.elapsed());
         let _ = std::fs::remove_file(&log);
@@ -4158,7 +4603,7 @@ mod tests {
     fn a_program_that_never_started_is_told_apart_and_why_it_cannot_run_is_said() {
         // M3: spawn failed, or env could not run it (126, 127), with no output: never started.
         let log = std::env::temp_dir().join(format!("bon-started-test-{}", std::process::id()));
-        let run = |c: Command| supervised(c, None, Duration::from_secs(10), &log, None);
+        let run = |c: Command| supervised(c, Who::Agent, None, Duration::from_secs(10), &log, None);
         assert!(never_started(&run(Command::new("/nonexistent/program"))));
         let mut c = Command::new("/usr/bin/env"); c.arg("/etc/hosts");
         let r = run(c);
@@ -4349,7 +4794,7 @@ mod tests {
         let mut config = config();
         let mut m = Manifest { config: config.clone(), root: work.clone() };
         assert_eq!(staged(&m, &base), Ok(()), "no staged checks: nothing runs");
-        if is_agent() { return; }
+        if confined() { return; }
         config.checks.staged = vec!["test -f a".into(), "cat a".into()];
         m.config = config.clone();
         assert_eq!(staged(&m, &base), Ok(()));
@@ -4369,14 +4814,13 @@ mod tests {
     fn a_tree_s_suite_seconds_are_timed_once_and_read_back_alike() {
         // queue 71: bon times the suite on a judged tree; the verdict cache keeps the figure, so a second ranking agrees.
         let (_remote, work, base, _test) = landing_fixture("seconds");
-        if is_agent() { return; }
+        if confined() { return; }
         let mut config = config();
         config.checks.test = vec!["sleep 0.3".into()];
         config.checks.verify = vec!["true".into()];
         let dir = scratch("seconds-test/work");
-        let build = scratch("seconds-test.build/build");
+        let build = named_build("seconds-test.build/build", Start::Empty);
         check_directory(&work, &base, &dir).unwrap();
-        writable_dir(&build).unwrap();
         let trace = std::env::temp_dir().join(format!("bon-seconds-{}", std::process::id()));
         std::fs::create_dir_all(&trace).unwrap();
         let on = On::commit(&work, &base);
@@ -4389,6 +4833,7 @@ mod tests {
         // A run that fails measures nothing.
         config.checks.verify = vec!["false".into()];
         assert_eq!(suite_seconds(&config, &on, &dir, &build, &trace), None);
+        remove_build(&config, &build);
         for p in [dir.parent().unwrap(), build.parent().unwrap(), &trace, work.parent().unwrap()] {
             let _ = Command::new("chmod").args(["-R", "u+w"]).arg(p).status();
             let _ = std::fs::remove_dir_all(p);
@@ -4408,7 +4853,7 @@ mod tests {
         // As they were: the tree has `a`, a written test exits 3, the agree check prints `a`.
         keep_decided("true-verdicts", vec![decided("test -f a", true, "", None), decided("sh t.sh", false, "", Some(("t.sh", b"exit 3"))),
                                            decided("cat a", true, "a", None), decided("test -f a", true, "", None)]);
-        if is_agent() { return; }
+        if confined() { return; }
         assert_eq!(recheck(&m, "true-verdicts"), Ok(()));
         // Planted: the cache said the tests accept what a clean build rejects.
         keep_decided("planted", vec![decided("test -f a", true, "", None), decided("test -f missing", true, "", None)]);
@@ -4449,9 +4894,9 @@ mod tests {
 
     #[test]
     fn the_verdict_key_covers_the_dependency_sources_and_not_the_host_file() {
-        // queue 64: a source the lockfile names changes the key; another file in the registry, or the host's prices, do not.
-        // Run as agent (bon's judge runs bon's own tests so), bon keeps no cache, so no key.
-        if is_agent() { return; }
+        // queue 64, 63: which sources the lockfile names are unpacked changes the key; another file in the registry, or the host's prices, do not.
+        // Run confined (bon's judge runs bon's own tests as a slot's user), bon keeps no cache, so no key.
+        if confined() { return; }
         let d = std::env::temp_dir().join(format!("bon-deps-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         let (repo, home) = (d.join("repo"), d.join("cargo-home"));
@@ -4481,15 +4926,16 @@ mod tests {
         priced.prices.clear();
         priced.pools = Pools { agent_processes: 7, check_processes: 7, threads: c.pools.threads };
         assert_eq!(verdict_key(&priced, &on, "cargo test"), Some(key.clone()));
-        // An edit to a source the lockfile names, even of the same size: another digest, and another key.
-        std::fs::write(&source, "pub fn g() {}\n").unwrap();
+        // queue 63: the sources are engineer's, unpacked once from what the
+        // lockfile pins, so their bytes are the lockfile's to say; whether a
+        // package is unpacked yet (its .cargo-ok) is not: unpacking it changes the key.
+        std::fs::write(source.parent().unwrap().parent().unwrap().join(".cargo-ok"), "{\"v\":1}").unwrap();
         let after = dependencies(&c, &tree, true);
         assert_ne!(after, before);
         assert_ne!(verdict_key(&c, &on, "cargo test"), Some(key.clone()));
-        // Written back byte for byte: the digest is of the bytes, so the first key again.
-        std::fs::write(&source, "pub fn f() {}\n").unwrap();
-        assert_eq!(dependencies(&c, &tree, true), before);
-        assert_eq!(verdict_key(&c, &on, "cargo test"), Some(key));
+        // An edit to its bytes, which no candidate can make: the same key.
+        std::fs::write(&source, "pub fn g() {}\n").unwrap();
+        assert_eq!(dependencies(&c, &tree, true), after);
         let _ = std::fs::remove_dir_all(&d);
     }
 

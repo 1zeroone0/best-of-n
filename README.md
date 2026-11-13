@@ -51,7 +51,7 @@ bon
 | `bon pending [--transcript FILE]` | what only you can answer, oldest first: what happened, the choices and what each costs |
 | `bon new <name>` | set up a project: a spec with the core nouns, its gates, an empty implementation, the manifest and the queue |
 | `bon init` | create a manifest and queue in this git repository |
-| `bon setup [--dry-run] [--for USER]` | create user agent and group bon, and let USER (default: you) run commands as agent; run it as an administrator |
+| `bon setup [--dry-run] [--for USER]` | create users agent and check0, check1, … (one per check slot) and group bon, and let USER (default: you) run commands as each; run it as an administrator |
 | `bon cost` | write .bon/cost.toml, what reaching trunk cost (bon does after each push) |
 | `bon view [--state \| --frame WxH [--tab N] [--focus K] [--light]]` | the view, as bon opens it in a terminal; --state, its projection as JSON; --frame, one frame of it as HTML |
 | `bon help` | every command, its arguments and what it does |
@@ -62,7 +62,8 @@ bon
 **You decide** the spec and the checks; the [queue](.bon/queue.tsv) holds what
 is wanted and not yet in the spec. **Search decides** the rest, as the POSIX
 user `agent`, which can read the checks and write only its own working
-directory. bon works on git's objects and the remote's trunk, never your
+directory; each check runs as its check slot's own user (`check0`, `check1`,
+…), which writes only its own build directory. bon works on git's objects and the remote's trunk, never your
 working tree: edit while it searches, and pull to follow. Every search's record
 goes to a private git remote of its own, never this repository.
 
@@ -116,14 +117,22 @@ which no other candidate runs: one that fails stops bon as a suspect check
 does, and nothing is pushed. A compaction candidate's rank = its `rank`
 command's integer − its suite's seconds, rounded (each test and verify check
 run again once built, timed by bon, kept with the verdict, so a tree is timed
-once per host).
+once per user layer).
 
+- **Isolated, as the policy states and the isolated gate observes before
+  every search:** each check runs as the user of the check slot it holds, in
+  a build directory only that user may enter, made a fresh clone of trunk's
+  kept build for it; nothing a slot's earlier check left running survives
+  into its next. No agent process and no check can write another slot's
+  build, trunk's kept builds, the checks' toolchain or the dependency sources
+  it compiles (engineer's), or reach bon's state (the verdict cache, the
+  process list), which lives in the user layer's `.bon`.
 - **Trusted, and not isolated:** agent processes all run as one user, so one
-  could write another's working directory, or build directory. A candidate's
-  checks build in a fresh clone of trunk's build, never the one its agent
-  process built in, but another candidate's check, running as the same user,
-  could still write there. Isolating them from each other is a reference
-  monitor's job, not bon's.
+  could write another's working directory, or its own build directory, which
+  no check uses. Every user can write the world-writable directories (`/tmp`),
+  so a check could leave a file there that a later check reads: a check that
+  reads outside its tree and the toolchain is not a function of what its key
+  says. Closing those is a sandbox's job (a reference monitor), not bon's.
 - **Next to Rust's types:** types keep a commit from passing as a path; Verus proves
   what a type cannot say, such as "this is the one candidate the spec selects".
 - **Next to Lean:** Lean checks a proof term in a small kernel, about a model of the

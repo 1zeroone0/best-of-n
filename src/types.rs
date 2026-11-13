@@ -26,6 +26,23 @@ enum Item {
     Const { name: String, value: String },
 }
 
+impl Item {
+    /// What it declares.
+    fn name(&self) -> &str {
+        match self { Item::Alias { name, .. } | Item::Identity { name } | Item::Struct { name, .. } | Item::Enum { name, .. } | Item::Const { name, .. } => name }
+    }
+
+    /// The types it names: its fields', or what it aliases.
+    fn types(&self) -> Vec<String> {
+        match self {
+            Item::Alias { ty, .. } => vec![ty.clone()],
+            Item::Struct { fields, .. } => fields.iter().map(|f| f.ty.clone()).collect(),
+            Item::Enum { variants, .. } => variants.iter().flat_map(|(_, f)| f.iter().map(|f| f.ty.clone())).collect(),
+            _ => Vec::new(),
+        }
+    }
+}
+
 struct Field { name: String, ty: String, doc: Vec<String> }
 
 struct Declared { doc: Vec<String>, item: Item }
@@ -293,9 +310,25 @@ pub fn targets(root: &Path, manifest: &toml::Value) -> Result<Vec<(String, Strin
     let from: Vec<String> = p.get("from").and_then(|v| v.as_array()).ok_or("[types] needs from = [the files holding the kernel's types]")?
         .iter().filter_map(|v| v.as_str().map(String::from)).collect();
     let mut items = Vec::new();
+    let mut reexported: Vec<Declared> = Vec::new();
     for f in &from {
-        items.extend(declarations(&std::fs::read_to_string(root.join(f)).map_err(|e| format!("{f}: {e}"))?));
+        let text = std::fs::read_to_string(root.join(f)).map_err(|e| format!("{f}: {e}"))?;
+        items.extend(declarations(&text));
+        // `pub use crate::<module>::{A, B};`: the module's declarations of A and B.
+        for l in text.lines() {
+            let Some((module, names)) = l.strip_prefix("pub use crate::").and_then(|r| r.split_once("::{")) else { continue };
+            let names: Vec<&str> = names.trim_end_matches("};").split(',').map(str::trim).collect();
+            let file = Path::new(f).with_file_name(format!("{module}.rs"));
+            let text = std::fs::read_to_string(root.join(&file)).map_err(|e| format!("{}: {e}", file.display()))?;
+            reexported.extend(declarations(&text).into_iter().filter(|d| names.contains(&d.item.name())));
+        }
     }
+    // A type the spec declares and a `from` file re-exports is emitted, first,
+    // where an emitted declaration names it.
+    let named: Vec<String> = items.iter().flat_map(|d| d.item.types()).flat_map(|t| t.split(|c: char| !c.is_alphanumeric() && c != '_').map(String::from).collect::<Vec<_>>()).collect();
+    let declared: Vec<&str> = items.iter().map(|d| d.item.name()).collect();
+    let used: Vec<Declared> = reexported.into_iter().filter(|d| named.iter().any(|n| n == d.item.name()) && !declared.contains(&d.item.name())).collect();
+    let items: Vec<Declared> = used.into_iter().chain(items).collect();
     let names = from.join(", ");
     let mut out = Vec::new();
     for (lang, path) in p.get("types").and_then(|v| v.as_table()).into_iter().flatten() {
