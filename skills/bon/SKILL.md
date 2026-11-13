@@ -143,19 +143,23 @@ The repository holds the words; this skill does not repeat them.
   reused: a new id is one more than any the queue has held (`bon check` fails
   on a retired id and names the next).
 - `.bon/bon.toml`, the manifest: checks (`paths`, `test`, `verify`, `agree`,
-  `rank`), harnesses (`name`, `model`, an optional `command` that replaces
-  the built-in one; `name = "stub"` runs no model) and width lists `n`,
-  limits, `rate`, `[counterexample]` (`harness`, `path`, `build`, `run`,
-  `tests`, `visible`), `[sbom]`, `[programs]`, trunk.
+  `rank`, and `time`, each check's cutoff), `[searches]` (for each kind, code,
+  compaction, queue, counterexample and foil, a `role` and its width list
+  `n`), limits, `rate`, `[counterexample]` (`path`, `build`, `run`, `tests`,
+  `visible`), `[sbom]`, `[types]`, trunk.
 - `/etc/bon/host.toml`, the host file: agent's `path`, the toolchain's homes,
-  model `prices`, and two semaphores shared by every bon process on the host:
-  `generation` (agent processes at once) and `checks` (checks at once, the
-  judge's and every cargo an agent process runs), with `check_threads` per
-  check. `BON_HOST` names another host file, as a benchmark does.
-- `bon-sample`: a harness that makes one model call (context in, edits out)
-  through the API, the claude CLI or the codex CLI. Program code: bon's checks
-  judge what it writes.
-- `bench/`: how bon itself scales, on stub harnesses in a sandbox with a
+  `[roles]` (each role's `program`, an argv bon appends `--model` to; its
+  `client`, claude, codex or api; its `model`; a one-shot program's
+  `context`, the largest prompt in tokens; a role with no client and no model
+  is a stub), `[api]` (`address`, `key_file`), model `prices`, and two
+  semaphores shared by every bon process on the host: `agent_processes` and
+  `check_processes` (checks at once, the judge's and every cargo an agent
+  process runs), with `check_threads` per check. `BON_HOST` names another
+  host file, as a benchmark does.
+- `bon-sample`: a program that makes one model call (context in, edits out)
+  through its client: the API, the claude CLI or the codex CLI. Program code:
+  bon's checks judge what it writes.
+- `bench/`: how bon itself scales, on stub programs in a sandbox with a
   local bare origin (`bench/README.md`).
 
 ## Two levels
@@ -185,7 +189,7 @@ repository that needs end to end gets deterministic simulation under one seed.
 **Widths.** Searches are Monte Carlo: go wide. A push is Las Vegas: whatever
 reaches trunk passed every gate; only the time to it varies. A search costs a
 fixed part plus a part per distinct tree, and the fixed part sets the
-narrowest search worth running. The host's `generation` and `checks` cap how
+narrowest search worth running. The host's `agent_processes` and `check_processes` cap how
 many agent processes and checks run at once. The model follows the search
 kind, not the attempt: a distribution where a check can score, depth where
 only the owner can. Report the spread, not just the winner. Size a run to its
@@ -249,7 +253,7 @@ at a time.
 | what reaching trunk cost | `bon cost` writes `.bon/cost.toml` (bon does after each push) |
 | before a search, a commit or a push | `bon check` |
 
-**A run's settings** (`n`, harnesses, limits) are read from `.bon/bon.toml`
+**A run's settings** (`n`, roles, limits) are read from `.bon/bon.toml`
 at trunk's head: edit it, commit and push, then run. Each run's settings stay
 in git beside its result.
 
@@ -310,7 +314,7 @@ When bon is slow or will not scale, measure before changing anything.
 8. **Never let a candidate reach how it is judged.** Faster to start and run
    is fair; a shared build, a cached pass or a skipped check that a candidate
    could influence is not.
-9. **Say which numbers are stubs.** A stub measures bon; only real samples
+9. **Say which numbers are stubs.** A stub measures bon; only real models
    measure the search. Predict before each run and report where you were wrong.
 10. **Hand long runs to another session** with the brief in full: the goal,
     what is ruled out, the safety rules, what to report. Verify its claims
@@ -340,18 +344,24 @@ when an earlier bon process of the same pid left a trace.
 
 - `.bon/traces/<pid>/transitions`: each transition, by its spec name, with
   its arguments; the lines that are not transitions (selected, disagreed,
-  blocked, not found, proposal) say what the bon process concluded.
+  blocked, not found, proposal) say what the bon process concluded, and
+  `exited: <error>` that it ended on an error.
 - `.bon/traces/<pid>/searches.jsonl`: each search's `agent_processes`,
   `verified`, `generation_dollars`, `seconds`, `rate`, `time_dollars`,
-  `cost_per_verified_candidate`.
+  `cost_per_verified_candidate`, and `host` (the `agent_processes` and
+  `check_processes` in force).
 - `.bon/traces/<pid>/<search>/<index>/facts.json`: each agent process's
-  `harness`, `model`, cost and `prices`, and its `candidate` (`commit`,
-  `accepted`, `proved`, `changed`, `diff`, `rank`, `out`, `accepts`,
-  `rejects_counterexamples`).
+  `program`, `role`, `client`, `model`, cost and `prices`,
+  `requests_over_tier`, and its `candidate` (`commit`, `accepted`, `proved`,
+  `changed`, `added`, `diff`, `lines_added`, `lines_removed`, `rank`, `out`,
+  `accepts`, `rejects_counterexamples`); its program's log is `program`.
 - `.bon/traces/<pid>/trunk-test-k`, `trunk-verify-k`, `trunk-build`: trunk's
   check logs. A log whose first line is `cached: <key>` was answered by the
   verdict cache (`/tmp/bon/verdicts`, keyed by tree, command, test,
-  toolchain and host file), not run. Trunk's build is kept for later bon
+  toolchain and the dependency sources the lockfile names), not run. What
+  decides a push or a landing runs again from a clean build
+  (`recheck-<commit>-k`); a result that differs stops bon with the check
+  named suspect, and nothing is pushed. Trunk's build is kept for later bon
   processes (`/tmp/bon/trunk-<key>`, engineer's alone), and every build
   directory starts as a clone of it.
 - `.bon/traces/<pid>/pushes.jsonl`: each push's `commit`, `searches`,

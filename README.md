@@ -65,13 +65,16 @@ goes to a private git remote of its own, never this repository.
   every block has exactly one reason; and nothing spends past its limit. Specs
   and proofs are erased; the binary runs only the code they were proved about.
 - **Trusted, not proven:** what bon observes: whether the tests and Verus accepted a
-  candidate, what git says changed, what the harnesses cost; plus Rust's standard
+  candidate, what git says changed, what the programs cost; plus Rust's standard
   library, git, the toolchain, and Verus and Z3 themselves. It is listed in
   `.bon/sbom.json`, and no search may change it, nor `.cargo/` or `build.rs`.
   Checks run with a toolchain under `/opt/bon` that no agent process can write,
   behind bon's own `cargo` (a perl script bon writes, first on PATH), which
   takes a slot of the host's check pool and caps threads. A check's result is
-  cached by its tree, command, test and toolchain, where only engineer can write.
+  cached by what it sees (its tree, command, test, toolchain and the dependency
+  sources its lockfile names), where only engineer can write; what decides a
+  push or a landing is checked again from a clean build, never the cache, and a
+  result that differs stops bon with that check named suspect.
 - **Trusted, and not isolated:** agent processes all run as one user, so one
   could write another's working directory, or build directory. A candidate's
   checks build in a fresh clone of trunk's build, never the one its agent

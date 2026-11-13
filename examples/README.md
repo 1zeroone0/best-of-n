@@ -5,7 +5,7 @@ One pattern: **the kernel decides; programs do effects.**
 1. **The kernel** is Rust under Verus: the spec (`src/spec.rs`), each gate's
    contract (`src/gates.rs`) and the code that meets it (`src/exec.rs`),
    proven. It chooses, validates and schedules, and does no I/O.
-2. **It emits types and data.** `[programs]` in `.bon/bon.toml` names the Rust
+2. **It emits types and data.** `[types]` in `.bon/bon.toml` names the Rust
    files to emit from (`from`) and one types file per language (`types`);
    `bon types` writes them, each type with its `///` sentence; `bon types
    --check` is a test check, so a types file never lags the kernel. The data is
