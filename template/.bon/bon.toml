@@ -1,0 +1,58 @@
+# {{name}}'s manifest, as bon new wrote it. Set the limits and the rate before a search.
+trunk = "main"
+remote = "origin"
+# The bon process's dollar limit, and your hourly rate.
+limit = 0.0
+rate = 0.0
+
+[agent_process]
+# Each agent process's dollar limit, and its seconds.
+limit = 0.0
+time = 3600
+
+[checks]
+# The spec, the gates' contracts, and the types bon types emits from them: no search changes them.
+paths = ["src/spec.rs", "src/gates.rs", "types/"]
+# The tests: a candidate is accepted when each exits 0.
+test = ["cargo test -q"]
+# Verus: an accepted candidate is proved when each exits 0.
+verify = ["cargo verus verify"]
+# Commands whose output verified candidates must agree on.
+agree = []
+rank = { code = "echo 0", compaction = "echo $((0 - $(cat src/*.rs tests/*.rs 2>/dev/null | wc -l)))" }
+# Seconds a check may run before it is stopped.
+time = 1800
+
+# Each search kind's role and its width list; the host file says what each role runs.
+[searches]
+code = { role = "wide", n = [8, 12] }
+compaction = { role = "wide", n = [8, 12] }
+queue = { role = "wide", n = [8, 12] }
+counterexample = { role = "deep", n = [2] }
+foil = { role = "deep", n = [2] }
+
+[counterexample]
+# Where an agent process writes its test, and how it builds and runs.
+path = "tests/counterexample.rs"
+build = "cargo test -q --no-run --test counterexample"
+run = "cargo test -q --test counterexample"
+# Where the counterexamples' tests live on trunk.
+tests = ["tests/"]
+# What a counterexample's writer sees besides the checks and those tests: never the code.
+visible = ["Cargo.toml", "Cargo.lock"]
+
+# What is true of the code: bon account writes it as .bon/account.json (OSCAL)
+# and .bon/sbom.json (CycloneDX). A claimed control is [account.controls.<id>]:
+# a claim, and its evidence named under the status each must have (proven,
+# trusted, configured, tested).
+[account]
+name = "{{name}}"
+trusted = []
+tools = { rustc = "rustc --version", cargo = "cargo --version", verus = "verus --version", git = "git --version" }
+# The catalog the claimed controls are from.
+catalog = "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json"
+
+[types]
+# The types programs are built on: bon types emits them from these files.
+from = ["src/gates.rs"]
+types = { typescript = "types/kernel.ts", go = "types/kernel/kernel.go", python = "types/kernel.py" }

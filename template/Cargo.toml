@@ -1,0 +1,15 @@
+[package]
+name = "{{name}}"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vstd = "=0.0.0-2026-10-18-0147"
+verus_state_machines_macros = "=0.0.0-2026-10-18-0147"
+
+[package.metadata.verus]
+verify = true
+
+# Verus sets these when it verifies; cargo should expect them.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(verus_only)', 'cfg(verus_keep_ghost)', 'cfg(verus_keep_ghost_body)', 'cfg(verus_verify_core)'] }

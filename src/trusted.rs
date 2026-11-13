@@ -6,7 +6,7 @@
 //! It observes and reports facts; it decides nothing. Every decision is a gate.
 //!
 //! Everything bon keeps in a repository is under `.bon/`: the manifest
-//! (bon.toml), the queue (queue.tsv) and the SBOM, tracked; the traces, not.
+//! (bon.toml), the queue (queue.tsv) and the account, tracked; the traces, not.
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -62,9 +62,9 @@ pub struct Config {
     /// Each search kind's role and width list.
     pub searches: Searches,
     pub counterexample: Counterexample,
-    /// What `bon sbom` lists beyond the lockfiles; its `trusted` list is also every search's trusted code.
+    /// The account `bon account` keeps; its `trusted` list is also every search's trusted code.
     #[serde(default)]
-    pub sbom: Option<toml::Value>,
+    pub account: Option<toml::Value>,
     /// What `bon types` emits for programs: read by it alone.
     #[serde(default)]
     pub types: Option<toml::Value>,
@@ -1887,7 +1887,8 @@ fn suite_seconds(config: &Config, on: &On, dir: &std::path::Path, build: &std::p
         }
         let off = On { tree: on.tree.clone(), test: on.test, cache: Cache::Off };
         if !run_check(config, &off, dir, build, command, &log).0 { return None; }
-        let s = RAN.with(|r| r.get());
+        // To the millisecond, as kept: a figure read back sums the same.
+        let s = (RAN.with(|r| r.get()) * 1000.0).round() / 1000.0;
         if let Some(k) = &key { store(k, true, &format!("{s:.3}"), ""); }
         total += s;
     }
@@ -2096,7 +2097,7 @@ fn aim(m: &Manifest, kind: &Kind, target: Option<&Search>, start: &str) -> Strin
 /// configuration, bon's directory (but for a queue search, which writes the
 /// queue there), the trusted code, and for code and foils the counterexamples' tests.
 fn fixed(kind: &Kind, config: &Config) -> Vec<String> {
-    let trusted = config.sbom.as_ref().and_then(|s| s.get("trusted")).and_then(|t| t.as_array()).into_iter().flatten()
+    let trusted = config.account.as_ref().and_then(|s| s.get("trusted")).and_then(|t| t.as_array()).into_iter().flatten()
         .filter_map(|p| p.as_str().map(String::from));
     let bon = (!matches!(kind, Kind::Queue { .. })).then(|| format!("{BON}/"));
     let tests = if matches!(kind, Kind::Code { .. } | Kind::Foil { .. }) { config.counterexample.tests.clone() } else { Vec::new() };
@@ -2182,10 +2183,10 @@ pub fn checks(m: &Manifest) -> Vec<Path> {
 #[verifier::external_body]
 pub fn tests(m: &Manifest) -> Vec<Path> { m.config.counterexample.tests.iter().map(|p| p.chars().collect()).collect() }
 
-/// The trusted code the manifest's SBOM declares: no search may change it.
+/// The trusted code the manifest's account declares: no search may change it.
 #[verifier::external_body]
 pub fn trusted(m: &Manifest) -> Vec<Path> {
-    m.config.sbom.as_ref().and_then(|s| s.get("trusted")).and_then(|t| t.as_array())
+    m.config.account.as_ref().and_then(|s| s.get("trusted")).and_then(|t| t.as_array())
         .map(|a| a.iter().filter_map(|p| p.as_str()).map(|p| p.chars().collect()).collect()).unwrap_or_default()
 }
 

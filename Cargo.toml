@@ -30,6 +30,14 @@ path = "checks/encoding.rs"
 name = "bon-sample"
 path = "checks/bon-sample.rs"
 
+[[test]]
+name = "new"
+path = "checks/new.rs"
+
+[[test]]
+name = "oscal"
+path = "checks/oscal.rs"
+
 [dependencies]
 vstd = "=0.0.0-2026-10-18-0147"
 verus_state_machines_macros = "=0.0.0-2026-10-18-0147"
