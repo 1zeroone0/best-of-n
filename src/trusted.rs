@@ -120,19 +120,105 @@ fn renamed(text: &str, host: bool) -> Result<(), String> {
     Ok(())
 }
 
-/// Cargo reads a config.toml from every ancestor of the directory it builds in.
-/// /tmp is anyone's, so bon makes /tmp/.cargo its own before agent can, and
-/// refuses to run if another user made it first.
-fn cargo_config_guard(root: &std::path::Path) -> Result<(), String> {
+/// The files and directories cargo, rustup and git discover by walking the
+/// working directory's ancestors, each of which decides what a check compiles
+/// or which toolchain runs: cargo's Cargo.toml (a parent `[workspace]` claims
+/// a checkout, a `[patch]` swaps a dependency's source, a `[profile]` changes
+/// its build) and `.cargo` (its config.toml); rustup's `rust-toolchain` and
+/// `rust-toolchain.toml` (which pick the cargo and rustc that run, though
+/// `RUSTUP_TOOLCHAIN` in the checks' environment overrides them); git's
+/// `.git` (hooks, config). A tool reads the nearest in any ancestor, so a
+/// world-writable ancestor (/tmp is 1777) is a writable judge. The names are
+/// the discovery rules of those tools, which have no API to enumerate.
+const ANCESTOR_FILES: [&str; 5] = ["Cargo.toml", ".cargo", "rust-toolchain", "rust-toolchain.toml", ".git"];
+
+/// The ancestors of the working directories, from WORKING_DIRECTORIES up to
+/// the filesystem root, canonicalized (so /tmp is read as /private/tmp).
+fn working_ancestors() -> Vec<PathBuf> {
+    let start = std::fs::canonicalize(WORKING_DIRECTORIES).unwrap_or_else(|_| PathBuf::from(WORKING_DIRECTORIES));
+    let mut out = Vec::new();
+    let mut p: Option<&std::path::Path> = Some(start.as_path());
+    while let Some(d) = p { out.push(d.to_path_buf()); p = d.parent(); }
+    out
+}
+
+/// Claim the `.cargo` directory in every working ancestor as engineer's own
+/// (an empty directory holds no config.toml), so no agent process can create
+/// one there; once per bon process.
+fn claim_ancestor_cargo() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| for a in working_ancestors() { let _ = std::fs::create_dir(a.join(".cargo")); });
+}
+
+/// A signature of the ancestor files a check would read (`ANCESTOR_FILES`),
+/// and a refusal if any is one bon did not make that could decide a check:
+/// owned by neither root nor engineer (`me`), or writable by others. bon
+/// occupies each `.cargo` (an empty directory), but cannot occupy a Cargo.toml
+/// or a toolchain file without breaking a build, so it refuses when one is
+/// present. The signature (each file's inode and mtime) lets a check compare
+/// the state before and after it runs: a file that appears or changes mid-run
+/// voids its verdict. What stays open is a file created in a world-writable
+/// ancestor between one check's signature and the next (the README's "not
+/// isolated"); it closes when the working directories move off /tmp.
+fn ancestor_guard(me: u32) -> Result<String, String> {
+    // Confined (a candidate's checks, which run bon's own tests as a slot's
+    // user): the engineer bon process already guarded the ancestors; a slot's
+    // user is not engineer, so it would read engineer's own .cargo as foreign.
+    if confined() { return Ok(String::new()); }
+    claim_ancestor_cargo();
+    ancestor_guard_over(&working_ancestors(), me)
+}
+
+/// The guard over a given ancestor list (`ancestor_guard`, without the claim).
+fn ancestor_guard_over(dirs: &[PathBuf], me: u32) -> Result<String, String> {
     use std::os::unix::fs::MetadataExt;
-    let d = std::path::Path::new("/tmp/.cargo");
-    let _ = std::fs::create_dir(d);
-    let me = std::fs::metadata(root).map_err(|e| e.to_string())?.uid();
-    let it = std::fs::metadata(d).map_err(|e| format!("/tmp/.cargo: {e}"))?;
-    if it.uid() != me || it.mode() & 0o022 != 0 {
-        return Err("/tmp/.cargo belongs to another user or is writable by others: cargo would read a config.toml from it; remove it, then run again".into());
+    let mut sig = String::new();
+    for a in dirs {
+        for name in ANCESTOR_FILES {
+            let p = a.join(name);
+            let Ok(m) = std::fs::symlink_metadata(&p) else { continue };
+            if (m.uid() != me && m.uid() != 0) || m.mode() & 0o022 != 0 {
+                return Err(format!("{}: a {name} not engineer's or root's, or writable by others; a check would read it; remove it, then run again", p.display()));
+            }
+            sig.push_str(&format!("{}\0{}\0{}\0{}\0", p.display(), m.ino(), m.mtime(), m.mtime_nsec()));
+        }
     }
-    Ok(())
+    Ok(sig)
+}
+
+/// This process's own uid, by `id -u`: engineer, whom bon runs as.
+fn my_uid() -> u32 {
+    static UID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *UID.get_or_init(|| Command::new("id").arg("-u").output().ok()
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok()).unwrap_or(u32::MAX))
+}
+
+/// The uid the guard reads as "mine": the repository's owner (engineer), from
+/// the repository root; this process's own uid when the root cannot be read.
+fn guard_uid(root: &std::path::Path) -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(root).map(|m| m.uid()).unwrap_or_else(|_| my_uid())
+}
+
+/// The toolchain rustup's home has as its default, resolved once per home by
+/// `rustup default` as engineer in the home itself, whose ancestors are root's:
+/// no working-directory toolchain file influences it, so it is the name the
+/// checks must run under (`RUSTUP_TOOLCHAIN`), not one a candidate's file picks.
+/// None if rustup cannot say (then the toolchain files still decide, and the
+/// ancestor guard and BUILD are the defense).
+fn default_toolchain(rustup_home: &str, path: &str) -> Option<String> {
+    static MEMO: std::sync::Mutex<Option<HashMap<String, String>>> = std::sync::Mutex::new(None);
+    {
+        let memo = MEMO.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(tc) = memo.as_ref().and_then(|m| m.get(rustup_home)) { return Some(tc.clone()); }
+    }
+    let out = Command::new("rustup").arg("default").env_clear()
+        .env("RUSTUP_HOME", rustup_home).env("PATH", path)
+        .current_dir(rustup_home).stdin(Stdio::null()).output().ok()?;
+    if !out.status.success() { return None; }
+    let tc = String::from_utf8_lossy(&out.stdout).split_whitespace().next().filter(|s| !s.is_empty())?.to_string();
+    MEMO.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(rustup_home.to_string(), tc.clone());
+    Some(tc)
 }
 
 /// What is true of this machine rather than of a repository, written by
@@ -298,7 +384,14 @@ fn with_host(mut config: Config, host: Host, file: &std::path::Path) -> Result<C
     SLOTS.store(config.pools.check_processes, std::sync::atomic::Ordering::SeqCst);
     config.path = host.path;
     config.prices = host.prices;
+    // The toolchain the checks run under: rustup's home and cargo home, and the
+    // toolchain name that home has as its default, so no toolchain file in a
+    // working ancestor (/tmp is anyone's) picks the cargo and rustc that judge.
+    // It is part of what the verdict key covers (`toolchain_identity`): it is
+    // what the checks see.
+    let resolved = default_toolchain(&host.rustup_home, &config.path.join(":"));
     config.toolchain = vec![("RUSTUP_HOME".to_string(), host.rustup_home), ("CARGO_HOME".to_string(), host.cargo_home)];
+    if let Some(tc) = resolved { config.toolchain.push(("RUSTUP_TOOLCHAIN".to_string(), tc)); }
     config.roles = host.roles;
     config.api = host.api;
     config.host = file.to_path_buf();
@@ -1733,6 +1826,7 @@ fn toolchain_identity(config: &Config) -> String {
     }).clone()
 }
 
+/// observe (`observe`): the host file's homes (RUSTUP_HOME, CARGO_HOME; not
 /// The directories holding the dependency sources a lockfile names, under
 /// the checks' cargo home: each registry package as unpacked
 /// (`registry/src/<index>/<name>-<version>`), each git package as checked out
@@ -1855,6 +1949,13 @@ fn run_check_with(config: &Config, on: &On, threads: usize, dir: &std::path::Pat
     let one = key.as_deref().map(flight);
     let _one = one.as_ref().map(|f| f.lock().unwrap_or_else(|e| e.into_inner()));
     if let Some((ok, out)) = answer(config, on, command, log) { return (ok, out, false); }
+    // No file in a working ancestor decides this check (a parent Cargo.toml,
+    // a toolchain file, a .cargo or a .git). Checked before and after the run:
+    // one that appears mid-run voids the verdict, so it is not cached.
+    let guard = match ancestor_guard(guard_uid(&config.root)) {
+        Ok(g) => g,
+        Err(e) => { write_trace(log, check_record(command, on, &format!("suspect: {e}"), "")); return (false, String::new(), false); }
+    };
     // The dependency sources as they are now: a run is kept under them.
     let before = dependencies(config, &on.tree, true);
     let key = verdict_key_with(config, on, command, &before);
@@ -1880,6 +1981,13 @@ fn run_check_with(config: &Config, on: &On, threads: usize, dir: &std::path::Pat
     RAN.with(|s| s.set(started.elapsed().as_secs_f64()));
     r.log = check_record(command, on, &r.log, &r.stdout);
     write_trace(log, &r.log);
+    // A working-ancestor file that appeared or changed while the check ran
+    // could have decided it: the verdict is suspect, kept by nothing.
+    let guard_held = ancestor_guard(guard_uid(&config.root)).map(|g| g == guard).unwrap_or(false);
+    if !guard_held {
+        write_trace(log, check_record(command, on, "suspect: a working-ancestor file appeared or changed while the check ran; its verdict is not kept", &r.stdout));
+        return (false, r.stdout, r.killed);
+    }
     if r.exited && on.cache != Cache::Off {
         if let Some(k) = &key { if dependencies(config, &on.tree, true) == before { store(k, r.ok, &r.stdout, &r.log); } }
         decided(on, command, r.ok, &r.stdout, log);
@@ -2431,7 +2539,7 @@ pub fn manifest(root: &str, commit: &Commit) -> (r: Result<Manifest, String>) {
     config.root = root.clone();
     let file = host_file()?;
     let config = with_host(config, read_host(&file)?, &file)?;
-    cargo_config_guard(&root)?;
+    ancestor_guard(guard_uid(&root))?;
     Ok(Manifest { config, root })
 }
 
@@ -3356,9 +3464,10 @@ fn search_ended() -> f64 {
 pub const MANIFEST: &str = ".bon/bon.toml";
 pub const QUEUE: &str = ".bon/queue.tsv";
 pub const SBOM: &str = ".bon/sbom.json";
-/// The build configuration cargo reads beside Cargo.toml: a check runs what it
-/// says, so it is protected like a check.
-pub const BUILD: [&str; 2] = [".cargo/", "build.rs"];
+/// The build configuration cargo reads beside Cargo.toml, and the toolchain
+/// files rustup reads: a check runs what they say, so a candidate may no more
+/// write its own than it may write a check. Protected like a check.
+pub const BUILD: [&str; 4] = [".cargo/", "build.rs", "rust-toolchain", "rust-toolchain.toml"];
 
 /// One agent process: generate, capture, observe. Its log goes under `trace`.
 /// `spoke`: the leader's signal, set at its program's first output.
@@ -4817,7 +4926,50 @@ mod tests {
     fn the_build_configuration_a_check_reads_is_protected() {
         let m = Manifest { config: config(), root: PathBuf::from("/nonexistent") };
         let c: Vec<String> = checks(&m).iter().map(|p| p.iter().collect()).collect();
-        assert_eq!(c, vec!["checks/", ".cargo/", "build.rs"]);
+        assert_eq!(c, vec!["checks/", ".cargo/", "build.rs", "rust-toolchain", "rust-toolchain.toml"]);
+    }
+
+    #[test]
+    fn no_working_ancestor_file_may_decide_a_check() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let base = std::env::temp_dir().join(format!("bon-ancestor-{}", std::process::id()));
+        let (top, mid) = (base.join("top"), base.join("top/mid"));
+        std::fs::create_dir_all(&mid).unwrap();
+        let me = std::fs::metadata(&mid).unwrap().uid();
+        let dirs = vec![mid.clone(), top.clone(), base.clone()];
+        // Nothing planted: the guard passes.
+        let empty = ancestor_guard_over(&dirs, me).unwrap();
+        // A parent Cargo.toml engineer owns is read as part of the signature, not refused.
+        std::fs::write(top.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let with_toml = ancestor_guard_over(&dirs, me).unwrap();
+        assert_ne!(empty, with_toml, "a Cargo.toml that appeared changes the signature, so a mid-run verdict is voided");
+        // A world-writable one (anyone could replace it) is refused.
+        std::fs::set_permissions(top.join("Cargo.toml"), std::fs::Permissions::from_mode(0o666)).unwrap();
+        assert!(ancestor_guard_over(&dirs, me).is_err(), "a Cargo.toml writable by others is a writable judge");
+        // So is a toolchain file (a search's own must not pick its judge either).
+        std::fs::set_permissions(top.join("Cargo.toml"), std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::write(mid.join("rust-toolchain.toml"), "[toolchain]\npath = \"/x\"\n").unwrap();
+        let with_tc = ancestor_guard_over(&dirs, me).unwrap();
+        assert_ne!(with_toml, with_tc);
+        std::fs::set_permissions(mid.join("rust-toolchain.toml"), std::fs::Permissions::from_mode(0o622)).unwrap();
+        assert!(ancestor_guard_over(&dirs, me).is_err());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn the_default_toolchain_is_resolved_and_keyed() {
+        // On this host rustup has a default; it is the name the checks run under.
+        let tc = default_toolchain("/opt/bon/rustup", "/opt/bon/cargo/bin:/usr/bin:/bin");
+        assert!(tc.as_deref().is_some_and(|t| t.contains('-')), "a toolchain name, from rustup's own default: {tc:?}");
+        // It is in the toolchain the verdict key covers, so a candidate's toolchain
+        // file cannot change which toolchain the key records.
+        let mut c = config();
+        c.toolchain.push(("RUSTUP_TOOLCHAIN".into(), tc.clone().unwrap()));
+        let keyed = toolchain_identity(&c);
+        assert!(keyed.contains(&tc.unwrap()));
+    }
+
+    #[test]
     }
 
     /// The tests' host file: no prices beyond these, a verdict cache of their own (never /tmp/bon's).
@@ -5548,6 +5700,10 @@ mod tests {
         c.root = repo.clone();
         c.toolchain = vec![("RUSTUP_HOME".into(), "/opt/bon/rustup".into()), ("CARGO_HOME".into(), home.to_string_lossy().into())];
         assert_eq!(dependency_dirs(&c, &std::fs::read_to_string(repo.join("Cargo.lock")).unwrap()), [home.join("registry/src/index.crates.io-x/foo-1.0.0")]);
+        // not the RUSTUP_TOOLCHAIN name. So a host where one is writable by
+        // agent or a slot user is refused.
+        let mut tc = c.clone();
+        tc.toolchain.push(("RUSTUP_TOOLCHAIN".into(), "some-toolchain-name".into()));
         let on = On { tree: tree.clone(), test: None, cache: Cache::Use };
         let before = dependencies(&c, &tree, true);
         assert!(!before.is_empty());
@@ -5629,7 +5785,7 @@ mod tests {
         assert!(!a.contains("cargo test -q") && !a.contains("Compiling crate") && !a.contains("warning: unused"), "errors first, the rest left out: {a}");
         let text = prompt(&kind, &m.config, &a);
         assert!(text.contains("Trunk's checks reject this code.") && text.contains("src/exec.rs:1300:5"));
-        assert!(text.contains("Never change [\".cargo/\", \"build.rs\", \".bon/\", \"tests/\"] either"), "{text}");
+        assert!(text.contains("Never change [\".cargo/\", \"build.rs\", \"rust-toolchain\", \"rust-toolchain.toml\", \".bon/\", \"tests/\"] either"), "{text}");
         // queue 73: a second attempt carries the previous attempt's unverified
         // candidates' failing checks, from the logs their commits name, after
         // trunk's; an output two showed alike, once; what does not fit, left out whole.

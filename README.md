@@ -143,10 +143,25 @@ once per user layer).
   process list), which lives in the user layer's `.bon`.
 - **Trusted, and not isolated:** agent processes all run as one user, so one
   could write another's working directory, or its own build directory, which
-  no check uses. Every user can write the world-writable directories (`/tmp`),
-  so a check could leave a file there that a later check reads: a check that
-  reads outside its tree and the toolchain is not a function of what its key
-  says. Closing those is a sandbox's job (a reference monitor), not bon's.
+  no check uses. The working directories are under `/tmp`, which every user
+  can write (mode 1777). cargo, rustup and git each read a file discovered by
+  walking a build directory's ancestors — a parent `Cargo.toml` (a
+  `[workspace]`, a `[patch]`, a `[profile]`), a `.cargo/config.toml`, a
+  `rust-toolchain` or `rust-toolchain.toml`, a `.git` — so a file in such an
+  ancestor is a writable judge. bon closes the toolchain files by running
+  every check and every agent process's cargo under `RUSTUP_TOOLCHAIN`, the
+  name rustup's home has as its default, resolved once by bon where no
+  toolchain file reaches it (and that name is part of the verdict key); it
+  occupies each ancestor `.cargo` as its own empty directory; and before and
+  after every check it refuses, or marks suspect and does not cache, any
+  ancestor `Cargo.toml`, toolchain file, `.cargo` or `.git` that is not
+  engineer's or root's. What stays open until the working directories move off
+  `/tmp` to a root only engineer can write (`review-scratch-root.md`): because
+  `/tmp` is world-writable, an agent process can still create such a file in
+  the instant between a check's before-signature and its run, and a
+  `Cargo.toml` is the one name bon cannot occupy in advance without breaking a
+  build. Closing that fully is the scratch root's move, a reference monitor's
+  job, not bon's.
   A candidate shapes its own checks' output, and a later attempt's agent
   processes read it in their prompt (a search's context): it reaches the
   generators, never how anything is judged or selected, and never a
