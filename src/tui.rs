@@ -504,12 +504,14 @@ fn outcome_rows(pal: &Palette, t: &projection::Totals, w: usize) -> Vec<Row> {
 fn table_rows(pal: &Palette, rows: &[Vec<String>], w0: usize, w: usize) -> Vec<Row> {
     let cw: Vec<usize> = (0..rows.first().map_or(0, |r| r.len())).map(|i| if i == 0 { w0 } else { rows.iter().map(|r| r[i].chars().count()).max().unwrap_or(0) }).collect();
     let mut n = cw.len();
-    while n > 2 && 1 + cw[0] + (1..n).map(|i| cw[i] + 2).sum::<usize>() > w { n -= 1; }
+    // A column that does not fit drops, and the header ends in … to say so.
+    while n > 2 && 1 + cw[0] + (1..n).map(|i| cw[i] + 2).sum::<usize>() + if n < cw.len() { 3 } else { 0 } > w { n -= 1; }
     let first = cw.first().copied().unwrap_or(0).min(w.saturating_sub(1 + (1..n).map(|i| cw[i] + 2).sum::<usize>()));
     rows.iter().enumerate().map(|(k, r)| {
         let (lead, rest) = if k == 0 { (pal.strong(), pal.muted()) } else if r[0].starts_with(' ') { (pal.muted(), pal.ink()) } else { (pal.ink(), pal.ink()) };
         let mut v = vec![Span::styled(format!(" {}", fit(&r[0], first)), lead)];
         for i in 1..n { v.push(Span::styled(format!("  {}", right(&r[i], cw[i])), rest)); }
+        if k == 0 && n < cw.len() { v.push(Span::styled("  …", pal.muted())); }
         Row::text(Line::from(v))
     }).collect()
 }
@@ -569,7 +571,7 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
                 out.push(Row::item(Line::from(spans), goal_key(g)));
             }
             let narrowed = p.filter.since.is_some() || p.filter.until.is_some() || p.filter.find.is_some();
-            if p.groups.is_empty() { out.push(empty(if narrowed { "No bon process in this range" } else { "No bon process yet" })); }
+            if p.groups.is_empty() { out.push(empty(none_yet(p))); }
         }
         Tab::Queue => {
             // Every item in full, full width: its label, then its text wrapped under itself.
@@ -762,7 +764,7 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
             let num = |s: String| Span::styled(right(&s, 9), pal.ink());
             let line = |label: &str, value: Vec<Span<'static>>| Row::text(kv(pal, 3, lw, label, value));
             // Nothing has run: nothing to measure; trunk is all there is.
-            if p.groups.is_empty() { out.push(empty("No bon process yet")); }
+            if p.groups.is_empty() { out.push(empty(none_yet(p))); }
             else {
                 // Cost: generation, time and their total are the header's, on every tab;
                 // here what each verified candidate and each push cost.
@@ -1531,6 +1533,11 @@ fn same(p: &Projection, row: &Key, held: &Key) -> bool {
     }
 }
 
+/// What a list with no bon process says: none yet, or none the find or range matches.
+fn none_yet(p: &Projection) -> &'static str {
+    if p.filter.find.is_some() { "No bon process matches" } else if p.filter.since.is_some() || p.filter.until.is_some() { "No bon process in this range" } else { "No bon process yet" }
+}
+
 /// The rows that continue row `i` (its wrapped lines), and it: the cursor covers them all.
 fn block_end(list: &[Row], i: usize) -> usize { (i + 1..list.len()).take_while(|&j| list[j].more).last().unwrap_or(i) }
 
@@ -1679,6 +1686,8 @@ fn draw(f: &mut Frame, app: &mut App) {
     let focusable = list.iter().filter(|r| r.focusable()).count();
     let ti = app.ti();
     place(app, &list, if panes.list.width > 0 { panes.list.height as usize } else { app.list_h as usize });
+    // A detail opened over a list that has since emptied (a find that matched nothing) closes onto it.
+    if app.detail_open && focusable == 0 { app.detail_open = false; }
     let list_len = list.len();
     if panes.list.width > 0 {
         let (up, avail) = more(list.len(), panes.list.height as usize, app.top[ti]);
@@ -1960,8 +1969,10 @@ fn key(app: &mut App, k: KeyEvent) -> bool {
         match k.code {
             KeyCode::Up | KeyCode::Char('k') => app.keys_top = app.keys_top.saturating_sub(1),
             KeyCode::Down | KeyCode::Char('j') => app.keys_top += 1,
-            KeyCode::PageUp => app.keys_top = app.keys_top.saturating_sub(5),
-            KeyCode::PageDown => app.keys_top += 5,
+            KeyCode::PageUp => app.keys_top = app.keys_top.saturating_sub(app.body_h as usize / 2),
+            KeyCode::PageDown => app.keys_top += app.body_h as usize / 2,
+            KeyCode::Char('g') => app.keys_top = 0,
+            KeyCode::Char('G') => app.keys_top = usize::MAX,
             KeyCode::Char('q') => return false,
             _ => { app.keys = false; app.keys_top = 0; }
         }

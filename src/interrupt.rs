@@ -396,7 +396,8 @@ pub fn text(pending: &[&Interrupt], now: i64, width: usize) -> String {
         for w in &i.what { put("", w, &mut out); }
         for c in &i.choices {
             put(&format!("  {}", c.choice), &c.cost, &mut out);
-            put("", &c.how, &mut out);
+            // How it is made: a command stands whole on its own line, so it runs as copied; prose wraps.
+            if c.how.starts_with("git ") || c.how.starts_with("bon ") { out.push_str(&format!("{}{}\n", " ".repeat(at), c.how)); } else { put("", &c.how, &mut out); }
         }
     }
     out.lines().map(str::trim_end).collect::<Vec<_>>().join("\n") + "\n"
@@ -463,8 +464,8 @@ mod tests {
         long.choices[0].how = format!("git am .bon/traces/proposals/{}.patch", "a".repeat(60));
         for w in [24, 60, 100, 400] {
             let t = text(&[&i, &long], 3600, w);
-            // Every line fits, but one that is a single unbroken word: the path stays whole.
-            assert!(t.lines().all(|l| l.chars().count() <= w.max(24) || !l.trim().contains(' ')), "{w}:\n{t}");
+            // Every line fits, but a command, which stands whole: it runs as copied.
+            assert!(t.lines().all(|l| l.chars().count() <= w.max(24) || l.trim().starts_with("git ")), "{w}:\n{t}");
             assert!(t.contains(&format!(".bon/traces/proposals/{}.patch", "a".repeat(60))), "{t}");
             assert!(t.contains("widen") && t.contains("raised 1h00m ago") && t.contains("Blocked"), "{t}");
         }

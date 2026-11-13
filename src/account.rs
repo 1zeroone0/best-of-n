@@ -95,7 +95,7 @@ fn under(p: &str, path: &str) -> bool {
 fn read(r: &Path) -> Result<Account, String> {
     let file = |p: &str| std::fs::read_to_string(r.join(p)).map_err(|e| format!("{p}: {e}"));
     let manifest: toml::Value = toml::from_str(&file(best_of_n::trusted::MANIFEST)?).map_err(|e| format!("{}: {e}", best_of_n::trusted::MANIFEST))?;
-    let table = manifest.get("account").ok_or("no [account] in .bon/bon.toml: bon init writes one")?;
+    let table = manifest.get("account").ok_or("no [account] in .bon/bon.toml; add one, as bon init writes it in a new repository (name, trusted, tools)")?;
     let key = |k: &str| table.get(k).and_then(|v| v.as_str()).map(String::from);
     let default_name = r.canonicalize().unwrap_or_else(|_| r.to_path_buf()).file_name().unwrap_or_default().to_string_lossy().to_string();
     let name = key("name").unwrap_or(default_name);

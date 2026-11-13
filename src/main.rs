@@ -249,7 +249,7 @@ fn dispatch(root: &str, name: &str, a: &Parsed, filter: &view::Filter) -> Result
         "check" => check(&root),
         "pending" => interrupt::run(&root, a.value("--transcript").as_deref()),
         "cost" => { let p = projection::read(Path::new(&root), &view::Filter::default())?; let t = cost_toml(&p);
-            std::fs::write(Path::new(&root).join(".bon/cost.toml"), &t).map_err(|e| e.to_string())?; print!("{t}"); Ok(()) }
+            std::fs::write(Path::new(&root).join(".bon/cost.toml"), &t).map_err(|e| format!(".bon/cost.toml not written ({e}); make .bon/ writable"))?; print!("{t}"); Ok(()) }
         _ if tui::wanted() => tui::run(&root, filter.clone()),
         _ => status(&root, filter),
     }

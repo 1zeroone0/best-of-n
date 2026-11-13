@@ -1388,9 +1388,12 @@ pub fn text(s: &Value) -> String {
         let goal = if goal.chars().all(|c| c.is_ascii_hexdigit()) { short(goal) } else { goal.to_string() };
         out += &wrap(&format!("{} {goal}: {}", cap(p["kind"].as_str().unwrap_or("")), p["sentence"].as_str().unwrap_or("")), 2, 4);
     }
-    out += "\nRecent\n";
     let recent: Vec<&Value> = s["groups"].as_array().into_iter().flatten().filter(|g| g["running"] != true).take(8).collect();
-    if recent.is_empty() && running.is_empty() { out += if f["since"].is_null() && f["until"].is_null() && f["find"].is_null() { "  No bon process yet\n" } else { "  No bon process in this range\n" }; }
+    // Nothing ran before what runs now: no Recent heading over nothing.
+    if !(recent.is_empty() && !running.is_empty()) { out += "\nRecent\n"; }
+    if recent.is_empty() && running.is_empty() {
+        out += if !f["find"].is_null() { "  No bon process matches\n" } else if !f["since"].is_null() || !f["until"].is_null() { "  No bon process in this range\n" } else { "  No bon process yet\n" };
+    }
     let protected: Vec<String> = serde_json::from_value(s["protected"].clone()).unwrap_or_default();
     for g in recent {
         let n = g["processes"].as_array().map_or(0, |p| p.len());
