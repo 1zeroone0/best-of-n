@@ -101,6 +101,12 @@
                     "value": "pushable"
                   },
                   {
+                    "class": "invariant",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "blind"
+                  },
+                  {
                     "class": "manifest-key",
                     "name": "configured",
                     "ns": "https://github.com/1zeroone0/best-of-n/account",
@@ -804,12 +810,12 @@
       }
     ],
     "metadata": {
-      "last-modified": "2026-11-13T07:50:02Z",
+      "last-modified": "2026-11-13T08:44:35Z",
       "oscal-version": "1.2.3",
       "remarks": "proven: in the kernel, verified by Verus. trusted: reviewed by the owner, not verified. configured: a fact of the manifest. tested: program code and every other file, judged by the checks. Every control claim is proposed and awaits GRC review.",
       "title": "best-of-n",
-      "version": "d81a49146051"
+      "version": "87505d58b2cb"
     },
-    "uuid": "f162578d-9168-4bf2-bf68-40a4916c67bd"
+    "uuid": "894acba0-981a-4e04-887b-e1fea097cb38"
   }
 }

@@ -171,6 +171,10 @@ pub struct Search {
     pub limit: nat,
     /// index -> what that agent process returned; None if it produced no candidate.
     pub results: Map<int, Option<Candidate>>,
+    /// The commits whose verdicts its agent processes are given: what its
+    /// checks said of each, as `carries` allows by kind. (TCB: trusted code
+    /// renders each check that rejected each commit, and nothing else.)
+    pub context: Set<Commit>,
 }
 
 // ── predicates ──────────────────────────────────────────
@@ -419,6 +423,40 @@ pub open spec fn selected(search: Search, i: int) -> bool {
 /// measured, not a voter.
 pub open spec fn member(tested: Search, j: int) -> bool {
     verified_at(tested, j) || (tested.kind is Compaction && j == -1)
+}
+
+/// The commit of member j of tested: its candidate's, or for -1, a
+/// compaction's goal.
+pub open spec fn member_commit(tested: Search, j: int) -> Commit {
+    if j == -1 { match tested.kind { Kind::Compaction { goal, .. } => goal, _ => tested.base } } else { at(tested, j).commit }
+}
+
+/// commit is the commit of one of search's candidates.
+pub open spec fn candidate_commit(search: Search, commit: Commit) -> bool {
+    exists|i: int| search.results.contains_key(i) && search.results[i] is Some && at(search, i).commit == commit
+}
+
+/// A search of kind may carry commit's verdicts in its context, the searches
+/// before it being searches: a code search, its goal, whose checks reject it,
+/// and the candidates of earlier code searches on that goal; a compaction,
+/// the candidates of earlier compactions on its goal. A queue,
+/// counterexample or foil search carries none: a test or a foil is written
+/// without sight of any check's output on the code it is judged with.
+pub open spec fn carries(searches: Seq<Search>, kind: Kind, commit: Commit) -> bool {
+    match kind {
+        Kind::Code { goal } => commit == goal || exists|search_index: int| 0 <= search_index < searches.len()
+            && searches[search_index].kind == (Kind::Code { goal }) && candidate_commit(searches[search_index], commit),
+        Kind::Compaction { goal, .. } => exists|search_index: int| 0 <= search_index < searches.len()
+            && (searches[search_index].kind matches Kind::Compaction { goal: other, .. } && other == goal)
+            && candidate_commit(searches[search_index], commit),
+        _ => false,
+    }
+}
+
+/// search holds no verdict on a member of tested: no commit in its context
+/// is a member's.
+pub open spec fn blind_to(search: Search, tested: Search) -> bool {
+    forall|j: int, commit: Commit| #[trigger] member(tested, j) && #[trigger] search.context.contains(commit) ==> commit != member_commit(tested, j)
 }
 
 /// Counterexample: candidate, a test, splits the members of tested: it accepts
@@ -821,8 +859,11 @@ tokenized_state_machine!{ bon {
     /// compaction and a counterexample on trunk, on one they accept. A
     /// counterexample on a candidate is granted on a selected one, or on the
     /// first verified one of a search whose verified candidates disagree.
-    transition!{ grant(kind: Kind, n: nat, agent_process_limit: nat, observed: IMap<(User, Object), Seq<Option<Permission>>>, slots: nat, checks_accept: bool) {
+    /// context is the commits whose verdicts its agent processes are given,
+    /// each one `carries` allows its kind.
+    transition!{ grant(kind: Kind, n: nat, agent_process_limit: nat, observed: IMap<(User, Object), Seq<Option<Permission>>>, slots: nat, checks_accept: bool, context: Set<Commit>) {
         require isolated(observed, slots);
+        require forall|commit: Commit| #[trigger] context.contains(commit) ==> carries(pre.searches, kind, commit);
         require forall|search_index: int| 0 <= search_index < pre.searches.len() ==> complete(#[trigger] pre.searches[search_index]);
         require pre.spent + pre.reserved + agent_process_limit * n <= pre.limit;
         require kind matches Kind::Code { goal } ==> goal == pre.trunk.last();
@@ -845,7 +886,7 @@ tokenized_state_machine!{ bon {
             _ => pre.trunk.last(),
         };
         let attenuated = authority(kind, pre.checks, pre.tests, pre.trusted);
-        update searches = pre.searches.push(Search { kind, base, n, authority: attenuated, limit: agent_process_limit, results: Map::empty() });
+        update searches = pre.searches.push(Search { kind, base, n, authority: attenuated, limit: agent_process_limit, results: Map::empty(), context });
         update reserved = pre.reserved + agent_process_limit * n;
         add capability += (granted(search_index, n, base, attenuated, agent_process_limit));
     }}
@@ -965,6 +1006,24 @@ tokenized_state_machine!{ bon {
             || landed(self.searches, self.trunk[trunk_index - 1], self.trunk[trunk_index])
     }
 
+    /// Blindness: a counterexample's or a foil's context never holds a verdict
+    /// on a member of the search whose candidate it judges, which is an
+    /// earlier search; and a counterexample on trunk's head never holds that
+    /// head's. A test or a foil is written without sight of what any check
+    /// said of the code it is judged with.
+    #[invariant]
+    pub fn blind(&self) -> bool {
+        forall|search_index: int| #![trigger self.searches[search_index]] 0 <= search_index < self.searches.len() ==>
+            match self.searches[search_index].kind {
+                Kind::Counterexample { goal: None } => !self.searches[search_index].context.contains(self.searches[search_index].base),
+                Kind::Counterexample { goal: Some(agent_process) } => 0 <= agent_process.search < search_index
+                    && blind_to(self.searches[search_index], self.searches[agent_process.search]),
+                Kind::Foil { goal: agent_process, .. } => 0 <= agent_process.search < search_index
+                    && blind_to(self.searches[search_index], self.searches[agent_process.search]),
+                _ => true,
+            }
+    }
+
     // ── proofs ──────────────────────────────────────────
 
     #[inductive(initialize)]
@@ -974,7 +1033,7 @@ tokenized_state_machine!{ bon {
     fn advance_inductive(pre: Self, post: Self, commit: Commit, checks: Set<Path>, tests: Set<Path>, trusted: Set<Path>) {}
 
     #[inductive(grant)]
-    fn grant_inductive(pre: Self, post: Self, kind: Kind, n: nat, agent_process_limit: nat, observed: IMap<(User, Object), Seq<Option<Permission>>>, slots: nat, checks_accept: bool) {
+    fn grant_inductive(pre: Self, post: Self, kind: Kind, n: nat, agent_process_limit: nat, observed: IMap<(User, Object), Seq<Option<Permission>>>, slots: nat, checks_accept: bool, context: Set<Commit>) {
         let search_index = pre.searches.len() as int;
         let processes = agent_processes(search_index, n);
         // Every earlier search is complete, so no capability is outstanding.

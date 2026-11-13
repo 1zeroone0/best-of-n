@@ -240,7 +240,7 @@ fn may_write(m: &best_of_n::trusted::Manifest, path: &str) -> bool {
         intents: vec![], accepts: vec![], accepts_foils: vec![], rejects_counterexamples: true, measured: true, added: vec![p], rank: 0, diff: 0 };
     [Kind::Code { goal: Commit(vec![]) }, Kind::Compaction { goal: Commit(vec![]), out: vec![] }, Kind::Counterexample { goal: None }]
         .into_iter().any(|kind| best_of_n::exec::verified(&Search { kind, base: Commit(vec![]), n: 1, checks: best_of_n::trusted::checks(m),
-            tests: best_of_n::trusted::tests(m), trusted: best_of_n::trusted::trusted(m), limit: 0, results: vec![] }, &c))
+            tests: best_of_n::trusted::tests(m), trusted: best_of_n::trusted::trusted(m), limit: 0, results: vec![], context: vec![] }, &c))
 }
 
 /// Where `commit`'s tree breaks a rule, one line each: the file, what is

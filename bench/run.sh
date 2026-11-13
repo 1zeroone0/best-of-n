@@ -16,6 +16,9 @@
 #   BEHAVIORS      kernel: how many behaviors verified code stubs show [1]
 #   CX_MODE        kernel: the counterexample stubs' tests: blind, split or few [blind]
 #   ATTEMPTS       attempts `bon code` may make, each WIDTH wide [1]
+#   FEEDBACK       kernel: 1, the first attempt's code stubs write a fix a
+#                  test rejects, and a stub that sees those verdicts in its
+#                  prompt writes the right one (use ATTEMPTS=2) [0]
 #   TIME           each agent process's time limit, seconds [1800]
 #   CHECK_TIME     each check's cutoff, seconds [1800]
 #   PROJECT        kernel: the small crate in bench/sandbox; bon: bon's own
@@ -45,6 +48,7 @@ VARIANTS=${VARIANTS:-4}
 TEST_VARIANTS=${TEST_VARIANTS:-2}
 BEHAVIORS=${BEHAVIORS:-1}
 CX_MODE=${CX_MODE:-blind}
+FEEDBACK=${FEEDBACK:-0}
 ATTEMPTS=${ATTEMPTS:-1}
 NS=$WIDTH; i=1; while [ "$i" -lt "$ATTEMPTS" ]; do NS="$NS, $WIDTH"; i=$((i + 1)); done
 TIME=${TIME:-1800}
@@ -93,7 +97,7 @@ case "$PROJECT" in
   *) echo "PROJECT is kernel or bon" >&2; exit 1 ;;
 esac
 cp "$REPO/bench/stub.sh" "$WORK/.bon/stub.sh"
-printf 'PROJECT=%s\nSLEEP=%s\nK=%s\nVARIANTS=%s\nTEST_VARIANTS=%s\nBEHAVIORS=%s\nCX_MODE=%s\n' "$PROJECT" "$SLEEP" "$K" "$VARIANTS" "$TEST_VARIANTS" "$BEHAVIORS" "$CX_MODE" > "$WORK/.bon/stub.env"
+printf 'PROJECT=%s\nSLEEP=%s\nK=%s\nVARIANTS=%s\nTEST_VARIANTS=%s\nBEHAVIORS=%s\nCX_MODE=%s\nFEEDBACK=%s\n' "$PROJECT" "$SLEEP" "$K" "$VARIANTS" "$TEST_VARIANTS" "$BEHAVIORS" "$CX_MODE" "$FEEDBACK" > "$WORK/.bon/stub.env"
 printf '/target\n/.bon/traces/\n' > "$WORK/.gitignore"
 printf 'id\tintent\n' > "$WORK/.bon/queue.tsv"
 cat > "$WORK/.bon/bon.toml" <<EOF

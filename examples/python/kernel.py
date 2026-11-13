@@ -93,6 +93,8 @@ class Search(TypedDict):
     trusted: list[Path]
     limit: int
     results: list[Candidate | None]
+    # The commits whose verdicts its agent processes are given.
+    context: list[Commit]
 
 # One confined user's permissions on each object the policy names, path by
 # path, as trusted code observed them: None where a path does not exist.

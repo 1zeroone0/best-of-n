@@ -20,7 +20,7 @@ export type Kind = { queue: { goal: Transcript } } | { code: { goal: Commit } } 
 /** One generated change, as trusted code observed it. */
 export interface Candidate { commit: Commit; base: Commit; accepted: boolean; proved: boolean; changed: Array<Path>; out: Array<Hash>; intents: Array<[Cue, Intent]>; accepts: Array<[number, boolean]>; accepts_foils: Array<[number, boolean]>; rejects_counterexamples: boolean; measured: boolean; added: Array<Path>; rank: number; diff: number }
 /** One search, once every agent process has returned: `results[i]` is what agent process i returned. */
-export interface Search { kind: Kind; base: Commit; n: number; checks: Array<Path>; tests: Array<Path>; trusted: Array<Path>; limit: number; results: Array<Candidate | null> }
+export interface Search { kind: Kind; base: Commit; n: number; checks: Array<Path>; tests: Array<Path>; trusted: Array<Path>; limit: number; results: Array<Candidate | null>; context: Array<Commit> }
 /** One confined user's permissions on each object the policy names, path by path, as trusted code observed them: None where a path does not exist. `build_directories[slot]` is check slot `slot`'s build directory. */
 export interface Observation { checks: Array<Permission | null>; transcripts: Array<Permission | null>; working_directory: Array<Permission | null>; repository: Array<Permission | null>; working_directories: Array<Permission | null>; toolchain: Array<Permission | null>; builds: Array<Permission | null>; state: Array<Permission | null>; build_directories: Array<Array<Permission | null>> }
 /** Everything bon shows, over the time range in `filter`. */

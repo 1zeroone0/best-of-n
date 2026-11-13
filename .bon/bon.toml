@@ -60,7 +60,7 @@ proven = ["authority", "verified", "trunk_exact"]
 
 [account.controls.ac-5]
 claim = "Three duties are held apart. Agent processes generate candidates; the checks, which no search may change, judge them, and the kernel's gates select among them; only the owner writes the spec and the checks. A candidate is pushed only when at least two independent agent processes agree, and tests written without sight of the code fail to split them."
-proven = ["protected", "agree", "selected", "pushable"]
+proven = ["protected", "agree", "selected", "pushable", "blind"]
 configured = ["checks.paths", "counterexample.visible"]
 
 [account.controls.ac-6]

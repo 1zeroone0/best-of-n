@@ -1775,6 +1775,23 @@ mod tests {
     fn end(e: &'static str, reason: Option<&str>, from: Option<&'static str>) -> End { End { end: e, reason: reason.map(String::from), from } }
 
     #[test]
+    fn a_running_search_s_goal_is_read_from_its_grant_line_with_its_context_line_after_it() {
+        // queue 73: the context is a line of its own after the grant, so the grant's tail is still the goal.
+        let root = std::env::temp_dir().join(format!("bon-view-context-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let d = root.join(".bon/traces/4242");
+        std::fs::create_dir_all(d.join("0")).unwrap();
+        std::fs::write(d.join("transitions"), "initialize c0ffee 1\ngrant 2 0 1 code c0ffee\ncontext c0ffee 1a2b3c\n").unwrap();
+        let state = state(&root, &Filter::default());
+        let goals: Vec<String> = state["groups"].as_array().into_iter().flatten()
+            .flat_map(|g| g["processes"].as_array().cloned().unwrap_or_default())
+            .flat_map(|p| p["searches"].as_array().cloned().unwrap_or_default())
+            .map(|x| x["goal"].as_str().unwrap_or("").to_string()).collect();
+        assert_eq!(goals, ["c0ffee"], "{state}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn every_attempt_ends_one_way() {
         // A block in today's words, then a block in an old sentence, then a push.
         let mut searches = [s("code", true), s("foil", true), s("counterexample", true), s("code", true), s("foil", true), s("counterexample", true), s("code", true), s("counterexample", true)];
