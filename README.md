@@ -71,11 +71,15 @@ checks the document against NIST's OSCAL JSON schema (its structure, required
 fields and identifier formats), not the metaschema's constraints, which NIST's
 `oscal-cli` validates.
 
-`bon check` fails, naming the file and the rule, on what would let a
-candidate change how it is judged: a file a search may write that is neither
-proven nor read by a declared check, a check in such a file, a local crate
-with a build script or a proc macro, a unit test in such a file, or plain
-Rust outside `verus!` in the kernel. What decides a push is checked again from
+`bon check` holds three rules, naming the file and the rule where one
+breaks: every file a search may write is proven or read by a declared check;
+no check lives in such a file; and nothing a candidate writes changes how it
+is judged (no local crate with a build script or a proc macro, no unit test in
+such a file, no plain Rust outside `verus!` in the kernel). The remedy for a
+file no check reads is a check that reads it, or a line in `[checks] paths`;
+a candidate that needs it changed then reaches you as a protected change to
+review. Not enforced: a file the code takes in with `include_str!` counts as
+read only if a check names it. What decides a push is checked again from
 a clean build; beside it, once, run the expensive checks, `[checks] staged`,
 which no other candidate runs: one that fails stops bon as a suspect check
 does, and nothing is pushed. A compaction candidate's rank = its `rank`
