@@ -213,18 +213,22 @@ at a time.
    validate, schedule) versus do effects (I/O, UI, network). *Existing:*
    language and build; what is already checked, and how long checks take;
    what decides and what does effects; the remote and trunk.
-3. **The seam.** *New:* the kernel from the start: a spec, its gates, an
-   empty implementation (Rust and Verus); effects become programs over it.
+3. **The seam.** *New:* the kernel from the start: `bon new <name>` sets up
+   a spec with the core nouns, its gates, an empty implementation (Rust and
+   Verus), the manifest and the queue, the same bytes for the same name, as
+   the first commit; effects become programs over it.
    *Existing:* what decides becomes the kernel, one gate at a time, each a
    search; what does effects becomes programs.
 4. **The queue.** *New:* intents from the owner's transcripts. *Existing:*
    intents from what the code does, its README and any transcripts, minus
    what the spec already states. The owner's words; the owner commits it.
-5. **The checks.** *New:* the spec and the gates' contracts; on trunk they
-   fail, and `bon code` closes the gap. *Existing:* the spec, the contracts
+5. **The checks.** *New:* the spec and the gates' contracts; they pass as
+   `bon new` creates them, each spec change makes trunk's fail, and
+   `bon code` closes the gap. *Existing:* the spec, the contracts
    and the current tests; they pass on trunk, except the gap the first code
    search closes.
-6. **The manifest:** `bon init` writes `.bon/bon.toml` (a template that is
+6. **The manifest:** *New:* `bon new` wrote it; set the limits and the
+   rate. *Existing:* `bon init` writes `.bon/bon.toml` (a template that is
    not search-ready), `.bon/queue.tsv` and the `.gitignore` line. Fill it in:
    wide width lists, limits sized to the work (proofs cost more), and a
    counterexample section.
@@ -255,6 +259,7 @@ at a time.
 | spare capacity should work | `bon background` (`--plist` for launchd) |
 | a dependency, tool, trusted function or claimed control changed | `bon account`; commit `.bon/account.json` and `.bon/sbom.json` |
 | what reaching trunk cost | `bon cost` writes `.bon/cost.toml` (bon does after each push) |
+| a new project | `bon new <name>` |
 | before a search, a commit or a push | `bon check` |
 
 **A run's settings** (`n`, roles, limits) are read from `.bon/bon.toml`

@@ -7,6 +7,7 @@ use std::process::Command;
 use best_of_n::process;
 
 mod account;
+mod new;
 mod projection;
 mod tui;
 mod types;
@@ -19,6 +20,7 @@ const USAGE: &str = "usage:
   bon compaction          search for code and tests with what is stale removed or written cleaner; push it
   bon counterexample      search trunk for what the spec forbids; if found, a code search carries its test
   bon init                create a manifest and queue in this git repository
+  bon new <name>          set up a project: a spec with the core nouns, its gates, an empty implementation, the manifest and the queue
   bon queue               turn each new transcript into a proposal for the queue
   bon view                the same in the terminal view, as `bon` opens it in a terminal
   bon background [--plist] the stalest of compaction and counterexample, on spare capacity
@@ -39,7 +41,7 @@ fn main() {
     let root = match git(Path::new("."), &["rev-parse", "--show-toplevel"]) {
         Ok(r) => r,
         // init checks for a repository itself; account and types also run without .git (checks).
-        Err(_) if matches!(args.first().map(String::as_str), Some("init" | "setup" | "account" | "types" | "help" | "-h" | "--help")) => ".".into(),
+        Err(_) if matches!(args.first().map(String::as_str), Some("init" | "new" | "setup" | "account" | "types" | "help" | "-h" | "--help")) => ".".into(),
         Err(e) => fail(&format!("not in a git repository: {e}")),
     };
     let command = args.first().map(String::as_str).unwrap_or("");
@@ -79,6 +81,7 @@ fn dispatch(root: &str, args: &[String]) -> Result<(), String> {
         Some("code") => process::to_push(&root, false).map(|_| println!("pushed")),
         Some("compaction") => process::to_push(&root, true).map(|_| println!("pushed")),
         Some("init") => init(&root),
+        Some("new") => new::run(args.get(1).map(String::as_str)),
         Some("counterexample") => counterexample(&root),
         Some("background") if args.get(1).map(String::as_str) == Some("--plist") => { plist(&root); Ok(()) }
         Some("background") => background(&root),

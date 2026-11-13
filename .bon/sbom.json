@@ -2562,6 +2562,10 @@
       },
       {
         "name": "bon:trusted-file",
+        "value": "src/new.rs"
+      },
+      {
+        "name": "bon:trusted-file",
         "value": "examples/kernel.rs"
       },
       {

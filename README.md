@@ -48,6 +48,7 @@ bon
 | `bon types [--check]` | the types programs are built on, in TypeScript, Go and Python |
 | `bon account [--check]` | write what is proven, trusted, configured and tested, as OSCAL with its SBOM, or fail if it is stale |
 | `bon check` | every check on the working tree, as candidates are judged; whose fix a failure is |
+| `bon new <name>` | set up a project: a spec with the core nouns, its gates, an empty implementation, the manifest and the queue |
 
 **You decide** the spec and the checks; the [queue](.bon/queue.tsv) holds what
 is wanted and not yet in the spec. **Search decides** the rest, as the POSIX
@@ -92,6 +93,7 @@ fields and identifier formats), not the metaschema's constraints, which NIST's
 | [`src/exec.rs`](src/exec.rs) | the decisions, proven |
 | [`src/trusted.rs`](src/trusted.rs) | what Verus does not check; no search may change it |
 | [`src/tui.rs`](src/tui.rs), [`src/projection.rs`](src/projection.rs) | the view, and what it shows as types |
+| [`template/`](template/) | the project `bon new` sets up |
 | [`examples/`](examples/) | programs on the emitted types: TypeScript, Go, Python with PyTorch |
 | [`.bon/`](.bon/) | the manifest, the queue, the account and its SBOM |
 | [`.bon/cost.toml`](.bon/cost.toml) | what reaching this trunk cost, rewritten after each push |
