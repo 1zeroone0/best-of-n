@@ -126,7 +126,8 @@ fn parse(c: &(&str, &str, &str), args: &[String]) -> Result<Parsed, String> {
                 return Err(format!("{a} is not an option of {name}; {usage}"));
             };
             let v = match value {
-                Some(word) => { i += 1; Some(args.get(i).filter(|v| !v.starts_with("--")).cloned().ok_or(format!("{o} needs {word}; {usage}"))?) }
+                // A value is what follows, and it is something: --find "" finds nothing to find.
+                Some(word) => { i += 1; Some(args.get(i).filter(|v| !v.starts_with("--") && !v.trim().is_empty()).cloned().ok_or(format!("{o} needs {word}; {usage}"))?) }
                 None => None,
             };
             if out.has(o) { return Err(format!("{o} given twice; {usage}")); }
@@ -156,6 +157,8 @@ fn main() {
         return;
     }
     let parsed = parse(command, rest).unwrap_or_else(|e| fail(&e));
+    // What the arguments say is refused before anything else is said or read.
+    let filter = view::Filter::new(parsed.value("--since").as_deref(), parsed.value("--until").as_deref(), parsed.value("--find")).unwrap_or_else(|e| fail(&e));
     let root = match git(Path::new("."), &["rev-parse", "--show-toplevel"]) {
         Ok(r) => r,
         // These read no repository: account and types run in a checkout without .git (checks).
@@ -185,7 +188,7 @@ fn main() {
         }
     }
     if !SEARCHES.contains(&name) || (name == "background" && parsed.has("--plist")) {
-        if let Err(e) = dispatch(&root, name, &parsed) { fail(&e) }
+        if let Err(e) = dispatch(&root, name, &parsed, &filter) { fail(&e) }
         return;
     }
     // Before a search, before anything is reserved: every role it may run
@@ -197,7 +200,7 @@ fn main() {
     let before = trunk();
     // On the user layer's process list until it ends (`end` takes it off).
     best_of_n::trusted::enter(Path::new(&root));
-    let result = checked.and_then(|_| dispatch(&root, name, &parsed));
+    let result = checked.and_then(|_| dispatch(&root, name, &parsed, &filter));
     // A push or a landed test moved trunk: the cost file follows it, as its own commit.
     if result.is_ok() && trunk() != before {
         if let Err(e) = record_cost(r) { eprintln!("bon: .bon/cost.toml not updated: {e}"); }
@@ -208,9 +211,8 @@ fn main() {
     best_of_n::trusted::end(r, result)
 }
 
-fn dispatch(root: &str, name: &str, a: &Parsed) -> Result<(), String> {
+fn dispatch(root: &str, name: &str, a: &Parsed, filter: &view::Filter) -> Result<(), String> {
     let root = root.to_string();
-    let filter = || view::Filter::new(a.value("--since").as_deref(), a.value("--until").as_deref(), a.value("--find"));
     match name {
         "code" => process::to_push(&root, false).map(|_| println!("pushed")),
         "compaction" => process::to_push(&root, true).map(|_| println!("pushed")),
@@ -246,8 +248,8 @@ fn dispatch(root: &str, name: &str, a: &Parsed) -> Result<(), String> {
         "pending" => interrupt::run(&root, a.value("--transcript").as_deref()),
         "cost" => { let p = projection::read(Path::new(&root), &view::Filter::default())?; let t = cost_toml(&p);
             std::fs::write(Path::new(&root).join(".bon/cost.toml"), &t).map_err(|e| e.to_string())?; print!("{t}"); Ok(()) }
-        _ if tui::wanted() => tui::run(&root, filter()?),
-        _ => status(&root, &filter()?),
+        _ if tui::wanted() => tui::run(&root, filter.clone()),
+        _ => status(&root, filter),
     }
 }
 
@@ -723,7 +725,7 @@ fn init(root: &str) -> Result<(), String> {
     }
     for file in ["bon.toml", "queue.tsv"] {
         if std::fs::symlink_metadata(bon.join(file)).is_ok() {
-            return Err(format!(".bon/{file} already exists; nothing written"));
+            return Err(format!(".bon/{file} already exists, so nothing is written; configure it, or move it aside and run bon init again"));
         }
     }
     let ignore = r.join(".gitignore");

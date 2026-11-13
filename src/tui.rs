@@ -17,7 +17,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Paragraph, Wrap};
+use ratatui::widgets::Paragraph;
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::projection::{self, BonProcess, Facts, GoalTrace, Projection, SearchTrace};
@@ -173,8 +173,9 @@ const TABS: [Tab; 4] = [Tab::Project, Tab::Spec, Tab::Queue, Tab::Traces];
 #[derive(Clone, PartialEq, Debug)]
 enum Key { Goal(String), Queue(u64), Retired(u64), Proposal(String), Item(String), Grid, Trusted(String), Sbom(&'static str) }
 
-/// A goal's identity: its first bon process's trace.
-fn goal_key(g: &GoalTrace) -> Key { Key::Goal(g.processes.last().map(|p| p.trace.clone()).unwrap_or_default()) }
+/// A goal's identity: its bon processes' traces, first first; it is the same
+/// goal while any of them is (`same`), so a filter that leaves one out keeps it.
+fn goal_key(g: &GoalTrace) -> Key { Key::Goal(g.processes.iter().rev().map(|p| p.trace.as_str()).collect::<Vec<_>>().join(" ")) }
 
 /// One row of a list: what it shows, and the item it stands for, if it can be
 /// focused; `more` when it continues the focusable row above it (the cursor
@@ -234,6 +235,8 @@ struct App {
     body_h: u16,
     /// The first row of the key reference shown, where it does not fit.
     keys_top: usize,
+    /// Whether the list was last scrolled through its rows rather than moved between items.
+    scrolled: bool,
     overlay_rows: usize,
 }
 
@@ -242,7 +245,7 @@ impl App {
         let dark = std::env::var("BON_THEME").map_or(true, |t| t != "light");
         App { p: Projection::default(), loaded: None, root: ".".into(), overlay: Overlay::None, input: None, range: 0, filter: Default::default(),
               error: None, tab: Tab::Traces, held: Default::default(), focus: [0; 4], top: [0; 4], detail_top: 0, detail_open: false,
-              keys: false, palette: if dark { DARK } else { LIGHT }, dark, off: local_offset(), list_w: 200, list_h: 20, detail_h: 20, detail_shown: false, detail_page: 18, body_h: 20, keys_top: 0, overlay_rows: 0 }
+              keys: false, palette: if dark { DARK } else { LIGHT }, dark, off: local_offset(), list_w: 200, list_h: 20, detail_h: 20, detail_shown: false, detail_page: 18, body_h: 20, keys_top: 0, scrolled: false, overlay_rows: 0 }
     }
     fn ti(&self) -> usize { TABS.iter().position(|t| *t == self.tab).unwrap_or(0) }
     /// Focus row `i` of `list`, and its item; a new focus opens its detail at the top.
@@ -682,9 +685,8 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
                 out.push(Row::text(Line::from(h)));
                 // The legend, for what a cell can show: — only where some cell is absent.
                 let some_absent = decided.iter().any(|i| layers(&spec.items[*i].name).is_some_and(|l| cols.iter().any(|&k| l[k].is_none())));
-                let mut legend = vec![Span::raw(format!("   {}", " ".repeat(nw))), Span::styled("✓ ", pal.ink()), Span::styled("Present", pal.muted())];
-                if some_absent { legend.extend([Span::styled("   — ", pal.faint()), Span::styled("Absent", pal.muted())]); }
-                out.push(Row::text(Line::from(legend)));
+                if some_absent { out.push(Row::text(Line::from(vec![Span::raw(format!("   {}", " ".repeat(nw))), Span::styled("✓ ", pal.ink()), Span::styled("Present", pal.muted()),
+                    Span::styled("   — ", pal.faint()), Span::styled("Absent", pal.muted())]))); }
                 if !absent.is_empty() { out.extend(hanging(&format!("{}: absent for every one", absent.join(", ")), 3 + nw, w, pal.muted()).into_iter().map(Row::text)); }
             }
             for i in &decided {
@@ -1106,6 +1108,8 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
                             if c.accepted && !c.proved { ("Foil", pal.ink()) } else if c.accepted { ("Not a foil", pal.muted()) } else { ("Rejected", pal.faint()) }
                         } else if c.verified { ("Yes", pal.ink()) } else if c.accepted { ("No", pal.muted()) } else { ("Rejected", pal.faint()) };
                         let lines = match (c.lines_added, c.lines_removed) { (Some(a), Some(r)) => format!("+{a} −{r}"), _ => c.diff.map_or("—".into(), |d| d.to_string()) };
+                        let flags = c.flags.iter().map(|f| cap(&f.replace('_', " "))).collect::<Vec<_>>().join(" · ");
+                        let beside = 2 + 4 + 9 + 11 + rw + 11 + 8 + 2 + flags.chars().count() <= wd;
                         t.push(Line::from(vec![
                             Span::styled(format!("  {}", fit(&format!("{}{}", c.index, if sel { "★" } else { "" }), 4)), if sel { pal.tone(Tone::Blue) } else { pal.muted() }),
                             Span::styled(fit(&short(c.commit.as_deref().unwrap_or("")), 9), pal.ink()),
@@ -1113,8 +1117,9 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
                             Span::styled(if rw == 0 { String::new() } else { right(&rank_cell(c), rw) }, pal.ink()),
                             Span::styled(right(&lines, 11), pal.ink()),
                             Span::styled(right(&money(c.generation), 8), pal.ink()),
-                            Span::styled(if c.flags.is_empty() { String::new() } else { format!("  {}", c.flags.iter().map(|f| cap(&f.replace('_', " "))).collect::<Vec<_>>().join(" · ")) }, pal.tone(Tone::Red)),
+                            Span::styled(if flags.is_empty() || !beside { String::new() } else { format!("  {flags}") }, pal.tone(Tone::Red)),
                         ]));
+                        if !flags.is_empty() && !beside { t.extend(hanging(&flags, 6, wd, pal.tone(Tone::Red))); }
                     }
                 }
             }
@@ -1519,7 +1524,7 @@ fn panes(app: &App, body: Rect) -> Panes {
 fn same(p: &Projection, row: &Key, held: &Key) -> bool {
     match (row, held) {
         (Key::Queue(a) | Key::Retired(a), Key::Queue(b) | Key::Retired(b)) => a == b,
-        (Key::Goal(_), Key::Goal(t)) => row == held || goal(p, row).is_some_and(|g| g.processes.iter().any(|b| b.trace == *t)),
+        (Key::Goal(a), Key::Goal(b)) => { let _ = p; a.split(' ').any(|t| b.split(' ').any(|u| t == u)) }
         _ => row == held,
     }
 }
@@ -1543,8 +1548,12 @@ fn place(app: &mut App, list: &[Row], h: usize) {
     // Its item moved to another row: the pane moves with it.
     if found.is_some_and(|i| i != was) { app.top[ti] = (app.top[ti] + i).saturating_sub(was); }
     app.focus_on(list, i);
+    let end = block_end(list, i);
+    // Scrolled through an item's lines (⇧↑↓, PgUp PgDn): left where it is while any of the item shows.
+    let (_, avail) = more(list.len(), h, app.top[ti]);
+    if app.scrolled && end >= app.top[ti] && i < app.top[ti] + avail { app.top[ti] = app.top[ti].min(last_top(list.len(), h)); return; }
+    app.scrolled = false;
     if h > 2 {
-        let end = block_end(list, i);
         if i < app.top[ti] { app.top[ti] = i.saturating_sub(1); }
         for _ in 0..3 {
             let (_, avail) = more(list.len(), h, app.top[ti]);
@@ -1783,7 +1792,9 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     // Footer: what each key does now, and only the keys that would change
     // something; or an error reading the projection.
-    let filter = app.filter.lock().map(|f| f.clone()).unwrap_or_default();
+    // Find and Range as the shown projection was read, so the footer and the rows agree.
+    let pf = &app.p.filter;
+    let filter = view::Filter { since: pf.since.map(|t| t as u64), until: pf.until.map(|t| t as u64), find: pf.find.clone() };
     let fw = foot.width as usize;
     // What is being typed shows over an error: the error is still there when it is done.
     let foot_line = if let Some(buf) = &app.input { let mut l = vec![Span::styled(" Find  ", pal.muted()), Span::styled(format!("{buf}▏   "), pal.ink())]; l.extend(key_bar(&pal, &[("⏎", "Apply".into(), 1), ("esc", "Cancel".into(), 1)], fw).spans); clip(Line::from(l), fw) }
@@ -1947,6 +1958,7 @@ fn key(app: &mut App, k: KeyEvent) -> bool {
             KeyCode::Down | KeyCode::Char('j') => app.keys_top += 1,
             KeyCode::PageUp => app.keys_top = app.keys_top.saturating_sub(5),
             KeyCode::PageDown => app.keys_top += 5,
+            KeyCode::Char('q') => return false,
             _ => { app.keys = false; app.keys_top = 0; }
         }
         return true;
@@ -2009,7 +2021,7 @@ fn key(app: &mut App, k: KeyEvent) -> bool {
         let at = app.focus[ti] as isize + by;
         let i = if by > 0 { focusable.iter().copied().find(|&j| j as isize >= at).or(focusable.last().copied()) }
                 else { focusable.iter().rev().copied().find(|&j| j as isize <= at).or(focusable.first().copied()) };
-        if let Some(i) = i { app.focus_on(&list, i); }
+        if let Some(i) = i { app.focus_on(&list, i); app.scrolled = false; }
     };
     let detail_page = app.detail_page.max(1);
     // A page of the list: its rows between the cues.
@@ -2026,12 +2038,29 @@ fn key(app: &mut App, k: KeyEvent) -> bool {
         (KeyCode::Down, KeyModifiers::SHIFT) if detail_shown => app.detail_top = app.detail_top.saturating_add(1),
         (KeyCode::PageUp, _) if detail_shown => app.detail_top = app.detail_top.saturating_sub(detail_page),
         (KeyCode::PageDown, _) if detail_shown => app.detail_top = app.detail_top.saturating_add(detail_page),
+        // A list of items with no detail beside it scrolls through its rows, an item's wrapped lines
+        // included; the focus follows to an item that shows.
+        (KeyCode::Up | KeyCode::Down | KeyCode::PageUp | KeyCode::PageDown, m) if !focusable.is_empty() && (m.contains(KeyModifiers::SHIFT) || matches!(k.code, KeyCode::PageUp | KeyCode::PageDown)) => {
+            let by = match k.code { KeyCode::Up => -1, KeyCode::Down => 1, KeyCode::PageUp => -list_page, _ => list_page };
+            let h = app.list_h as usize;
+            app.top[ti] = (app.top[ti] as isize + by).clamp(0, last_top(list.len(), h) as isize) as usize;
+            let (_, avail) = more(list.len(), h, app.top[ti]);
+            let (top, i) = (app.top[ti], app.focus[ti]);
+            if block_end(&list, i) < top || i >= top + avail {
+                if let Some(&j) = focusable.iter().find(|&&j| block_end(&list, j) >= top) { app.focus_on(&list, j); }
+            }
+            app.scrolled = true;
+        }
         (KeyCode::PageUp, _) => mv(app, -list_page),
         (KeyCode::PageDown, _) => mv(app, list_page),
         (KeyCode::Up, _) | (KeyCode::Char('k'), _) => mv(app, -1),
         (KeyCode::Down, _) | (KeyCode::Char('j'), _) => mv(app, 1),
         (KeyCode::Char('g'), _) => { app.top[ti] = 0; if let Some(&i) = focusable.first() { app.focus_on(&list, i); } }
-        (KeyCode::Char('G'), _) => match focusable.last() { Some(&i) => app.focus_on(&list, i), None => app.top[ti] = usize::MAX },
+        // The last item, and its last line.
+        (KeyCode::Char('G'), _) => match focusable.last() {
+            Some(&i) => { app.focus_on(&list, i); app.top[ti] = last_top(list.len(), app.list_h as usize); app.scrolled = true; }
+            None => app.top[ti] = usize::MAX,
+        },
         // Under 100 columns the detail opens over the list; beside it, it is already open.
         (KeyCode::Enter, _) if has_detail(app.tab) && !focusable.is_empty() && !app.detail_shown => app.detail_open = true,
         (KeyCode::Char('t'), _) => { app.dark = !app.dark; app.palette = if app.dark { DARK } else { LIGHT }; }
@@ -2253,7 +2282,7 @@ mod tests {
         let q = screen(p.clone(), Tab::Queue, 120, 20);
         assert!(q.find("Proposed").unwrap() < q.find("Queued").unwrap() && q.contains("New 1  Contested 1") && q.contains("#7"), "{q}");
         let sp = screen(p.clone(), Tab::Spec, 140, 30);
-        assert!(sp.contains("may_open") && sp.contains("Gate  Implementation") && sp.contains("✓     ✓") && sp.contains("✓ Present"), "{sp}");
+        assert!(sp.contains("may_open") && sp.contains("Gate  Implementation") && sp.contains("✓     ✓") && !sp.contains("✓ Present"), "{sp}");
         // The gate's section says where it is; its expression sits under its label.
         assert!(sp.contains("Gate · k/rules.rs:0") && sp.contains("Ensures") && sp.contains("  r == spec::may_open(locked)"), "{sp}");
     }
@@ -2732,6 +2761,15 @@ mod tests {
         assert!(s.contains("Taken off by 499a245") && !s.contains("↓ more"), "{s}");
         // The commit's subject once, under the first intent it took off.
         assert_eq!(s.matches("view: every trace record").count(), 1, "{s}");
+        // An intent taller than its pane: ⇧↓ scrolls through its lines, the focus staying on it.
+        let mut q = ready();
+        q.p = serde_json::from_value(serde_json::json!({ "configured": true, "repo": { "now": 1 },
+            "queue": [{ "id": 7, "intent": format!("{} the end.", "word ".repeat(80)) }, { "id": 8, "intent": "next" }] })).unwrap();
+        q.tab = Tab::Queue;
+        buffer(&mut q, 60, 10);
+        for _ in 0..12 { key(&mut q, k(KeyCode::Down, KeyModifiers::SHIFT)); buffer(&mut q, 60, 10); }
+        let s = screen_of(&mut q, 60, 10);
+        assert!(s.contains("the end."), "{s}");
     }
 
     #[test]
@@ -2750,6 +2788,8 @@ mod tests {
         assert!(f.contains("/ Find") && !f.contains("d Compare"), "{f}");
         // The range bon was started with is the range shown; All time clears both bounds.
         *app.filter.lock().unwrap() = view::Filter::new(Some("2026-11-01"), Some("2026-11-02"), None).unwrap();
+        // The footer says the range the shown projection was read over.
+        app.p.filter.since = Some(1_793_491_200); app.p.filter.until = Some(1_793_577_600 + 86399);
         assert!(foot(&mut app, 200, 30).contains("Range: since 2026-11-01 until 2026-11-02"));
         for _ in 0..RANGES.len() { key(&mut app, KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)); }
         let f = app.filter.lock().unwrap().clone();

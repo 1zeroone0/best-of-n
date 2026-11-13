@@ -86,7 +86,9 @@ impl Filter {
     /// `--find TEXT`; a date that is no calendar date is refused.
     pub fn new(since: Option<&str>, until: Option<&str>, find: Option<String>) -> Result<Filter, String> {
         let day = |flag: &str, s: &str| -> Result<u64, String> {
-            let p: Vec<i64> = s.split('-').map(|x| x.parse().unwrap_or(-1)).collect();
+            // YYYY-MM-DD, digits where it says so, before any arithmetic.
+            let shaped = s.len() == 10 && s.char_indices().all(|(i, c)| if i == 4 || i == 7 { c == '-' } else { c.is_ascii_digit() });
+            let p: Vec<i64> = if shaped { s.split('-').map(|x| x.parse().unwrap_or(-1)).collect() } else { Vec::new() };
             let t = match p[..] { [y, m, d] if y >= 1970 && (1..=12).contains(&m) && d >= 1 => days_from_civil(y, m, d) * 86400, _ => -1 };
             // A calendar date reads back as itself: 2026-02-30 does not.
             if t < 0 || date(t as u64) != s { return Err(format!("{flag} {s} is not a date; write it as YYYY-MM-DD")); }
@@ -1313,7 +1315,7 @@ pub fn measure_lines(t: &crate::projection::Totals) -> Vec<String> {
         lines.extend(aligned(&table));
         lines.push(String::new());
     }
-    if !fits.is_empty() { lines.extend(fits); lines.push(String::new()); }
+    if !fits.is_empty() { for f in fits { lines.extend(wrap(&f, 0, 2).lines().map(String::from)); } lines.push(String::new()); }
     for table in [utilization_table(t), turnaround_table(t)] {
         if !table.is_empty() { lines.extend(aligned(&table)); lines.push(String::new()); }
     }
@@ -1349,7 +1351,12 @@ pub fn text(s: &Value) -> String {
     let pushes = t["pushes"].as_u64().unwrap_or(0);
     let basis = if pushes > 0 { format!(" ({} over {})", opt(&t["pushed"]), count(pushes as usize, "push", "pushes")) } else { String::new() };
     if !t["per_verified_candidate"].is_null() || pushes > 0 {
-        out += &format!("{} per verified candidate · {} per push{basis}\n", opt(&t["per_verified_candidate"]), opt(&t["per_push"]));
+        // What per verified candidate divides: the reported searches' cost, over their verified candidates.
+        let rows = t["per_verified"].as_array().cloned().unwrap_or_default();
+        let v: u64 = rows.iter().filter_map(|r| r["verified"].as_u64()).sum();
+        let c: f64 = rows.iter().map(|r| r["generation"].as_f64().unwrap_or(0.0) + r["time_cost"].as_f64().unwrap_or(0.0)).sum();
+        let over = if v > 0 { format!(" ({} over {v} verified)", money(c)) } else { String::new() };
+        out += &wrap(&format!("{}{over} per verified candidate · {} per push{basis}", opt(&t["per_verified_candidate"]), opt(&t["per_push"])), 0, 0);
     }
     // What every figure here is over, when it is not everything.
     let f = &s["filter"];
@@ -1917,7 +1924,7 @@ mod tests {
 
     #[test]
     fn a_filter_refuses_what_is_no_date_and_finds_in_any_case() {
-        for bad in ["2026-13-45", "2026-02-30", "yesterday", "2026-1-5", "1969-12-31", "2026-11"] {
+        for bad in ["2026-13-45", "2026-02-30", "yesterday", "2026-1-5", "1969-12-31", "2026-11", "10000-01-01", "999999999999-01-01", "+202-11-12"] {
             assert_eq!(Filter::new(Some(bad), None, None).err().unwrap(), format!("--since {bad} is not a date; write it as YYYY-MM-DD"), "{bad}");
         }
         let f = Filter::new(Some("2026-11-12"), Some("2026-11-12"), Some("Code".into())).unwrap();

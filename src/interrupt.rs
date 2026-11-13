@@ -199,7 +199,7 @@ fn of(root: &Path, state: &Value) -> Vec<Value> {
         if !matches!(kind, "code" | "compaction") { continue; }
         let Some(reason) = block(p) else { continue };
         let raised = last_time(p);
-        let mut i = base("blocked", format!("blocked {}", p["trace"].as_str().unwrap_or("")), format!("{kind} {}", p["title"].as_str().unwrap_or("")), raised);
+        let mut i = base("blocked", format!("blocked {}", p["trace"].as_str().unwrap_or("")), format!("{} {}", crate::view::cap(kind), p["title"].as_str().unwrap_or("")), raised);
         i["reason"] = json!(reason);
         let mains: Vec<&Value> = p["searches"].as_array().into_iter().flatten().filter(|s| s["kind"] == kind).collect();
         let widths: Vec<String> = mains.iter().filter_map(|s| s["width"].as_u64()).map(|w| w.to_string()).collect();
