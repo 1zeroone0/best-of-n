@@ -958,8 +958,11 @@ fn warm(m: &Manifest, head: &str) -> (bool, bool) {
             let _ = std::fs::remove_dir_all(&snapshot);
             return None;
         }
-        // Writable by engineer alone, whatever bon's umask.
-        let _ = Command::new("chmod").args(["-R", "go-w"]).arg(&staging).status();
+        // Writable by engineer alone, whatever bon's umask, and readable by
+        // group bon (agent and every slot's user): the copy took the slot's
+        // build directory's mode (0700), and no ACL of it stays.
+        let _ = Command::new("chmod").args(["-R", "-N"]).arg(&staging).stderr(Stdio::null()).status();
+        let _ = Command::new("chmod").args(["-R", "go-w,g+rX"]).arg(&staging).status();
         write_links(&snapshot, &dir);
         // No tree, no key: this process's alone, removed with its directories.
         let Some(key) = key else { return Some(snapshot) };
@@ -1959,18 +1962,19 @@ fn staged(m: &Manifest, commit: &str) -> Result<(), String> {
     let log = trace_dir(&m.root);
     let name = format!("recheck.{}", RECHECKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
     let dir = scratch(&format!("{name}/{}", repository_name(&m.root)));
-    let build = scratch(&format!("{name}.build/build"));
+    let build = named_build(&format!("{name}.build/build"), Start::Empty);
     let tree = tree_of(&m.root, commit);
-    let made = materialize(&m.root, &tree, &dir).and_then(|_| sh(&dir, "chmod", &["-R", "a-w,g+rX", "."])).and_then(|_| writable_dir(&build));
+    let made = materialize(&m.root, &tree, &dir).and_then(|_| sh(&dir, "chmod", &["-R", "a-w,g+rX", "."]).map(|_| ()));
     let on = On { tree, test: None, cache: Cache::Off };
     let mut r = made.map_err(|e| format!("the staged checks could not be set up on {short}: {e}; nothing was pushed"));
-    for (k, command) in config.checks.staged.iter().enumerate() {
+    // One slot for them all: they build in one directory, its user's.
+    holding(|| for (k, command) in config.checks.staged.iter().enumerate() {
         if r.is_err() { break; }
         let path = log.join(format!("staged-{short}-{k}"));
         if !run_check(config, &on, &dir, &build, command, &path).0 {
             r = Err(format!("staged check `{command}` rejects {short}, the selected candidate, from a clean build; nothing was pushed (log: {})", path.display()));
         }
-    }
+    });
     remove_build(config, &build);
     for p in [dir.parent(), build.parent()].into_iter().flatten() {
         let _ = Command::new("chmod").args(["-R", "u+w"]).arg(p).stderr(Stdio::null()).status();
@@ -1990,7 +1994,7 @@ thread_local! {
 /// the suite, not what its change made cargo rebuild. bon times each run; a
 /// tree's time is kept in the verdict cache beside its verdict (the command's
 /// key with `seconds` added), so a tree is timed once per verdict cache and
-/// every bon process on the host ranks it alike. None if a run fails: then the
+/// every bon process of the user layer ranks it alike. None if a run fails: then the
 /// rank is not measured. Each run's log is `seconds-<k>` in the trace.
 fn suite_seconds(config: &Config, on: &On, dir: &std::path::Path, build: &std::path::Path, trace: &std::path::Path) -> Option<f64> {
     let mut total = 0.0;
@@ -4335,22 +4339,26 @@ mod tests {
     fn a_check_slot_s_user_writes_its_own_build_directory_alone() {
         // queue 62, 57, 56: what a candidate's check runs as (its slot's user) writes its own build directory, and
         // neither another slot's nor a kept trunk build; agent writes none of them; neither reads bon's state.
-        let c = config();
+        let mut c = config();
         let asks = |who: Who| !confined() && run_as(who, &["/usr/bin/true"]).status().is_ok_and(|s| s.success());
         // Confined (a candidate's tests), there is no one to ask as; otherwise bon setup made the slot users.
         if confined() { return; }
-        assert!(asks(Who::Check(0)) && asks(Who::Check(1)), "no check slot users: run bon setup");
+        // Two slots held, as checks hold them: their users run nothing else meanwhile.
+        c.pools.check_processes = c.pools.check_processes.max(2);
+        let held = [Slot::check(&c), Slot::check(&c)];
+        let (one, two) = (Who::Check(held[0].slot()), Who::Check(held[1].slot()));
+        assert!(asks(one) && asks(two), "no check slot users: run bon setup");
         let can = |who: Who, argv: &[&str]| run_as(who, argv).status().is_ok_and(|s| s.success());
         let (b0, b1) = (named_build("slot-test.0/build", Start::Empty), named_build("slot-test.1/build", Start::Empty));
-        assert!(ensure_build(&c, &b0, Who::Check(0)) && ensure_build(&c, &b1, Who::Check(1)));
+        assert!(ensure_build(&c, &b0, one) && ensure_build(&c, &b1, two));
         let file = |d: &PathBuf| d.join("x").to_string_lossy().to_string();
-        assert!(can(Who::Check(0), &["/usr/bin/touch", &file(&b0)]), "a slot's user writes its own build directory");
-        assert!(!can(Who::Check(0), &["/usr/bin/touch", &file(&b1)]), "and not another slot's");
-        assert!(!can(Who::Check(0), &["/bin/ls", &b1.to_string_lossy()]), "nor reads it");
+        assert!(can(one, &["/usr/bin/touch", &file(&b0)]), "a slot's user writes its own build directory");
+        assert!(!can(one, &["/usr/bin/touch", &file(&b1)]), "and not another slot's");
+        assert!(!can(one, &["/bin/ls", &b1.to_string_lossy()]), "nor reads it");
         assert!(!can(Who::Agent, &["/usr/bin/touch", &file(&b0)]), "agent writes no slot's build directory");
         // A slot's build is made again, empty, for another slot's user: nothing of the first stays.
-        assert!(ensure_build(&c, &b0, Who::Check(1)) && !b0.join("x").exists());
-        assert!(can(Who::Check(1), &["/usr/bin/touch", &file(&b0)]) && !can(Who::Check(0), &["/usr/bin/touch", &file(&b0)]));
+        assert!(ensure_build(&c, &b0, two) && !b0.join("x").exists());
+        assert!(can(two, &["/usr/bin/touch", &file(&b0)]) && !can(one, &["/usr/bin/touch", &file(&b0)]));
         remove_build(&c, &b0);
         remove_build(&c, &b1);
         assert!(!b0.exists() && !b1.exists(), "removed by its user, then engineer");
@@ -4359,24 +4367,24 @@ mod tests {
         std::fs::create_dir_all(kept.join("build")).unwrap();
         std::fs::write(kept.join("build/lib.rlib"), "").unwrap();
         sh(&kept, "chmod", &["-R", "go-w", "."]).unwrap();
-        for who in [Who::Agent, Who::Check(0)] {
+        for who in [Who::Agent, one] {
             assert!(can(who, &["/bin/cat", &kept.join("build/lib.rlib").to_string_lossy()]), "{who:?} reads a kept build");
             assert!(!can(who, &["/usr/bin/touch", &kept.join("build/lib.rlib").to_string_lossy()]), "{who:?} writes no kept build");
             assert!(!can(who, &["/usr/bin/touch", &kept.join("build/new").to_string_lossy()]), "{who:?} adds to no kept build");
         }
         // bon's state, in the user layer: no confined user reads, writes or searches it.
         let state = state_dir().unwrap();
-        for who in [Who::Agent, Who::Check(0), Who::Check(1)] {
+        for who in [Who::Agent, one, two] {
             assert!(!can(who, &["/bin/ls", &state.to_string_lossy()]), "{who:?} lists no state");
             assert!(!can(who, &["/usr/bin/touch", &state.join("x").to_string_lossy()]), "{who:?} writes no state");
         }
         // What a check leaves running is stopped before the slot's next check.
-        let mut left = Command::new("sudo").args(["-n", "-u", "check0", "/bin/sleep", "60"]).spawn().unwrap();
+        let mut left = Command::new("sudo").args(["-n", "-u", &one.name(), "/bin/sleep", "60"]).spawn().unwrap();
         std::thread::sleep(Duration::from_millis(500));
-        vacate(0);
+        vacate(held[0].slot());
         let start = Instant::now();
         while left.try_wait().unwrap().is_none() && start.elapsed() < Duration::from_secs(5) { std::thread::sleep(Duration::from_millis(100)); }
-        assert!(left.try_wait().unwrap().is_some(), "vacate stops what check0 left running");
+        assert!(left.try_wait().unwrap().is_some(), "vacate stops what a slot's user left running");
         let _ = std::fs::remove_dir_all(&kept);
         for p in ["slot-test.0", "slot-test.1"] { let _ = std::fs::remove_dir_all(scratch(p)); }
     }
@@ -4629,7 +4637,7 @@ mod tests {
         let mut config = config();
         let mut m = Manifest { config: config.clone(), root: work.clone() };
         assert_eq!(staged(&m, &base), Ok(()), "no staged checks: nothing runs");
-        if is_agent() { return; }
+        if confined() { return; }
         config.checks.staged = vec!["test -f a".into(), "cat a".into()];
         m.config = config.clone();
         assert_eq!(staged(&m, &base), Ok(()));
@@ -4649,14 +4657,13 @@ mod tests {
     fn a_tree_s_suite_seconds_are_timed_once_and_read_back_alike() {
         // queue 71: bon times the suite on a judged tree; the verdict cache keeps the figure, so a second ranking agrees.
         let (_remote, work, base, _test) = landing_fixture("seconds");
-        if is_agent() { return; }
+        if confined() { return; }
         let mut config = config();
         config.checks.test = vec!["sleep 0.3".into()];
         config.checks.verify = vec!["true".into()];
         let dir = scratch("seconds-test/work");
-        let build = scratch("seconds-test.build/build");
+        let build = named_build("seconds-test.build/build", Start::Empty);
         check_directory(&work, &base, &dir).unwrap();
-        writable_dir(&build).unwrap();
         let trace = std::env::temp_dir().join(format!("bon-seconds-{}", std::process::id()));
         std::fs::create_dir_all(&trace).unwrap();
         let on = On::commit(&work, &base);
@@ -4669,6 +4676,7 @@ mod tests {
         // A run that fails measures nothing.
         config.checks.verify = vec!["false".into()];
         assert_eq!(suite_seconds(&config, &on, &dir, &build, &trace), None);
+        remove_build(&config, &build);
         for p in [dir.parent().unwrap(), build.parent().unwrap(), &trace, work.parent().unwrap()] {
             let _ = Command::new("chmod").args(["-R", "u+w"]).arg(p).status();
             let _ = std::fs::remove_dir_all(p);

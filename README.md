@@ -86,7 +86,7 @@ which no other candidate runs: one that fails stops bon as a suspect check
 does, and nothing is pushed. A compaction candidate's rank = its `rank`
 command's integer − its suite's seconds, rounded (each test and verify check
 run again once built, timed by bon, kept with the verdict, so a tree is timed
-once per host).
+once per user layer).
 
 - **Isolated, as the policy states and the isolated gate observes before
   every search:** each check runs as the user of the check slot it holds, in

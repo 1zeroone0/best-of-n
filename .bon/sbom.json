@@ -2471,7 +2471,7 @@
       "group": "tcb",
       "name": "claude",
       "type": "application",
-      "version": "2.1.318 (Claude Code)"
+      "version": "absent"
     },
     {
       "group": "tcb",
