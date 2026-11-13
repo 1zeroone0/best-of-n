@@ -17,17 +17,20 @@
 #   CX_MODE        kernel: the counterexample stubs' tests: blind, split or few [blind]
 #   ATTEMPTS       attempts `bon code` may make, each WIDTH wide [1]
 #   TIME           each agent process's time limit, seconds [1800]
+#   CHECK_TIME     each check's cutoff, seconds [1800]
 #   PROJECT        kernel: the small crate in bench/sandbox; bon: bon's own
 #                  source at this commit, one function broken [kernel]
-#   HARNESS        the code search's harness, a TOML inline table's fields
-#                  without n [the stub]; e.g. a real one, through bon-sample:
-#                  'name = "claude", model = "claude-haiku-5-5", command = [...]'
-#   CX_HARNESS     the counterexample and foil searches' harness, likewise [the stub]
-#   GENERATION, CHECKS, CHECK_THREADS, CORES, MEMORY_GB
-#                  the host file's pool keys, to size the pools as another
-#                  machine's [unset: /etc/bon/host.toml's, then this machine's]
-# bon reads its own host file for the run (BON_HOST): /etc/bon/host.toml with
-# the verdict cache in the sandbox, cleanup = "own", and those keys.
+#   PROGRAM        what the code, compaction and queue searches' role runs, a
+#                  host file role's keys [the stub]; e.g. a real one, through
+#                  bon-sample: 'program = ["/path/bon-sample"], client = "claude",
+#                  model = "claude-haiku-5-5", context = 80000'
+#   CX_PROGRAM     what the counterexample and foil searches' role runs, likewise [the stub]
+#   AGENT_PROCESSES, CHECK_PROCESSES, CHECK_THREADS
+#                  the host file's pool sizes, to size the pools as another
+#                  machine's [unset: this machine's defaults]
+# bon reads a host file the run writes (BON_HOST): the installed host file's
+# path, toolchain homes and prices, the two roles, the verdict cache in the
+# sandbox, cleanup = "own", and those sizes.
 set -eu
 WIDTH=${1:?usage: run.sh WIDTH [TAG]}
 TAG=${2:-w$WIDTH}
@@ -43,10 +46,11 @@ CX_MODE=${CX_MODE:-blind}
 ATTEMPTS=${ATTEMPTS:-1}
 NS=$WIDTH; i=1; while [ "$i" -lt "$ATTEMPTS" ]; do NS="$NS, $WIDTH"; i=$((i + 1)); done
 TIME=${TIME:-1800}
+CHECK_TIME=${CHECK_TIME:-1800}
 PROJECT=${PROJECT:-kernel}
-STUB='name = "stub", model = "stub", command = ["/bin/sh", ".bon/stub.sh"]'
-HARNESS=${HARNESS:-$STUB}
-CX_HARNESS=${CX_HARNESS:-$STUB}
+STUB='program = ["/bin/sh", ".bon/stub.sh"]'
+PROGRAM=${PROGRAM:-$STUB}
+CX_PROGRAM=${CX_PROGRAM:-$STUB}
 if [ -z "${BON:-}" ]; then
   (cd "$REPO" && cargo build -q --offline)
   BON=$REPO/target/debug/bon
@@ -73,13 +77,13 @@ case "$PROJECT" in
     # bench/ (which says how trunk is broken) left out. On its trunk exec::eq
     # says a strict prefix equals the longer text: the tests miss it, Verus
     # does not. A code stub restores the file kept in .bon/fix/, which is
-    # there only when stubs write the code: a real harness would read the
+    # there only when stubs write the code: a real program would read the
     # answer in it.
     WORK=$SANDBOX/bon
     mkdir -p "$WORK"
     (cd "$REPO" && git archive HEAD) | tar -x -C "$WORK"
     rm -rf "$WORK/.bon" "$WORK/bench" && mkdir -p "$WORK/.bon"
-    if [ "$HARNESS" = "$STUB" ]; then mkdir -p "$WORK/.bon/fix/src" && cp "$WORK/src/exec.rs" "$WORK/.bon/fix/src/exec.rs"; fi
+    if [ "$PROGRAM" = "$STUB" ]; then mkdir -p "$WORK/.bon/fix/src" && cp "$WORK/src/exec.rs" "$WORK/.bon/fix/src/exec.rs"; fi
     perl -0pi -e 's/    a\.len\(\) == b\.len\(\) && is_prefix_of\(a, b\)\n/    a.len() <= b.len() && is_prefix_of(a, b)\n/ or die "exec::eq not found\n"' "$WORK/src/exec.rs"
     PATHS='"src/spec.rs", "src/gates.rs", "examples/kernel.rs"'
     ;;
@@ -93,7 +97,6 @@ cat > "$WORK/.bon/bon.toml" <<EOF
 # The benchmark's sandbox: stub agents, a local bare origin, no traces remote.
 limit = 1000.0
 rate = 0
-harness = [{ $HARNESS, n = [$NS] }]
 
 [agent_process]
 limit = 1.0
@@ -105,9 +108,16 @@ test = ["cargo test -q"]
 verify = ["cargo verus verify"]
 agree = ["cargo run -q --example kernel"]
 rank = { code = "echo 0" }
+time = $CHECK_TIME
+
+[searches]
+code = { role = "code", n = [$NS] }
+compaction = { role = "code", n = [$NS] }
+queue = { role = "code", n = [$NS] }
+counterexample = { role = "test", n = [$CX_WIDTH] }
+foil = { role = "test", n = [$CX_WIDTH] }
 
 [counterexample]
-harness = [{ $CX_HARNESS, n = [$CX_WIDTH] }]
 path = "tests/counterexample.rs"
 build = "cargo test -q --no-run --test counterexample"
 run = "cargo test -q --test counterexample"
@@ -127,25 +137,25 @@ echo "$remotes"
 if [ "$(echo "$remotes" | awk '{print $2}' | sort -u)" != "$ORIGIN" ]; then echo "refusing: a remote other than $ORIGIN" >&2; exit 1; fi
 if grep -q '^traces' "$WORK/.bon/bon.toml"; then echo "refusing: bon.toml names a traces remote" >&2; exit 1; fi
 
-# The run's host file: the host's, with this run's verdict cache, cleanup of
-# its own directories only, and any pool sizing asked for. Top-level keys go
-# before the first table; a key the host's file sets is replaced.
+# The run's host file, written here: the installed host file's PATH,
+# toolchain homes and prices (keys of the same shape in every host file
+# bon has read), this run's two roles, its verdict cache, cleanup of its own
+# directories only, and any pool sizes asked for.
 HOSTFILE=$SANDBOX/host.toml
-keys="verdicts = \"$SANDBOX/verdicts\"
-cleanup = \"own\""
-for k in generation checks check_threads cores memory_gb; do
-  v=$(eval "echo \${$(echo $k | tr a-z A-Z):-}")
-  if [ -n "$v" ]; then keys="$keys
-$k = $v"; fi
-done
-names=$(echo "$keys" | awk '{print $1}' | paste -s -d '|' -)
-HOST=/etc/bon/host.toml
-first=$(grep -n '^\[' "$HOST" | head -1 | cut -d: -f1)
-first=${first:-$(($(wc -l < "$HOST") + 1))}
+HOST=${HOST:-/etc/bon/host.toml}
 {
-  head -n $((first - 1)) "$HOST" | grep -v -E "^($names)[ =]"
-  printf '%s\n\n' "$keys"
-  tail -n +"$first" "$HOST"
+  grep -E '^(path|rustup_home|cargo_home) *=' "$HOST"
+  echo "verdicts = \"$SANDBOX/verdicts\""
+  echo 'cleanup = "own"'
+  for k in agent_processes check_processes check_threads; do
+    v=$(eval "echo \${$(echo $k | tr a-z A-Z):-}")
+    if [ -n "$v" ]; then echo "$k = $v"; fi
+  done
+  # A role's keys, one per line: `program = [...], client = "x"` splits at `, client =`.
+  keys() { echo "$1" | perl -pe 's/, ([a-z_]+ =)/\n$1/g'; }
+  printf '\n[roles.code]\n%s\n\n[roles.test]\n%s\n\n' "$(keys "$PROGRAM")" "$(keys "$CX_PROGRAM")"
+  # [prices], the last table of the host file bon setup writes.
+  sed -n '/^\[prices\]/,$p' "$HOST"
 } > "$HOSTFILE"
 chmod 0644 "$HOSTFILE"
 export BON_HOST=$HOSTFILE

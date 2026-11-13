@@ -6,7 +6,7 @@ each program first on bon's PATH; see bench/README.md).
 
 Groups each process by what it is for (the program, and for sudo the program
 it runs as agent), and prints per group: how many, seconds in total, and per
-agent process. A harness session (sudo ... stub.sh, claude, codex) and a
+agent process. A program session (sudo ... stub.sh, claude, codex) and a
 check (sudo ... /bin/sh -c) are counted apart from the fixed overhead.
 """
 import collections
@@ -24,7 +24,7 @@ def group(f):
         while rest and "=" in rest[0] and not rest[0].startswith("/"):
             rest.pop(0)
         if any(".bon/stub.sh" in a or "bon-sample" in a or a in ("claude", "codex") for a in rest[:3]):
-            return "session (sudo, harness)"
+            return "session (sudo, program)"
         if rest[:2] == ["/bin/sh", "-c"]:
             return "check (sudo, sh -c)"
         return "sudo " + (" ".join(rest[:2]) if rest[:1] == ["cp"] or rest[:1] == ["rm"] or rest[:1] == ["chmod"] else (rest[0].rsplit("/", 1)[-1] if rest else "?"))

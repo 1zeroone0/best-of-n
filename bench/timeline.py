@@ -4,12 +4,12 @@ times and the seconds each supervised log records.
     python3 -I timeline.py TRACES_DIR
 
 Per agent process (a trace directory <run>/<search>/<index>):
-  setup    its trace directory made -> its argv written: a generation slot's
+  setup    its trace directory made -> its argv written: an agent_processes slot's
            wait, the working directory (materialize, chmod, ACLs), its build's
            clone (and the wait for trunk's build)
-  session  the harness log's own seconds; for a stub, split into its sleep and
+  session  the program log's own seconds; for a stub, split into its sleep and
            its own checks (bon's cargo waits for a check slot inside them)
-  judge    the harness log written -> facts.json written: the judge's build
+  judge    the program log written -> facts.json written: the judge's build
            clone, its checks (run, or answered by the cache), the teardown
   checks   the seconds the judge's checks ran (slot waits excluded)
 Prints, per search, the median and 90th percentile of each, and the span from
@@ -38,15 +38,16 @@ def seconds(p):
 
 def agent(d):
     files = set(os.listdir(d))
-    if "argv" not in files or "harness" not in files:
+    log = "program" if "program" in files else "harness"
+    if "argv" not in files or log not in files:
         return None
-    start, argv, harness = birth(d), birth(os.path.join(d, "argv")), birth(os.path.join(d, "harness"))
-    session, text = seconds(os.path.join(d, "harness"))
+    start, argv, harness = birth(d), birth(os.path.join(d, "argv")), birth(os.path.join(d, log))
+    session, text = seconds(os.path.join(d, log))
     m = re.search(r"stub-seconds: sleep ([0-9.]+) own-checks ([0-9.]+)", text)
     end = birth(os.path.join(d, "facts.json")) if "facts.json" in files else harness
     checks = 0.0
     executed = cached = 0
-    for f in files - {"argv", "harness", "prompt", "facts.json", "index", "error", "killed"}:
+    for f in files - {"argv", "program", "harness", "prompt", "facts.json", "index", "error", "killed"}:
         s, h = seconds(os.path.join(d, f))
         if h.startswith("exit: "):
             executed += 1

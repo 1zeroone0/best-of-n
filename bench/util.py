@@ -2,7 +2,7 @@
 every check log that ran a command ("exit:") is an interval ending at the
 log's birth time and lasting its recorded seconds (a check slot's wait
 excluded). Agent processes' own cargo runs are not in the traces (their time
-is in the harness log), so with K > 0 this undercounts the pool's use.
+is in the program log), so with K > 0 this undercounts the pool's use.
 
     python3 -I util.py TRACES_DIR POOL
 
@@ -25,7 +25,7 @@ def intervals(d):
     out = []
     for root, _, files in os.walk(d):
         for f in files:
-            if f in ("harness", "argv", "prompt", "facts.json", "index"):
+            if f in ("program", "harness", "argv", "prompt", "facts.json", "index"):
                 continue
             p = os.path.join(root, f)
             try:
