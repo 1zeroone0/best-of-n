@@ -39,14 +39,15 @@ sleep "$SLEEP"
 PROJECT=${PROJECT:-kernel}
 v=$((index % VARIANTS))
 if [ "$PROJECT" = bon ]; then
-  # bon's own source: trunk's exec::eq is wrong; .bon/fix/ holds it right,
-  # .bon/foil/ as trunk has it. Variant v > 0 is the fix with its own comment.
+  # bon's own source: trunk's exec::eq is wrong; .bon/fix/ holds it right.
+  # Variant v > 0 is the fix with its own comment. A foil undoes the change
+  # under test, whose diff its prompt carries: trunk's wrong body comes back.
   case "$kind" in
     code)
       cp .bon/fix/src/exec.rs src/exec.rs
       if [ "$v" -gt 0 ]; then echo "// variant $v" >> src/exec.rs; fi
       ;;
-    foil) cp .bon/foil/src/exec.rs src/exec.rs ;;
+    foil) printf '%s\n' "$prompt" | sed -n '/^diff --git /,/^The checks are /p' | sed '$d' | patch -s -R -p1 ;;
     counterexample)
       t=$((index % TEST_VARIANTS))
       mkdir -p tests

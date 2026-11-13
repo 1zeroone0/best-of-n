@@ -57,11 +57,13 @@ times, as an agent iterating does.
 
 `PROJECT=bon` makes the sandbox bon's own source at HEAD instead: its
 `.bon/` replaced by the benchmark's (the stub harness, the local bare origin,
-no `traces` key), and on its trunk `exec::eq` broken to say a strict prefix
-equals the longer text: bon's tests miss it, Verus does not. A code stub
-copies the right file back from `.bon/fix/` (variant v > 0 appends
-`// variant v`, so `VARIANTS` sets how many distinct trees); a foil copies
-trunk's wrong one from `.bon/foil/`; a counterexample tests
+no `traces` key), `bench/` left out (it says how trunk is broken), and on its
+trunk `exec::eq` broken to say a strict prefix equals the longer text: bon's
+tests miss it, Verus does not. A code stub copies the right file back from
+`.bon/fix/` (variant v > 0 appends `// variant v`, so `VARIANTS` sets how
+many distinct trees), which is in the tree only when stubs write the code (a
+real harness would read the answer there); a foil undoes the diff its prompt
+shows it; a counterexample tests
 `best_of_n::exec::eq` on a prefix. The checks are `cargo test -q`,
 `cargo verus verify` and the kernel example: a real check's cost and memory.
 

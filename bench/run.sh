@@ -69,16 +69,18 @@ case "$PROJECT" in
     PATHS='"src/spec.rs", "tests/trunk.rs", "examples/kernel.rs"'
     ;;
   bon)
-    # bon's source at HEAD, its own .bon/ replaced by the benchmark's. On its
-    # trunk exec::eq says a strict prefix equals the longer text: the tests
-    # miss it, Verus does not. The stub restores the file kept in .bon/fix/.
+    # bon's source at HEAD, its own .bon/ replaced by the benchmark's and
+    # bench/ (which says how trunk is broken) left out. On its trunk exec::eq
+    # says a strict prefix equals the longer text: the tests miss it, Verus
+    # does not. A code stub restores the file kept in .bon/fix/, which is
+    # there only when stubs write the code: a real harness would read the
+    # answer in it.
     WORK=$SANDBOX/bon
     mkdir -p "$WORK"
     (cd "$REPO" && git archive HEAD) | tar -x -C "$WORK"
-    rm -rf "$WORK/.bon" && mkdir -p "$WORK/.bon/fix/src" "$WORK/.bon/foil/src"
-    cp "$WORK/src/exec.rs" "$WORK/.bon/fix/src/exec.rs"
+    rm -rf "$WORK/.bon" "$WORK/bench" && mkdir -p "$WORK/.bon"
+    if [ "$HARNESS" = "$STUB" ]; then mkdir -p "$WORK/.bon/fix/src" && cp "$WORK/src/exec.rs" "$WORK/.bon/fix/src/exec.rs"; fi
     perl -0pi -e 's/    a\.len\(\) == b\.len\(\) && is_prefix_of\(a, b\)\n/    a.len() <= b.len() && is_prefix_of(a, b)\n/ or die "exec::eq not found\n"' "$WORK/src/exec.rs"
-    cp "$WORK/src/exec.rs" "$WORK/.bon/foil/src/exec.rs"
     PATHS='"src/spec.rs", "src/gates.rs", "examples/kernel.rs"'
     ;;
   *) echo "PROJECT is kernel or bon" >&2; exit 1 ;;
