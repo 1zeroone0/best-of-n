@@ -202,9 +202,18 @@ fn main() {
     // built from; trunk is what the last fetch or push left in the remote's ref.
     let (remote, branch) = best_of_n::trusted::remote_trunk(r);
     let at_trunk = |p: &str| git(r, &["show", &format!("refs/remotes/{remote}/{branch}:{p}")]).ok();
-    // Said before a search only, where the kernel decides: other commands' own lines stay one.
-    if (SEARCHES.contains(&name) || command.1 == "<queue-id>") && at_trunk("Cargo.toml").is_some_and(|t| t.contains("name = \"best-of-n\"")) {
-        let differ = stale(at_trunk);
+    // Said before a search only, where the kernel decides: other commands' own
+    // lines stay one. Only in the repository this bon was built from — trunk's
+    // package is this binary's own (env!, not a name in code) — where the
+    // installed kernel should match trunk's.
+    let built_here = (|| -> Option<bool> {
+        let t = at_trunk("Cargo.toml")?;
+        let name = toml::from_str::<toml::Value>(&t).ok()?.get("package")?.get("name")?.as_str()?.to_string();
+        Some(name == env!("CARGO_PKG_NAME"))
+    })() == Some(true);
+    if (SEARCHES.contains(&name) || command.1 == "<queue-id>") && built_here {
+        let kernel_files = best_of_n::trusted::kernel_files(r, &format!("refs/remotes/{remote}/{branch}"));
+        let differ = stale(&kernel_files, at_trunk);
         if !differ.is_empty() {
             eprintln!("bon: this bon was built from another kernel than trunk's ({}); reinstall: cargo install --path . --locked", differ.join(", "));
         }
@@ -366,6 +375,13 @@ fn check(root: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The source of the kernel's files this bon was built from, by path. The
+/// paths are literals because a file's bytes are embedded at build time, with
+/// `include_str!`, which takes a literal (bon has no build script — a search
+/// may write none, and this binary's embedded truth must not be a search's to
+/// shape). Which files are the kernel is not decided here but derived from the
+/// tree (`best_of_n::trusted::kernel_files`); a test pins this content store to
+/// that derivation, so the two never drift.
 const KERNEL: [(&str, &str); 5] = [
     ("src/spec.rs", include_str!("spec.rs")),
     ("src/gates.rs", include_str!("gates.rs")),
@@ -374,10 +390,16 @@ const KERNEL: [(&str, &str); 5] = [
     ("src/process.rs", include_str!("process.rs")),
 ];
 
-/// The kernel's files whose trunk version (read by `trunk`, None if missing)
-/// differs from the one this bon was built from.
-fn stale(trunk: impl Fn(&str) -> Option<String>) -> Vec<&'static str> {
-    KERNEL.iter().filter(|(p, built)| trunk(p).is_none_or(|t| t.trim_end() != built.trim_end())).map(|(p, _)| *p).collect()
+/// The kernel's files whose trunk version differs from the one this bon was
+/// built from: the kernel files are those trunk's tree and manifest name
+/// (`kernel_files`), not a list in code; a trunk kernel file this binary did
+/// not embed (added since it was built) counts as differing, as does one whose
+/// bytes changed. `trunk(p)` reads trunk's version of p, None if missing.
+fn stale(kernel_files: &[String], trunk: impl Fn(&str) -> Option<String>) -> Vec<String> {
+    kernel_files.iter().filter(|p| match KERNEL.iter().find(|(kp, _)| &kp == p) {
+        Some((_, built)) => trunk(p).is_none_or(|t| t.trim_end() != built.trim_end()),
+        None => true,
+    }).cloned().collect()
 }
 
 /// .bon/cost.toml: the totals at the top of bon's view, always these keys in
@@ -997,6 +1019,20 @@ mod tests {
     use best_of_n::trusted::{rules, holes, skips, PROVEN_OR_CHECKED, NO_CHECK_WRITABLE, NOT_JUDGED};
 
     #[test]
+    fn the_embedded_kernel_is_exactly_the_trees_kernel_files() {
+        // C: which files are the kernel is derived from the tree and manifest,
+        // not a list in code. The embedded content store (KERNEL) must name
+        // exactly those, so a stale-install check never drifts from the truth.
+        let root = Path::new(concat!(env!("CARGO_MANIFEST_DIR")));
+        let mut derived = best_of_n::trusted::kernel_files(root, "HEAD");
+        // A checkout run (bon check materializes the tree without .git) cannot
+        // read HEAD; the pin runs where git is, which is where drift is made.
+        if derived.is_empty() { return; }
+        let mut embedded: Vec<String> = KERNEL.iter().map(|(p, _)| p.to_string()).collect();
+        embedded.sort();
+        derived.sort();
+        assert_eq!(embedded, derived, "KERNEL's files must equal the tree's kernel files");
+    }
 
     #[test]
     fn the_readmes_command_table_is_the_usage_word_for_word() {
@@ -1211,10 +1247,15 @@ mod tests {
     #[test]
     fn bon_notices_its_own_kernel_is_stale() {
         let built = |p: &str| KERNEL.iter().find(|(k, _)| *k == p).map(|(_, t)| t.to_string());
-        assert!(stale(built).is_empty());
-        assert_eq!(stale(|p| if p == "src/exec.rs" { Some("fn f() {}".into()) } else { built(p) }), ["src/exec.rs"]);
-        assert_eq!(stale(|p| if p == "src/spec.rs" { None } else { built(p) }), ["src/spec.rs"]);
-        assert_eq!(stale(|_| None).len(), 5);
+        let kf: Vec<String> = KERNEL.iter().map(|(p, _)| p.to_string()).collect();
+        assert!(stale(&kf, built).is_empty());
+        assert_eq!(stale(&kf, |p| if p == "src/exec.rs" { Some("fn f() {}".into()) } else { built(p) }), ["src/exec.rs"]);
+        assert_eq!(stale(&kf, |p| if p == "src/spec.rs" { None } else { built(p) }), ["src/spec.rs"]);
+        assert_eq!(stale(&kf, |_| None).len(), 5);
+        // A trunk kernel file this binary did not embed (added since it was built) is stale.
+        let mut added = kf.clone();
+        added.push("src/new_gate.rs".into());
+        assert_eq!(stale(&added, built), ["src/new_gate.rs"]);
     }
 
     #[test]

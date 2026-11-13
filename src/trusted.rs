@@ -4769,6 +4769,25 @@ pub fn rules(root: &std::path::Path, commit: &str, m: &Manifest) -> Result<Vec<S
 /// account's proven rule reads the working tree, but at a commit from git.
 /// Empty when there is no library. Used to tell a stale install from trunk's
 /// kernel without a list of file names in code.
+pub fn kernel_files(root: &std::path::Path, commit: &str) -> Vec<String> {
+    let read = |p: &str| git(root, &["cat-file", "blob", &format!("{commit}:{p}")]).unwrap_or_default();
+    let files: Vec<String> = git(root, &["ls-tree", "-r", "--name-only", commit]).unwrap_or_default().lines().map(String::from).collect();
+    let exists = |p: &str| files.iter().any(|f| f == p);
+    if !exists("src/lib.rs") { return Vec::new(); }
+    let manifest: toml::Value = toml::from_str(&read(MANIFEST)).unwrap_or(toml::Value::Table(Default::default()));
+    let trusted: Vec<String> = manifest.get("account").and_then(|a| a.get("trusted")).and_then(|t| t.as_array())
+        .into_iter().flatten().filter_map(|s| s.as_str().map(String::from)).collect();
+    let under = |t: &str, f: &str| { let d = t.trim_end_matches('/'); f == d || f.starts_with(&format!("{d}/")) };
+    modules("src/lib.rs", &read, &exists, None).into_iter()
+        .filter(|f| f != "src/lib.rs" && f != "src/main.rs" && !trusted.iter().any(|t| under(t, f))
+            && read(f).lines().any(|l| l.trim_start().starts_with("verus!")))
+        .collect()
+}
+
+/// The one-line reason a candidate of `kind` breaks a rule its `base` does
+/// not, judged by that kind's own authority (a counterexample writes its test,
+/// a spec search the check paths): the rule's text for the record, or None.
+/// Reading the tree fails suspiciously, so it reads as a break, not a pass.
 pub fn broken_by_candidate(m: &Manifest, kind: &Kind, base: &str, commit: &str) -> Option<String> {
     let mut one = Kind::Counterexample { goal: None };
     one = match kind {
