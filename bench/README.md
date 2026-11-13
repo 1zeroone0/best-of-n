@@ -172,3 +172,92 @@ Simulated memory (`BON_CORES=12`, `BON_MEMORY_GB` what was free): with 40 GB
 wired by a ballast, 6–7 GB stayed free (other sessions held the rest) and every
 row matched the full machine's within noise, no swap, pressure normal; with
 49.75 GB wired the kernel's pressure went critical and the level was stopped.
+
+## Results: what a check waits on (bench3)
+
+Same host, later the same evening, every tree distinct (`VARIANTS=WIDTH
+TEST_VARIANTS=4 K=0 GENERATION=500`) unless noted. "Scan" is the CPU that
+macOS's `XprotectService` and `syspolicyd` used over the run (`ps`): it is no
+descendant of bon, so `CPU s` leaves it out.
+
+**What a check waits on.** One judged candidate of the kernel sandbox, alone:
+materialize, permissions, build clone, sudo and env are 0.01–0.07 s each;
+`cargo test` 1.2 s wall for 0.6 CPU-s, `cargo verus verify` 1.0 s for 0.4,
+the agree check 0.3 s for 0.02. The rest of each is macOS scanning every new
+executable and library when it is first loaded, one at a time host-wide
+(`XprotectService`, single-threaded, ~0.15 s each; a hard link to a file it
+already scanned is not scanned again, a copy or clone is): 1.3 CPU-s per
+candidate, more than its checks' own. Seven at once, `cargo test` took 6.3 s;
+14 at once, 12.3 s; 28, 24 s: the queue for the scanner, not the cores.
+Clones of trunk's build contend in the file system: one alone costs 0.1
+CPU-s, each of 7 at once 0.6, of 14 at once 1.2.
+
+What changed: trunk's proc-macro libraries are hard-linked into every build
+(they are engineer's, so no agent process can change them; a library whose
+sources are the repository's is cloned as before), clones run two at a time
+host-wide, a candidate's checks wait for one slot, and the pool is sized by
+memory (`checks = min(free GB / 1.5, 2 × cores / check_threads)`).
+
+| width | build | wall s | CPU s | peak RSS MB | scan CPU s | code search s | counterexample search s | pool full |
+|---|---|---|---|---|---|---|---|---|
+| 128 | 732dbc4 | 777 | 757 | 2221 | 443 | 272 | 436 | 84% / 88% |
+| 128 | links | 354 | 711 | 3243 | 162 | 136 | 150 | 67% / 64% |
+| 128 | links, 14 checks | 363 | 799 | 4009 | 158 | | | |
+| 128 | links, 28 checks | 362 | 838 | 3974 | 161 | | | |
+| 128 | links, clones two at a time (7 checks) | 334 | 549 | 1922 | 162 | 122 | 146 | 63% / 65% |
+| 500 | lazy (above) | 2895 | 3502 | 5790 | | 1177 | 1571 | 81% / 93% |
+| 500 | links, clones two at a time (7 checks) | 945 | 1974 | 6567 | 617 | 368 | 498 | 81% / 79% |
+
+Cores busy (CPU ÷ wall), width 500: 1.2 before, 2.1 after, plus 0.65 of the
+scanner. More check slots than seven do not help on this Mac: the scanner,
+one core, is the bottleneck (617 CPU-s over a 945 s run), not bon and not the
+pool. The counterexample search's matrix (4 tests × 500 candidates) is 498 s
+of it; each verdict is still a build of its own (a test's code runs there, so
+it may not be shared), one new test binary for the scanner, and one clone.
+
+**Trunk's build kept across bon processes**, width 4, `SLEEP=5 K=0`, the
+same trunk twice (`bon code`, then `bon counterexample` on the trunk it pushed):
+
+| project | build | code wall s, 1st / 2nd | counterexample wall s, 1st / 2nd |
+|---|---|---|---|
+| kernel | before | 62.7 / 62.7 | 42.1 / 43.1 |
+| kernel | kept | 63.7 / 27.9 | 42.1 / 10.3 |
+| bon | before | 130.4 / 124.4 | 73.8 / 76.0 |
+| bon | kept | 126.4 / 86.4 | 72.8 / 29.7 |
+
+The key is trunk's tree, its test and verify checks, and the toolchain the
+checks see, so a sandbox whose `.bon/bon.toml` differs (another harness) is
+another key. The kernel's kept build is 0.2 GB, bon's 0.8 GB; three are kept.
+
+**Samples that read the prompt cache**, kernel sandbox, width 32, real Haiku
+samples (`bon-sample --via claude`), the code search only:
+
+| build | cache reads | cache writes | output | generation | code search s |
+|---|---|---|---|---|---|
+| before | 53,625 | 89,031 | 7,199 | $0.0220 | 6.9 |
+| first leads | 127,875 | 14,781 | 7,585 | $0.0080 | 6.2 |
+
+The others started 1.1 s after the first (its reply's first event).
+
+**Real samples on bon's own source** (`PROJECT=bon`, Haiku one-shot, foil and
+counterexample stubs), after the sandbox stopped carrying the answer
+(`.bon/fix/`, `bench/`):
+
+| width | applied | tests accept | Verus proves | distinct trees applied | pushed | code search s | generation | cache reads / writes |
+|---|---|---|---|---|---|---|---|---|
+| 16 | 10 | 0 | 0 | 10 | no (too few verified) | 49 | $0.066 | 1.33M / 94k |
+| 64 | 34 | 0 | 0 | 32 | no (too few verified) | 81 | $0.225 | 5.57M / 110k |
+
+At width 64: 13 replies had no edit blocks, 16 tried to write a check path
+(src/gates.rs, src/spec.rs, examples/kernel.rs) and were refused, 1 SEARCH
+did not match; of the 34 that applied, every one failed to compile (32:
+`conflicting implementations of trait FromIterator<char>`, impls bon already
+has in src/trusted.rs). The broken file, src/exec.rs, is past bon-sample's
+220 KB context (14 files fit, in path order), and the prompt does not say
+which check fails or why: the samples guessed. Peak RSS 14.1 GB (64 Claude
+CLIs at once).
+
+Before that, the sandbox carried the right file (`.bon/fix/src/exec.rs`, for
+the code stub) and bon-sample showed it to the model: 4 of 16 and 39 of 64
+samples were proved, and the search pushed. Those runs measured the bench's
+leak, not the samples.
