@@ -1844,6 +1844,25 @@ fn toolchain_identity(config: &Config) -> String {
 
 /// Every directory the toolchain object covers, for the isolated gate to
 /// observe (`observe`): the host file's homes (RUSTUP_HOME, CARGO_HOME; not
+/// RUSTUP_TOOLCHAIN, which is a name, not a path), cargo's dependency sources
+/// (its registry, each registry's unpacked sources, its git checkouts, and the
+/// unpacked package directories the tree's lockfile at `commit` names, which
+/// the verdict key assumes no one else can write — B6), and every directory on
+/// the checks' PATH.
+fn toolchain_paths(config: &Config, root: &std::path::Path, commit: &str) -> Vec<PathBuf> {
+    let mut toolchain: Vec<PathBuf> = config.toolchain.iter().filter(|(k, _)| k.ends_with("_HOME")).map(|(_, v)| PathBuf::from(v)).collect();
+    if let Some((_, home)) = config.toolchain.iter().find(|(k, _)| k == "CARGO_HOME") {
+        let home = PathBuf::from(home);
+        toolchain.extend([home.join("registry"), home.join("registry/src"), home.join("git")]);
+        toolchain.extend(std::fs::read_dir(home.join("registry/src")).into_iter().flatten().flatten().map(|e| e.path()));
+    }
+    if let Ok(lock) = git(root, &["show", &format!("{commit}:Cargo.lock")]) {
+        toolchain.extend(dependency_dirs(config, &lock).into_iter().filter(|p| p.exists()));
+    }
+    toolchain.extend(checks_path(config).iter().map(PathBuf::from));
+    toolchain
+}
+
 /// The directories holding the dependency sources a lockfile names, under
 /// the checks' cargo home: each registry package as unpacked
 /// (`registry/src/<index>/<name>-<version>`), each git package as checked out
@@ -2862,16 +2881,7 @@ pub fn observe(m: &Manifest, commit: &Commit) -> (r: Result<(Observation, Vec<Ob
             slots_alone(&d, Who::Check(j)).map(|_| vec![d])
         }).collect::<Result<_, _>>()?;
         let state = vec![state_dir().ok_or("no state for the user layer: the host file's `user` names its root, which must be a directory bon can make its own `.bon` in")?];
-        // The toolchain: the host file's homes, the dependency sources in cargo's
-        // (its registry, each registry's unpacked sources, its git checkouts),
-        // and every directory on the checks' PATH.
-        let mut toolchain: Vec<PathBuf> = m.config.toolchain.iter().map(|(_, v)| PathBuf::from(v)).collect();
-        if let Some((_, home)) = m.config.toolchain.iter().find(|(k, _)| k == "CARGO_HOME") {
-            let home = PathBuf::from(home);
-            toolchain.extend([home.join("registry"), home.join("registry/src"), home.join("git")]);
-            toolchain.extend(std::fs::read_dir(home.join("registry/src")).into_iter().flatten().flatten().map(|e| e.path()));
-        }
-        toolchain.extend(checks_path(&m.config).iter().map(PathBuf::from));
+        let toolchain = toolchain_paths(&m.config, &m.root, &c);
         let transcripts = m.config.transcripts.clone().unwrap_or("transcripts".into());
         // The checks and the transcripts as each user meets them: agent in a
         // working directory, a check slot's user in a check's checkout. A
@@ -6184,10 +6194,16 @@ mod tests {
         c.root = repo.clone();
         c.toolchain = vec![("RUSTUP_HOME".into(), "/opt/bon/rustup".into()), ("CARGO_HOME".into(), home.to_string_lossy().into())];
         assert_eq!(dependency_dirs(&c, &std::fs::read_to_string(repo.join("Cargo.lock")).unwrap()), [home.join("registry/src/index.crates.io-x/foo-1.0.0")]);
+        // B6: the isolated gate observes the unpacked package directories (foo
+        // is unpacked, bar is not, so only foo), beside the homes and PATH, and
         // not the RUSTUP_TOOLCHAIN name. So a host where one is writable by
         // agent or a slot user is refused.
         let mut tc = c.clone();
         tc.toolchain.push(("RUSTUP_TOOLCHAIN".into(), "some-toolchain-name".into()));
+        let paths = toolchain_paths(&tc, &repo, "HEAD");
+        assert!(paths.contains(&home.join("registry/src/index.crates.io-x/foo-1.0.0")), "observes the unpacked package: {paths:?}");
+        assert!(!paths.contains(&home.join("registry/src/index.crates.io-x/bar-2.0.0")), "not the one not unpacked");
+        assert!(!paths.iter().any(|p| p.as_os_str() == "some-toolchain-name"), "the toolchain name is not a path");
         let on = On { tree: tree.clone(), test: None, cache: Cache::Use };
         let before = dependencies(&c, &tree, true);
         assert!(!before.is_empty());
