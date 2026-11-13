@@ -46,6 +46,9 @@ BENCH=$(cd "$BENCH" && pwd -P)
 SANDBOX=$BENCH/sandbox-$TAG
 rm -rf "$SANDBOX"
 mkdir -p "$SANDBOX"
+# The repository is engineer's alone: bon's isolation gate refuses to run if
+# agent can reach it (as it could if $BENCH's ancestors let agent through).
+chmod 0700 "$SANDBOX"
 ORIGIN=$SANDBOX/origin.git
 git init -q --bare -b main "$ORIGIN"
 case "$PROJECT" in
