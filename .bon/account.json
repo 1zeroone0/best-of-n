@@ -1,0 +1,785 @@
+{
+  "component-definition": {
+    "back-matter": {
+      "resources": [
+        {
+          "props": [
+            {
+              "class": "dependencies",
+              "name": "configured",
+              "ns": "https://github.com/1zeroone0/best-of-n/account",
+              "value": "Cargo.lock"
+            }
+          ],
+          "rlinks": [
+            {
+              "hashes": [
+                {
+                  "algorithm": "SHA-256",
+                  "value": "cf52d3aac83e956270fae52dfe02bbb105f080f5696d1efdb6356a1734d96d42"
+                }
+              ],
+              "href": "sbom.json",
+              "media-type": "application/vnd.cyclonedx+json"
+            }
+          ],
+          "title": "Software bill of materials (CycloneDX 1.5)",
+          "uuid": "6cf5ac65-1bb5-4632-b424-11161bf674af"
+        }
+      ]
+    },
+    "components": [
+      {
+        "control-implementations": [
+          {
+            "description": "Claims proposed for review, each naming its evidence by status.",
+            "implemented-requirements": [
+              {
+                "control-id": "ac-3",
+                "description": "A capability's authority names the paths its agent process may change. A candidate that changes any other path is not verified, and only a verified, selected candidate reaches trunk.",
+                "props": [
+                  {
+                    "class": "claim",
+                    "name": "review",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "proposed"
+                  },
+                  {
+                    "class": "predicate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "authority"
+                  },
+                  {
+                    "class": "gate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "verified"
+                  },
+                  {
+                    "class": "invariant",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "trunk_exact"
+                  }
+                ],
+                "remarks": "Proposed; awaiting GRC review.",
+                "uuid": "7ee12e5b-089d-4415-808a-f2e29b2f570e"
+              },
+              {
+                "control-id": "ac-5",
+                "description": "Three duties are held apart. Agent processes generate candidates; the checks, which no search may change, judge them, and the kernel's gates select among them; only the owner writes the spec and the checks. A candidate is pushed only when at least two independent agent processes agree, and tests written without sight of the code fail to split them.",
+                "props": [
+                  {
+                    "class": "claim",
+                    "name": "review",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "proposed"
+                  },
+                  {
+                    "class": "predicate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "protected"
+                  },
+                  {
+                    "class": "predicate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "agree"
+                  },
+                  {
+                    "class": "gate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "selected"
+                  },
+                  {
+                    "class": "predicate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "pushable"
+                  },
+                  {
+                    "class": "manifest-key",
+                    "name": "configured",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "checks.paths"
+                  },
+                  {
+                    "class": "manifest-key",
+                    "name": "configured",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "counterexample.visible"
+                  }
+                ],
+                "remarks": "Proposed; awaiting GRC review.",
+                "uuid": "5f75903f-0664-4307-a4cf-71d275f65a92"
+              },
+              {
+                "control-id": "ac-6",
+                "description": "Agent processes run as the POSIX user agent. Before every search, agent's permissions on each object the policy names are observed, and they must match the policy, or the search does not start.",
+                "props": [
+                  {
+                    "class": "claim",
+                    "name": "review",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "proposed"
+                  },
+                  {
+                    "class": "predicate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "policy"
+                  },
+                  {
+                    "class": "gate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "isolated"
+                  },
+                  {
+                    "class": "trusted-function",
+                    "name": "trusted",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "observe"
+                  }
+                ],
+                "remarks": "Proposed; awaiting GRC review.",
+                "uuid": "1bfbec42-566c-4c67-ab81-144caeebafd8"
+              },
+              {
+                "control-id": "au-12",
+                "description": "Each transition is recorded in the traces by its spec name and arguments, with each agent process's program, model, cost and candidate; the traces go to the private remote the manifest names.",
+                "props": [
+                  {
+                    "class": "claim",
+                    "name": "review",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "proposed"
+                  },
+                  {
+                    "class": "trusted-function",
+                    "name": "trusted",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "run"
+                  },
+                  {
+                    "class": "trusted-function",
+                    "name": "trusted",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "record_grant"
+                  },
+                  {
+                    "class": "trusted-function",
+                    "name": "trusted",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "record_wait"
+                  },
+                  {
+                    "class": "trusted-function",
+                    "name": "trusted",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "record_push"
+                  },
+                  {
+                    "class": "trusted-function",
+                    "name": "trusted",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "record_land"
+                  },
+                  {
+                    "class": "trusted-function",
+                    "name": "trusted",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "record_blocked"
+                  },
+                  {
+                    "class": "manifest-key",
+                    "name": "configured",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "traces"
+                  }
+                ],
+                "remarks": "Proposed; awaiting GRC review.",
+                "uuid": "02f722a8-0c76-42ae-879b-66d584e94000"
+              },
+              {
+                "control-id": "cm-8",
+                "description": "This document and its SBOM list every dependency the lockfiles pin, with its checksum, and every tool at the version it reports. A check fails when either is stale.",
+                "props": [
+                  {
+                    "class": "claim",
+                    "name": "review",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "proposed"
+                  },
+                  {
+                    "class": "manifest-key",
+                    "name": "configured",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "account.tools"
+                  },
+                  {
+                    "class": "manifest-key",
+                    "name": "configured",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "checks.test"
+                  }
+                ],
+                "remarks": "Proposed; awaiting GRC review.",
+                "uuid": "7308e995-cd52-4319-8885-d5861ec4fc6e"
+              },
+              {
+                "control-id": "sa-10",
+                "description": "Every commit agent authors on trunk is exactly a selected, pushable candidate of a search on the previous head, or a counterexample's test that landed on it. No search may change bon's directory, the checks or the trusted code.",
+                "props": [
+                  {
+                    "class": "claim",
+                    "name": "review",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "proposed"
+                  },
+                  {
+                    "class": "invariant",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "trunk_exact"
+                  },
+                  {
+                    "class": "predicate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "pushed"
+                  },
+                  {
+                    "class": "predicate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "landed"
+                  },
+                  {
+                    "class": "predicate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "protected"
+                  },
+                  {
+                    "class": "manifest-key",
+                    "name": "configured",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "checks.paths"
+                  },
+                  {
+                    "class": "manifest-key",
+                    "name": "configured",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "account.trusted"
+                  }
+                ],
+                "remarks": "Proposed; awaiting GRC review.",
+                "uuid": "89be6cb5-e0c4-47a6-bd16-bba4b67c433d"
+              },
+              {
+                "control-id": "sa-11",
+                "description": "A candidate is selected only when the tests accept it, Verus verifies it and it stays within its authority. What decides a push is checked again from a clean build, never from a cached verdict.",
+                "props": [
+                  {
+                    "class": "claim",
+                    "name": "review",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "proposed"
+                  },
+                  {
+                    "class": "gate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "verified"
+                  },
+                  {
+                    "class": "gate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "selected"
+                  },
+                  {
+                    "class": "property",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "selection_verified"
+                  },
+                  {
+                    "class": "trusted-function",
+                    "name": "trusted",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "push"
+                  },
+                  {
+                    "class": "manifest-key",
+                    "name": "configured",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "checks.test"
+                  },
+                  {
+                    "class": "manifest-key",
+                    "name": "configured",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "checks.verify"
+                  },
+                  {
+                    "class": "manifest-key",
+                    "name": "configured",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "checks.agree"
+                  }
+                ],
+                "remarks": "Proposed; awaiting GRC review.",
+                "uuid": "40515d32-fcb1-4714-9c3b-c07bd252dec2"
+              },
+              {
+                "control-id": "sa-17.3",
+                "description": "Each gate is proven to return exactly what its spec predicate says, and each of the spec's invariants is proven to hold after every transition.",
+                "props": [
+                  {
+                    "class": "claim",
+                    "name": "review",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "proposed"
+                  },
+                  {
+                    "class": "gate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "contested"
+                  },
+                  {
+                    "class": "gate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "first_verified"
+                  },
+                  {
+                    "class": "gate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "found_on_trunk"
+                  },
+                  {
+                    "class": "gate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "isolated"
+                  },
+                  {
+                    "class": "gate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "lands_on"
+                  },
+                  {
+                    "class": "gate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "not_found"
+                  },
+                  {
+                    "class": "gate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "proposed"
+                  },
+                  {
+                    "class": "gate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "selected"
+                  },
+                  {
+                    "class": "gate",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "verified"
+                  },
+                  {
+                    "class": "invariant",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "trunk_nonempty"
+                  },
+                  {
+                    "class": "invariant",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "capability_open"
+                  },
+                  {
+                    "class": "invariant",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "accounted"
+                  },
+                  {
+                    "class": "invariant",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "within_limit"
+                  },
+                  {
+                    "class": "invariant",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "spent_within_generation"
+                  },
+                  {
+                    "class": "invariant",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "siblings"
+                  },
+                  {
+                    "class": "invariant",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "trunk_exact"
+                  }
+                ],
+                "remarks": "Proposed; awaiting GRC review.",
+                "uuid": "1b69abfa-219b-48eb-aba2-82cc38cc7150"
+              }
+            ],
+            "source": "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json",
+            "uuid": "1c20005e-5def-4f81-8f77-c3a2bfafd5c8"
+          }
+        ],
+        "description": "bon: a kernel, verified by Verus, that searches for code, and the trusted code around it.",
+        "links": [
+          {
+            "href": "#6cf5ac65-1bb5-4632-b424-11161bf674af",
+            "rel": "sbom"
+          }
+        ],
+        "props": [
+          {
+            "class": "file",
+            "name": "proven",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "src/encoding.rs"
+          },
+          {
+            "class": "file",
+            "name": "proven",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "src/exec.rs"
+          },
+          {
+            "class": "file",
+            "name": "proven",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "src/gates.rs"
+          },
+          {
+            "class": "file",
+            "name": "proven",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "src/process.rs"
+          },
+          {
+            "class": "file",
+            "name": "proven",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "src/spec.rs"
+          },
+          {
+            "class": "file",
+            "name": "trusted",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "src/trusted.rs"
+          },
+          {
+            "class": "file",
+            "name": "trusted",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "src/main.rs"
+          },
+          {
+            "class": "file",
+            "name": "trusted",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "src/view.rs"
+          },
+          {
+            "class": "file",
+            "name": "trusted",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "src/types.rs"
+          },
+          {
+            "class": "file",
+            "name": "trusted",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "src/projection.rs"
+          },
+          {
+            "class": "file",
+            "name": "trusted",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "src/tui.rs"
+          },
+          {
+            "class": "file",
+            "name": "trusted",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "src/account.rs"
+          },
+          {
+            "class": "file",
+            "name": "trusted",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "examples/kernel.rs"
+          },
+          {
+            "class": "file",
+            "name": "configured",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": ".bon/"
+          },
+          {
+            "class": "rule",
+            "name": "tested",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "every other file"
+          },
+          {
+            "class": "check",
+            "name": "tested",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "cargo test -q"
+          },
+          {
+            "class": "check",
+            "name": "tested",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "cargo run -q -- account --check"
+          },
+          {
+            "class": "check",
+            "name": "tested",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "cargo run -q -- types --check"
+          }
+        ],
+        "title": "best-of-n",
+        "type": "software",
+        "uuid": "af286170-032e-4cbc-a195-87e46588c540"
+      },
+      {
+        "description": "claude --version",
+        "props": [
+          {
+            "name": "version",
+            "value": "2.1.318 (Claude Code)"
+          },
+          {
+            "class": "tool",
+            "name": "configured",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "claude"
+          }
+        ],
+        "title": "claude",
+        "type": "software",
+        "uuid": "18248229-a557-4d46-9fb5-697ff44677a3"
+      },
+      {
+        "description": "codex --version",
+        "props": [
+          {
+            "name": "version",
+            "value": "codex-cli 0.166.0"
+          },
+          {
+            "class": "tool",
+            "name": "configured",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "codex"
+          }
+        ],
+        "title": "codex",
+        "type": "software",
+        "uuid": "02f8cced-72f7-4773-bc97-4e87a6ba4dc2"
+      },
+      {
+        "description": "git --version",
+        "props": [
+          {
+            "name": "version",
+            "value": "git version 2.50.1 (Apple Git-155)"
+          },
+          {
+            "class": "tool",
+            "name": "configured",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "git"
+          }
+        ],
+        "title": "git",
+        "type": "software",
+        "uuid": "467b8bd9-bd6a-4f68-aa8f-9f05432d5db8"
+      },
+      {
+        "description": "perl -e 'print $^V'",
+        "props": [
+          {
+            "name": "version",
+            "value": "v5.34.1"
+          },
+          {
+            "class": "tool",
+            "name": "configured",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "perl"
+          }
+        ],
+        "title": "perl",
+        "type": "software",
+        "uuid": "d0337481-ae81-4e18-9b4a-a18460f5c1d4"
+      },
+      {
+        "description": "rustc --version",
+        "props": [
+          {
+            "name": "version",
+            "value": "rustc 1.99.1 (58cf8f9c3 2026-10-13)"
+          },
+          {
+            "class": "tool",
+            "name": "configured",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "rustc"
+          }
+        ],
+        "title": "rustc",
+        "type": "software",
+        "uuid": "80e1b762-1778-4bf0-8032-6dc5518e92b5"
+      },
+      {
+        "description": "printf 'macOS '; sw_vers -buildVersion",
+        "props": [
+          {
+            "name": "version",
+            "value": "macOS 25G83"
+          },
+          {
+            "class": "tool",
+            "name": "configured",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "sudo"
+          }
+        ],
+        "title": "sudo",
+        "type": "software",
+        "uuid": "a3af111a-2866-43b2-86bb-d4b52e9caa80"
+      },
+      {
+        "description": "tar --version",
+        "props": [
+          {
+            "name": "version",
+            "value": "bsdtar 3.5.3 - libarchive 3.7.4 zlib/1.2.12 liblzma/5.4.3 bz2lib/1.0.8"
+          },
+          {
+            "class": "tool",
+            "name": "configured",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "tar"
+          }
+        ],
+        "title": "tar",
+        "type": "software",
+        "uuid": "65a660e1-08a0-4a17-9371-527a99cf5040"
+      },
+      {
+        "description": "verus --version",
+        "props": [
+          {
+            "name": "version",
+            "value": "0.2026.10.18.7d82994"
+          },
+          {
+            "class": "tool",
+            "name": "configured",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "verus"
+          }
+        ],
+        "title": "verus",
+        "type": "software",
+        "uuid": "21867c19-027a-4b02-a024-0786e30710c1"
+      },
+      {
+        "description": "sw_vers -productVersion",
+        "props": [
+          {
+            "name": "version",
+            "value": "26.6.2"
+          },
+          {
+            "class": "tool",
+            "name": "configured",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "macOS"
+          }
+        ],
+        "title": "macOS",
+        "type": "software",
+        "uuid": "c436212e-9118-49f6-bdf5-2e3b62c3b125"
+      },
+      {
+        "description": "https://api.anthropic.com",
+        "links": [
+          {
+            "href": "https://api.anthropic.com"
+          }
+        ],
+        "props": [
+          {
+            "class": "service",
+            "name": "configured",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "Anthropic API"
+          }
+        ],
+        "title": "Anthropic API",
+        "type": "service",
+        "uuid": "0f337bca-84fe-4099-9e22-a66cbe1e5354"
+      },
+      {
+        "description": "https://api.openai.com",
+        "links": [
+          {
+            "href": "https://api.openai.com"
+          }
+        ],
+        "props": [
+          {
+            "class": "service",
+            "name": "configured",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "OpenAI API"
+          }
+        ],
+        "title": "OpenAI API",
+        "type": "service",
+        "uuid": "817dba77-b5f6-45da-9fc6-c33c39389967"
+      }
+    ],
+    "metadata": {
+      "last-modified": "2026-11-13T06:01:08Z",
+      "oscal-version": "1.2.3",
+      "remarks": "proven: in the kernel, verified by Verus. trusted: reviewed by the owner, not verified. configured: a fact of the manifest. tested: program code and every other file, judged by the checks. Every control claim is proposed and awaits GRC review.",
+      "title": "best-of-n",
+      "version": "da63042d8b26"
+    },
+    "uuid": "1458fedc-8a77-4ecf-a2d6-2023ae264349"
+  }
+}

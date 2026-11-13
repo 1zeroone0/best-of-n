@@ -126,7 +126,7 @@ POSIX user every agent process runs as; never call yourself that.
 - **Trusted code:** a trusted function carries no `ensures`; verified code
   checks what it returns. A `requires` on one is a checked edge. Trusted code
   and the checks are protected from every search, and a skipped proof outside
-  them (`external_body`, `assume`, `admit`) fails `sbom --check`.
+  them (`external_body`, `assume`, `admit`) fails `account --check`.
 - **Provenance:** an intent enters the spec in the commit that deletes its
   queue line, citing `(queue N)`; a change agreed in chat cites its session.
 - **Views derive only from the source:** the spec's and the code's own names
@@ -146,7 +146,7 @@ The repository holds the words; this skill does not repeat them.
   `rank`, and `time`, each check's cutoff), `[searches]` (for each kind, code,
   compaction, queue, counterexample and foil, a `role` and its width list
   `n`), limits, `rate`, `[counterexample]` (`path`, `build`, `run`, `tests`,
-  `visible`), `[sbom]`, `[types]`, trunk.
+  `visible`), `[account]`, `[types]`, trunk.
 - `/etc/bon/host.toml`, the host file: agent's `path`, the toolchain's homes,
   `[roles]` (each role's `program`, an argv bon appends `--model` to; its
   `client`, claude, codex or api; its `model`; a one-shot program's
@@ -228,11 +228,15 @@ at a time.
    not search-ready), `.bon/queue.tsv` and the `.gitignore` line. Fill it in:
    wide width lists, limits sized to the work (proofs cost more), and a
    counterexample section.
-7. **The SBOM.** `bon sbom` finds dependencies from the lockfiles on its own;
-   the trusted code and the tools in the TCB it lists only as `[sbom]` in
-   `.bon/bon.toml` declares them. `bon init` pre-fills that table with the
-   files that have `#[verifier::external*]` and a version command per
-   lockfile's toolchain: confirm both with the owner, then `bon sbom`.
+7. **The account.** `bon account` writes what is true of the code: each file,
+   tool, dependency and claimed control proven, trusted, configured or tested,
+   as `.bon/account.json` (OSCAL) and `.bon/sbom.json` (CycloneDX); dependencies
+   come from the lockfiles on their own. `[account]` in `.bon/bon.toml`
+   declares the rest: `trusted`, `tools`, `services`, and each claimed control
+   (`[account.controls.<id>]`: a `claim`, and its evidence named under the
+   status each must have; `catalog` names the catalog). `bon init` pre-fills it
+   with the files that have `#[verifier::external*]` and a version command per
+   lockfile's toolchain: confirm both with the owner, then `bon account`.
    Commit `.bon/` and push.
 8. **First search:** write the smallest queued intent into the spec, then
    `bon code`. Read its trace with the owner.
@@ -249,7 +253,7 @@ at a time.
 | trunk should lose what is stale | `bon compaction` |
 | a new transcript arrived | `bon queue`; show the owner the patch it names and the contested cues; they accept it with `git am` |
 | spare capacity should work | `bon background` (`--plist` for launchd) |
-| a dependency, tool or trusted function changed | `bon sbom`; commit `.bon/sbom.json` |
+| a dependency, tool, trusted function or claimed control changed | `bon account`; commit `.bon/account.json` and `.bon/sbom.json` |
 | what reaching trunk cost | `bon cost` writes `.bon/cost.toml` (bon does after each push) |
 | before a search, a commit or a push | `bon check` |
 
