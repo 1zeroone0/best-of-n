@@ -443,8 +443,8 @@ pub trait Gates {
         requires counterexample.results.len() == counterexample.n, tested.results.len() == tested.n, foils.results.len() == foils.n,
         ensures r == spec::not_found(counterexample@, tested@, foils@);
 
-    /// Why the attempt on tested blocked: on its selection, or on the
-    /// counterexample and foil searches on it.
+    /// Why the attempt on tested blocked: on tested alone, or on the
+    /// counterexample search on it and, on a selection, the foil search.
     fn blocked(tested: &Search, counterexample: Option<&Search>, foils: Option<&Search>) -> (r: Option<spec::Blocked>)
         requires
             tested.results.len() == tested.n,

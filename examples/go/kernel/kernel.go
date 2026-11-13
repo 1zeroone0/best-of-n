@@ -329,7 +329,7 @@ type Params struct {
 	Authority string   `json:"authority"`
 }
 
-// A search's goal: a trunk commit, a selected candidate, or a transcript.
+// A search's goal: a trunk commit, a candidate of a search, or a transcript.
 type GoalRef struct {
 	Trunk      *string `json:"trunk"`
 	Candidate  *string `json:"candidate"`

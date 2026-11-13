@@ -4,7 +4,9 @@ You write what the software must do. bon searches for the code: several
 agent processes each write a candidate, Verus proves them, two must agree,
 and blind tests try to split them before the best reaches trunk. A blind test
 counts only when it rejects a foil: a program, written to break what the push
-changed, that the tests accept and Verus rejects.
+changed, that the tests accept and Verus rejects. Verified candidates that
+behave differently do not block a search: blind tests decide between them, and
+only when none can does it reach you, as a spec that does not decide.
 
 <img src="assets/bon.svg" width="880" alt="You write intents to the queue, then the spec and checks. One search: agent processes generate candidates; the tests and Verus verify them; two must agree; a counterexample search tries to split them; the best is selected and pushed to trunk. People try trunk and talk again. Below: the kernel (spec, gates, implementation, proven by Verus) emits types; programs in TypeScript, Go and Python are built on them, around trusted code.">
 

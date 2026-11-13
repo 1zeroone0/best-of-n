@@ -782,6 +782,72 @@ fn two_verified(s: &Search) -> (r: bool)
     false
 }
 
+/// Whether a complete search's verified candidates disagree: code or
+/// compaction, two verified, and they do not agree.
+// The selection, i, is read only by the proof, which cargo erases.
+#[allow(unused_variables)]
+fn disagree(s: &Search) -> (r: bool)
+    requires s.results.len() == s.n,
+    ensures r == spec::disagree(s@),
+{
+    hide(first_by_key);
+    hide(spec::verified);
+    hide(spec::agree);
+    proof { complete(s); }
+    if !matches!(&s.kind, Kind::Code { .. } | Kind::Compaction { .. }) { return false; }
+    if !two_verified(s) { return false; }
+    match selected(s) {
+        Some(i) => { assert(spec::agree(s@)) by { reveal(spec::agree); assert(spec::selected(s@, i as int)); } false }
+        None => true,
+    }
+}
+
+/// Whether at least two verified tests of x judge every member of t.
+// The first such test, f, is read only by the proof, which cargo erases.
+#[allow(unused_variables)]
+fn two_judge(x: &Search, t: &Search) -> (r: bool)
+    requires x.results.len() == x.n, t.results.len() == t.n,
+    ensures r == spec::two_judge(x@, t@),
+{
+    hide(first_by_key);
+    hide(spec::verified);
+    hide(spec::judges);
+    let vx = verified_each(x);
+    let vt = verified_each(t);
+    let mut first: Option<usize> = None;
+    let mut i = 0;
+    while i < vx.len()
+        invariant
+            x.results.len() == x.n, t.results.len() == t.n, vx.len() == x.n, vt.len() == t.n, 0 <= i <= vx.len(),
+            forall|m: int| 0 <= m < x.n ==> vx[m] == spec::verified_at(x@, m),
+            forall|m: int| 0 <= m < t.n ==> vt[m] == spec::verified_at(t@, m),
+            first is None ==> forall|m: int| 0 <= m < i && spec::verified_at(x@, m) ==> !spec::judges(spec::at(x@, m), t@),
+            first matches Some(f) ==> f < i && spec::verified_at(x@, f as int) && spec::judges(spec::at(x@, f as int), t@)
+                && forall|m: int| 0 <= m < i && spec::verified_at(x@, m) && spec::judges(spec::at(x@, m), t@) ==> m == f,
+        decreases vx.len() - i,
+    {
+        if vx[i] && judges(t, &vt, candidate(x, i)) {
+            match first {
+                Some(f) => {
+                    assert(spec::verified_at(x@, f as int) && spec::verified_at(x@, i as int) && f != i);
+                    return true;
+                }
+                None => { first = Some(i); }
+            }
+        }
+        i += 1;
+    }
+    proof {
+        if spec::two_judge(x@, t@) {
+            let (a, b) = choose|a: int, b: int| a != b
+                && spec::verified_at(x@, a) && spec::judges(spec::at(x@, a), t@)
+                && spec::verified_at(x@, b) && spec::judges(spec::at(x@, b), t@);
+            assert(0 <= a < x.n && 0 <= b < x.n);
+        }
+    }
+    false
+}
+
 /// The kernel's reason for a completed block.
 pub fn blocked(t: &Search, counterexample: Option<&Search>, f: Option<&Search>) -> (r: Option<spec::Blocked>)
     requires t.results.len() == t.n,
@@ -805,13 +871,12 @@ pub fn blocked(t: &Search, counterexample: Option<&Search>, f: Option<&Search>) 
     match counterexample {
         None => {
             if !two_verified(t) { return Some(spec::Blocked::TooFewVerified); }
-            if selected(t).is_none() { return Some(spec::Blocked::Disagree); }
             None
         }
         Some(x) => {
             proof { complete(x); }
             if landing(x, t).is_some() { return None; }
-            if !two_verified(x) { return Some(spec::Blocked::TooFewTests); }
+            if !two_verified(x) || (disagree(t) && !two_judge(x, t)) { return Some(spec::Blocked::TooFewTests); }
             let vx = verified_each(x);
             let vt = verified_each(t);
             let mut i = 0;
@@ -819,7 +884,7 @@ pub fn blocked(t: &Search, counterexample: Option<&Search>, f: Option<&Search>) 
                 invariant
                     x.results.len() == x.n, t.results.len() == t.n,
                     counterexample matches Some(c) && c@ == x@,
-                    spec::complete(x@), !spec::found(x@, t@), spec::two_verified(x@),
+                    spec::complete(x@), !spec::found(x@, t@), spec::two_verified(x@), !(spec::disagree(t@) && !spec::two_judge(x@, t@)),
                     vx.len() == x.n, vt.len() == t.n, 0 <= i <= vx.len(),
                     forall|j: int| 0 <= j < x.n ==> vx[j] == spec::verified_at(x@, j),
                     forall|j: int| 0 <= j < t.n ==> vt[j] == spec::verified_at(t@, j),
@@ -838,7 +903,7 @@ pub fn blocked(t: &Search, counterexample: Option<&Search>, f: Option<&Search>) 
                     proof { complete(f); }
                     if !not_found(x, t, f) { Some(spec::Blocked::Undiscriminating) } else { None }
                 }
-                None => None,
+                None => if disagree(t) { Some(spec::Blocked::Undecided) } else { None },
             }
         }
     }

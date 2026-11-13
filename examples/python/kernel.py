@@ -297,7 +297,7 @@ class Params(TypedDict):
     limit: float | None
     authority: str
 
-# A search's goal: a trunk commit, a selected candidate, or a transcript.
+# A search's goal: a trunk commit, a candidate of a search, or a transcript.
 class GoalRef(TypedDict):
     trunk: str | None
     candidate: str | None

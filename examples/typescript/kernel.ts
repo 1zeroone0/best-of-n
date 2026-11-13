@@ -46,7 +46,7 @@ export interface BonProcess { pid: number; trace: string; running: boolean; kind
 export interface SearchTrace { search: number; kind: string; goal: string; params: Params; width: number; started: number | null; returned: number; accepted: number; verified: number; selected: number | null; recorded_selected: number | null; recorded_verified: number | null; kernel: string; blocked: string | null; generation: number | null; time_cost: number | null; cost: number | null; rate: number | null; seconds: number | null; time: number | null; running: boolean; background: boolean; candidates: Array<Facts>; end: string | null; reason: string | null; reason_from: string | null }
 /** What a search was granted with. */
 export interface Params { goal: GoalRef; base: string; n: number | null; limit: number | null; authority: string }
-/** A search's goal: a trunk commit, a selected candidate, or a transcript. */
+/** A search's goal: a trunk commit, a candidate of a search, or a transcript. */
 export interface GoalRef { trunk: string | null; candidate: string | null; transcript: string | null }
 /** One agent process, from its facts.json. */
 export interface Facts { index: number; harness: string | null; model: string | null; generation: number | null; commit: string | null; accepted: boolean; proved: boolean; verified: boolean; rank: number | null; diff: number | null; added: number | null; removed: number | null; flags: Array<string>; logs: Array<string>; harness_seconds: number | null; check_seconds: number | null; changed: Array<string>; out: Array<number>; accepts: Array<[number, boolean]>; accepts_foils: Array<[number, boolean]> }

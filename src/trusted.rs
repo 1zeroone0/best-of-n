@@ -1282,7 +1282,9 @@ fn aim(m: &Manifest, kind: &Kind, target: Option<&Search>, start: &str) -> Strin
             let mut args = vec!["diff".to_string(), if since.is_empty() { git(&m.root, &["rev-list", "--max-parents=0", start]).unwrap_or_default() } else { since }, start.to_string(), "--".into()];
             args.extend(m.config.checks.paths.iter().cloned());
             let d = git(&m.root, &args.iter().map(|s| s.as_str()).collect::<Vec<_>>()).unwrap_or_default();
-            if d.is_empty() { String::new() } else { format!("The spec changed for this push; aim your test at what the change requires:\n{}\n", cap(d)) }
+            // No selection: the implementations behave differently, and the test decides between them.
+            let differ = if target.is_some_and(|t| crate::exec::selected(t).is_none()) { "They behave differently: write the test that tells which behavior the spec requires.\n" } else { "" };
+            if d.is_empty() { differ.to_string() } else { format!("{differ}The spec changed for this push; aim your test at what the change requires:\n{}\n", cap(d)) }
         }
         Kind::Foil { goal, .. } => match selected(goal) {
             Some((base, commit)) => {
@@ -1758,6 +1760,14 @@ pub fn record_selected(m: &Manifest, i: usize) {
     record(m, &format!("selected {search} {i}"));
 }
 
+/// Record that the latest search's verified candidates disagree: a
+/// counterexample search on it follows, its tests built on its verified candidate i.
+#[verifier::external_body]
+pub fn record_disagreed(m: &Manifest, i: usize) {
+    let search = RUNS.load(std::sync::atomic::Ordering::SeqCst).saturating_sub(1);
+    record(m, &format!("disagreed {search} {i}"));
+}
+
 // ── the trace: each transition under its spec name, with its arguments ──
 //
 // A transition's recorder requires what the transition required, so Verus
@@ -1844,8 +1854,8 @@ pub fn record_blocked(m: &Manifest, reason: spec::Blocked, Ghost(tested): Ghost<
 {
     let (word, sentence) = match reason {
         spec::Blocked::TooFewVerified => ("too_few_verified", "fewer than two verified candidates"),
-        spec::Blocked::Disagree => ("disagree", "the verified candidates disagree"),
-        spec::Blocked::TooFewTests => ("too_few_tests", "fewer than two verified tests, and none splits the candidates"),
+        spec::Blocked::Undecided => ("undecided", "the verified candidates disagree, two tests judged every one, and none splits them: the spec does not decide between them"),
+        spec::Blocked::TooFewTests => ("too_few_tests", "fewer than two verified tests, or on candidates that disagree fewer than two that judge every one, and none splits the candidates"),
         spec::Blocked::RejectsEvery => ("rejects_every", "a verified test rejects every candidate"),
         spec::Blocked::Undiscriminating => ("undiscriminating", "fewer than two verified tests judge every candidate and reject a foil"),
         spec::Blocked::TrunkMoved => ("trunk_moved", "trunk moved during the search; run it again"),
@@ -3024,6 +3034,26 @@ mod tests {
         assert_eq!(tested_tree(&on(Some(crate::gates::AgentProcess { search: 0, index: 1 })), Some(&tested), "head"), "selected");
         // On trunk: trunk's head.
         assert_eq!(tested_tree(&on(None), None, "head"), "head");
+    }
+
+    #[test]
+    fn a_test_on_candidates_that_disagree_is_told_they_behave_differently() {
+        fn text<T: FromIterator<char>>(s: &str) -> T { s.chars().collect() }
+        let candidate = |commit: &str, out: u64| Candidate {
+            commit: text(commit), base: text("head"), accepted: true, proved: true, changed: vec![], out: vec![Hash(out)],
+            intents: vec![], accepts: vec![], accepts_foils: vec![], measured: true, added: vec![], rejects_counterexamples: false, rank: 0, diff: 1,
+        };
+        let tested = |second: u64| Search {
+            kind: Kind::Code { goal: text("head") }, base: text("head"), n: 2, checks: vec![], tests: vec![], trusted: vec![], limit: 1,
+            results: vec![Some(candidate("first", 7)), Some(candidate("second", second))],
+        };
+        // No git here: the spec's diff is empty, so the aim is what the tested search shows.
+        let m = Manifest { config: config(), root: PathBuf::from("/nonexistent/bon-aim") };
+        let kind = Kind::Counterexample { goal: Some(crate::gates::AgentProcess { search: 0, index: 0 }) };
+        assert!(aim(&m, &kind, Some(&tested(8)), "head").contains("They behave differently"));
+        assert_eq!(aim(&m, &kind, Some(&tested(7)), "head"), "", "a selection's test is aimed by the spec alone");
+        // Its test builds on the verified candidate the goal names.
+        assert_eq!(tested_tree(&kind, Some(&tested(8)), "head"), "first");
     }
 
     #[test]

@@ -142,11 +142,15 @@ fn check_seconds<'a>(dir: &Path, logs: impl Iterator<Item = &'a str>) -> Option<
 
 /// Each reason's word and the sentence trusted code records it with
 /// (`record_blocked`), so a trace from before reasons were words can be read
-/// by its sentence.
+/// by its sentence. One word only older traces carry is not here: `disagree`,
+/// recorded (with "the verified candidates disagree") before a disagreement
+/// ran a counterexample search, for the block it then was: two or more
+/// verified candidates that did not agree, blocked at once with no tests. It
+/// is read as written, its own reason, never as `undecided`.
 const REASONS: [(&str, &str); 7] = [
     ("too_few_verified", "fewer than two verified candidates"),
-    ("disagree", "the verified candidates disagree"),
-    ("too_few_tests", "fewer than two verified tests, and none splits the candidates"),
+    ("undecided", "the verified candidates disagree, two tests judged every one, and none splits them: the spec does not decide between them"),
+    ("too_few_tests", "fewer than two verified tests, or on candidates that disagree fewer than two that judge every one, and none splits the candidates"),
     ("rejects_every", "a verified test rejects every candidate"),
     ("undiscriminating", "fewer than two verified tests judge every candidate and reject a foil"),
     ("trunk_moved", "trunk moved during the search; run it again"),
@@ -157,7 +161,7 @@ const REASONS: [(&str, &str); 7] = [
 fn blocked_word(b: best_of_n::spec::Blocked) -> &'static str {
     use best_of_n::spec::Blocked::*;
     match b {
-        TooFewVerified => "too_few_verified", Disagree => "disagree", TooFewTests => "too_few_tests",
+        TooFewVerified => "too_few_verified", Undecided => "undecided", TooFewTests => "too_few_tests",
         RejectsEvery => "rejects_every", Undiscriminating => "undiscriminating", TrunkMoved => "trunk_moved", Refused => "refused",
     }
 }
@@ -218,7 +222,8 @@ fn attempt_ends(searches: &[Value], lines: &[Vec<String>], running: bool,
 /// The reason a trace's sentence names, from before reasons were words, told
 /// apart by the counts of verified candidates and tests the trace recorded
 /// where the sentence named more than one: "fewer than two verified candidates,
-/// or they disagree"; and "fewer than two verified tests, and none splits the
+/// or they disagree", which with two verified is disagree (the immediate block
+/// of then, never undecided); and "fewer than two verified tests, and none splits the
 /// candidates", which, with two verified tests, is none_splits (no test split
 /// the candidates by the rules of then; today's kernel would say rejects_every
 /// or undiscriminating, which only it can tell apart). Otherwise the word of
@@ -1324,6 +1329,20 @@ mod tests {
         // The kernel's reason comes before a sentence's.
         let kernel = |_: usize, _: Option<usize>, _: Option<usize>| Some("rejects_every");
         assert_eq!(attempt_ends(&searches, &lines, false, &kernel)[1].1, end("blocked", Some("rejects_every"), Some("kernel")));
+    }
+
+    #[test]
+    fn an_attempt_whose_candidates_disagree_ends_in_its_counterexample_search() {
+        // No selection, no foil search: a counterexample search on the code search, then a landing or a block.
+        let searches = [s("code", true), s("counterexample", true), s("code", true), s("counterexample", true)];
+        let lines = ls(&[&["grant", "disagreed 0 1"], &["grant", "land 1 3"], &["grant", "disagreed 2 0"],
+            &["grant", "blocked: undecided: the verified candidates disagree, two tests judged every one, and none splits them: the spec does not decide between them"]]);
+        let ends: Vec<End> = attempt_ends(&searches, &lines, false, &none).into_iter().map(|(_, e)| e).collect();
+        assert_eq!(ends, [end("landed", None, None), end("blocked", Some("undecided"), Some("recorded"))]);
+        assert_eq!(by_sentence(REASONS[1].1, &json!({}), None), Some("undecided"));
+        // An older trace's disagree, an immediate block with no tests, keeps its own word.
+        let old = attempt_ends(&[s("code", true)], &ls(&[&["grant", "blocked: disagree: the verified candidates disagree"]]), false, &none);
+        assert_eq!(old[0].1, end("blocked", Some("disagree"), Some("recorded")));
     }
 
     #[test]
