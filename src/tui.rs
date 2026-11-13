@@ -252,7 +252,8 @@ impl App {
     fn focus_on(&mut self, list: &[Row], i: usize) {
         let ti = self.ti();
         let key = list.get(i).and_then(|r| r.key.clone());
-        if key != self.held[ti] { self.detail_top = 0; }
+        // Another item opens at its top; the same one (a goal that gained a bon process) stays where it was read to.
+        if !matches!((&key, &self.held[ti]), (Some(a), Some(b)) if same(&self.p, a, b)) { self.detail_top = 0; }
         self.focus[ti] = i;
         self.held[ti] = key;
     }
@@ -567,7 +568,8 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
                 spans.extend(cost_cells(pal, gen, time));
                 out.push(Row::item(Line::from(spans), goal_key(g)));
             }
-            if p.groups.is_empty() { out.push(empty("No bon process yet")); }
+            let narrowed = p.filter.since.is_some() || p.filter.until.is_some() || p.filter.find.is_some();
+            if p.groups.is_empty() { out.push(empty(if narrowed { "No bon process in this range" } else { "No bon process yet" })); }
         }
         Tab::Queue => {
             // Every item in full, full width: its label, then its text wrapped under itself.
@@ -652,7 +654,7 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
             out.push(header("State Machine", Some(ts.len())));
             if !spec.fields.is_empty() {
                 let names = spec.fields.iter().map(|f| f.name.clone()).collect::<Vec<_>>().join(" · ");
-                out.push(Row::item(Line::from(vec![Span::styled(format!("   {}", fit("Fields", nw)), pal.ink()), Span::styled(fit(&names, room), pal.muted())]), Key::Grid));
+                out.push(Row::item(Line::from(vec![Span::styled(format!("   {}", fit("Fields", nw)), pal.muted()), Span::styled(fit(&names, room), pal.ink())]), Key::Grid));
             }
             for i in ts { out.push(item(i, vec![doc_of(i)])); }
 
@@ -1864,7 +1866,9 @@ fn draw(f: &mut Frame, app: &mut App) {
 
 /// The range r has set, or the one bon was started with: what the footer says.
 fn range_label(app: &App, f: &view::Filter) -> String {
-    if app.range > 0 { return format!("Range: {}", RANGES[app.range].0); }
+    // r's range once the read for it is shown; until then, what is shown.
+    let asked = app.filter.lock().map(|x| x.since).unwrap_or(None);
+    if app.range > 0 && f.since == asked { return format!("Range: {}", RANGES[app.range].0); }
     match (f.since, f.until) {
         (None, None) => "Range".into(),
         (s, u) => format!("Range:{}{}", s.map_or(String::new(), |t| format!(" since {}", view::date(t))), u.map_or(String::new(), |t| format!(" until {}", view::date(t)))),
@@ -1981,7 +1985,8 @@ fn key(app: &mut App, k: KeyEvent) -> bool {
         Overlay::None => {}
         Overlay::Logs { items, sel } => {
             match k.code {
-                KeyCode::Esc | KeyCode::Char('q') => app.overlay = Overlay::None,
+                KeyCode::Esc => app.overlay = Overlay::None,
+                KeyCode::Char('q') => return false,
                 KeyCode::Up | KeyCode::Char('k') => *sel = sel.saturating_sub(1),
                 KeyCode::Down | KeyCode::Char('j') => *sel = (*sel + 1).min(items.len().saturating_sub(1)),
                 KeyCode::PageUp => *sel = sel.saturating_sub(body_page),
@@ -1998,13 +2003,13 @@ fn key(app: &mut App, k: KeyEvent) -> bool {
         }
         Overlay::Text { top, .. } => {
             scroll(top, overlay_rows, k, body_page);
-            if matches!(k.code, KeyCode::Esc | KeyCode::Char('q')) { app.overlay = Overlay::None; }
-            return true;
+            if k.code == KeyCode::Esc { app.overlay = Overlay::None; }
+            return k.code != KeyCode::Char('q');
         }
         Overlay::Compare { top, .. } => {
             scroll(top, overlay_rows, k, body_page);
-            if matches!(k.code, KeyCode::Esc | KeyCode::Char('q')) { app.overlay = Overlay::None; }
-            return true;
+            if k.code == KeyCode::Esc { app.overlay = Overlay::None; }
+            return k.code != KeyCode::Char('q');
         }
     }
     let ti = app.ti();

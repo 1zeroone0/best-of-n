@@ -239,7 +239,9 @@ fn dispatch(root: &str, name: &str, a: &Parsed, filter: &view::Filter) -> Result
         "view" if a.has("--tab") || a.has("--focus") || a.has("--light") => Err("--tab, --focus and --light go with --frame; bon view --help shows its usage".into()),
         "view" => tui::run(&root, view::Filter::default()),
         "queue" => queue(&root),
-        "setup" if a.value("--for").is_some_and(|u| u.trim().is_empty()) => Err("--for needs a user's name; bon setup --help shows its usage".into()),
+        // A user's name reaches sudo and dscl: letters, digits, . _ - only.
+        "setup" if a.value("--for").is_some_and(|u| !u.chars().all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))) =>
+            Err(format!("--for {} is no user's name; name a user with letters, digits, . _ or -", a.value("--for").unwrap_or_default())),
         "setup" => setup(a.has("--dry-run"), a.value("--for")),
         "account" => account::run(&root, a.has("--check")),
         "types" => types::run(&root, a.has("--check")),

@@ -96,7 +96,10 @@ impl Filter {
         };
         Ok(Filter {
             since: since.map(|s| day("--since", s)).transpose()?,
-            until: until.map(|s| day("--until", s)).transpose()?.map(|t| t + 86399),
+            until: match (since, until) {
+                (Some(a), Some(b)) if day("--since", a)? > day("--until", b)? => return Err(format!("--since {a} is after --until {b}; give the earlier date first")),
+                _ => until.map(|s| day("--until", s)).transpose()?.map(|t| t + 86399),
+            },
             find: find.filter(|f| !f.is_empty()),
         })
     }
@@ -1345,8 +1348,8 @@ pub fn text(s: &Value) -> String {
     // Trunk as bon works on it; generation and time side by side, then the total.
     let rate = t["rate"].as_f64().filter(|r| *r > 0.0).map_or(String::new(), |r| format!(" at ${r:.0}/h"));
     let at = trunk(r["remote"].as_str(), r["trunk"].as_str(), r["remote_head"].as_str());
-    out += &format!("{}{} · {} generation + {} time{rate} = {}\n", r["name"].as_str().unwrap_or(""),
-        if at.is_empty() { String::new() } else { format!(" · {at}") }, opt(&t["generation"]), opt(&t["time_cost"]), opt(&t["cost"]));
+    out += &wrap(&format!("{}{} · {} generation + {} time{rate} = {}", r["name"].as_str().unwrap_or(""),
+        if at.is_empty() { String::new() } else { format!(" · {at}") }, opt(&t["generation"]), opt(&t["time_cost"]), opt(&t["cost"])), 0, 0);
     // Each rate with what it divides: what reached a push, over how many pushes.
     let pushes = t["pushes"].as_u64().unwrap_or(0);
     let basis = if pushes > 0 { format!(" ({} over {})", opt(&t["pushed"]), count(pushes as usize, "push", "pushes")) } else { String::new() };
@@ -1387,7 +1390,7 @@ pub fn text(s: &Value) -> String {
     }
     out += "\nRecent\n";
     let recent: Vec<&Value> = s["groups"].as_array().into_iter().flatten().filter(|g| g["running"] != true).take(8).collect();
-    if recent.is_empty() { out += if f["since"].is_null() && f["until"].is_null() && f["find"].is_null() { "  No bon process yet\n" } else { "  No bon process in this range\n" }; }
+    if recent.is_empty() && running.is_empty() { out += if f["since"].is_null() && f["until"].is_null() && f["find"].is_null() { "  No bon process yet\n" } else { "  No bon process in this range\n" }; }
     let protected: Vec<String> = serde_json::from_value(s["protected"].clone()).unwrap_or_default();
     for g in recent {
         let n = g["processes"].as_array().map_or(0, |p| p.len());
@@ -1933,6 +1936,7 @@ mod tests {
         assert!(f.covers(1_794_441_600, "123 code from abc pushed") && !f.covers(1_794_441_600, "123 compaction"));
         assert!(Filter { find: Some("CODE".into()), ..Default::default() }.covers(0, "Code"));
         assert!(Filter::new(None, None, Some(String::new())).unwrap().find.is_none());
+        assert_eq!(Filter::new(Some("2026-11-12"), Some("2026-11-01"), None).err().unwrap(), "--since 2026-11-12 is after --until 2026-11-01; give the earlier date first");
     }
 
     #[test]
