@@ -140,6 +140,8 @@ pub struct Search {
     pub trusted: Vec<Path>,
     pub limit: u64,
     pub results: Vec<Option<Candidate>>,
+    /// The commits whose verdicts its agent processes are given.
+    pub context: Vec<Commit>,
 }
 
 impl View for Search {
@@ -155,6 +157,7 @@ impl View for Search {
                 Set::range(0int, self.results.len() as int),
                 |i: int| match self.results@[i] { Some(candidate) => Some(candidate@), None => None },
             ),
+            context: commits(self.context@),
         }
     }
 }
@@ -164,6 +167,11 @@ impl View for Search {
 /// Exec paths as the spec's set of paths.
 pub open spec fn paths(list: Seq<Path>) -> Set<spec::Path> {
     list.map_values(|path: Path| path@).to_set()
+}
+
+/// Exec commits as the spec's set of commits.
+pub open spec fn commits(list: Seq<Commit>) -> Set<spec::Commit> {
+    list.map_values(|commit: Commit| commit@).to_set()
 }
 
 /// Exec hashes as the spec's naturals, in order.
@@ -245,6 +253,11 @@ pub open spec fn texts(list: Seq<Path>) -> Seq<u64> {
     seq![list.len() as u64] + list.map_values(|path: Path| text(path.0@)).flatten()
 }
 
+/// A list of commits: its length, then each commit's text.
+pub open spec fn commit_texts(list: Seq<Commit>) -> Seq<u64> {
+    seq![list.len() as u64] + list.map_values(|commit: Commit| text(commit.0@)).flatten()
+}
+
 /// A kind: a tag (0 queue, 1 code, 2 compaction, 3 counterexample, 4 foil),
 /// then its fields; a counterexample's goal is 0 for trunk, or 1 and the agent
 /// process; a foil's, the agent process and the paths it changed.
@@ -287,6 +300,7 @@ pub open spec fn result_words(result: Option<Candidate>) -> Seq<u64> {
 pub open spec fn encoded(search: Search) -> Seq<u64> {
     kind_words(search.kind) + text(search.base.0@) + seq![search.n as u64] + texts(search.checks@) + texts(search.tests@) + texts(search.trusted@) + seq![search.limit]
         + seq![search.results.len() as u64] + search.results@.map_values(|result: Option<Candidate>| result_words(result)).flatten()
+        + commit_texts(search.context@)
 }
 
 // ── emission ────────────────────────────────────────────
@@ -415,6 +429,7 @@ pub open spec fn json(search: Search) -> Seq<char> {
         field("limit"@, decimal(search.limit as nat)),
         field("results"@, array(search.results@.map_values(|result: Option<Candidate>| match result {
             Some(candidate) => candidate_json(candidate), None => seq!['n', 'u', 'l', 'l'] }))),
+        field("context"@, array(search.context@.map_values(|commit: Commit| string(commit.0@)))),
     ])
 }
 

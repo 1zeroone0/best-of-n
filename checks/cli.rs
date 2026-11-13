@@ -73,8 +73,8 @@ fn a_mistake_is_one_line_on_stderr_and_exit_1() {
         (&["help", "code"], "bon: code is not an argument of help; bon help --help shows its usage\n"),
         (&["code", "now"],"bon: now is not an argument of code; bon code --help shows its usage\n"),
         (&["view", "--frame"], "bon: --frame needs WxH; bon view --help shows its usage\n"),
-        // Outside a repository, before anything is read.
-        (&[], "bon: not in a git repository; run bon in one, or start one with bon new <name>\n"),
+        // Outside a repository, before anything is read (bare bon, view and pending show the host there).
+        (&["spec"], "bon: not in a git repository; run bon in one, or start one with bon new <name>\n"),
     ];
     for (args, said) in cases {
         let o = bon(&d.0, args);

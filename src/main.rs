@@ -7,9 +7,11 @@ use std::process::Command;
 use best_of_n::process;
 
 mod account;
+mod host;
 mod interrupt;
 mod new;
 mod projection;
+mod route;
 mod tui;
 mod types;
 mod view;
@@ -21,7 +23,7 @@ mod view;
 /// the README's table come from here (a test holds the README to it).
 pub(crate) const COMMANDS: [(&str, &str, &str); 17] = [
     ("", "[--since YYYY-MM-DD] [--until YYYY-MM-DD] [--find TEXT]",
-        "the view: Project, Spec, Queue, Traces, over that range (piped, plain text)"),
+        "the view: Project, Spec, Queue, Traces, over that range (piped, plain text); outside every repository, the host: what waits on you across repositories, the pools, memory, each bon process, a journal"),
     ("code", "", "search for code that trunk's checks accept; push it"),
     ("counterexample", "", "look for a behavior on trunk the spec forbids, with tests written blind"),
     ("compaction", "", "remove what is stale, behavior unchanged"),
@@ -31,7 +33,7 @@ pub(crate) const COMMANDS: [(&str, &str, &str); 17] = [
     ("types", "[--check]", "write the types programs are built on, in TypeScript, Go and Python, or fail if one is stale"),
     ("account", "[--check]", "write what is proven, trusted, configured and tested, as OSCAL with its SBOM, or fail if it is stale"),
     ("check", "", "every check on the working tree, as candidates are judged; whose fix a failure is; each file that breaks a rule on what a search may write"),
-    ("pending", "[--transcript FILE]", "what only you can answer, oldest first: what happened, the choices and what each costs"),
+    ("pending", "[--transcript FILE]", "what only you can answer, oldest first: what happened, the choices and what each costs; outside every repository, the host's; first, each transcript dropped in the user layer's folder goes where the host file routes it"),
     ("new", "<name>", "set up a project: a spec with the core nouns, its gates, an empty implementation, the manifest and the queue"),
     ("init", "", "create a manifest and queue in this git repository"),
     ("setup", "[--dry-run] [--for USER]", "create users agent and check0, check1, … (one per check slot) and group bon, and let USER (default: you) run commands as each; run it as an administrator"),
@@ -163,11 +165,13 @@ fn main() {
         Ok(r) => r,
         // These read no repository: account and types run in a checkout without .git (checks).
         Err(_) if matches!(name, "new" | "setup") || (matches!(name, "account" | "types") && Path::new(".bon/bon.toml").is_file()) => ".".into(),
+        // Outside every repository, the view and bon pending show the host: no root.
+        Err(_) if matches!(name, "" | "view" | "pending") => String::new(),
         Err(_) => fail("not in a git repository; run bon in one, or start one with bon new <name>"),
     };
     // What a command reads its settings from: trunk's manifest, or the working tree's.
     let r = Path::new(&root);
-    if matches!(name, "" | "view" | "spec" | "pending" | "cost" | "code" | "compaction" | "counterexample" | "queue" | "background") {
+    if !root.is_empty() && matches!(name, "" | "view" | "spec" | "pending" | "cost" | "code" | "compaction" | "counterexample" | "queue" | "background") {
         match git(r, &["show", "HEAD:.bon/bon.toml"]) {
             Err(_) if r.join(".bon/bon.toml").is_file() => fail("no .bon/bon.toml at trunk's head: it is not committed; commit .bon/"),
             Err(_) => fail("no .bon/bon.toml at trunk's head; run bon init"),
@@ -236,6 +240,7 @@ fn dispatch(root: &str, name: &str, a: &Parsed, filter: &view::Filter) -> Result
             print!("{}", tui::frame(&root, w, h, tab - 1, focus, a.has("--light"))?);
             Ok(())
         }
+        "view" if a.has("--state") && root.is_empty() => { println!("{}", serde_json::to_string_pretty(&host::state(None)).unwrap_or_default()); Ok(()) }
         "view" if a.has("--state") => { println!("{}", serde_json::to_string_pretty(&view::state(Path::new(&root), &view::Filter::default())).unwrap_or_default()); Ok(()) }
         "view" if a.has("--tab") || a.has("--focus") || a.has("--light") => Err("--tab, --focus and --light go with --frame; bon view --help shows its usage".into()),
         "view" => tui::run(&root, view::Filter::default()),
@@ -358,7 +363,7 @@ fn may_write(m: &best_of_n::trusted::Manifest, path: &str) -> bool {
         intents: vec![], accepts: vec![], accepts_foils: vec![], rejects_counterexamples: true, measured: true, added: vec![p], rank: 0, diff: 0 };
     [Kind::Code { goal: Commit(vec![]) }, Kind::Compaction { goal: Commit(vec![]), out: vec![] }, Kind::Counterexample { goal: None }]
         .into_iter().any(|kind| best_of_n::exec::verified(&Search { kind, base: Commit(vec![]), n: 1, checks: best_of_n::trusted::checks(m),
-            tests: best_of_n::trusted::tests(m), trusted: best_of_n::trusted::trusted(m), limit: 0, results: vec![] }, &c))
+            tests: best_of_n::trusted::tests(m), trusted: best_of_n::trusted::trusted(m), limit: 0, results: vec![], context: vec![] }, &c))
 }
 
 /// Where `commit`'s tree breaks a rule, one line each: the file, what is
@@ -827,6 +832,8 @@ fn init_account(r: &Path) -> String {
 /// What is running, what was pushed, and the queue: the projection bon view
 /// draws, printed.
 fn status(root: &str, filter: &view::Filter) -> Result<(), String> {
+    // Outside every repository: the host.
+    if root.is_empty() { print!("{}", host::text(&host::state(None))); return Ok(()); }
     print!("{}", view::text(&view::state(Path::new(root), filter)));
     Ok(())
 }
@@ -1085,7 +1092,9 @@ const HOST_TEMPLATE: &str = r#"# bon's host file: facts about this host, not abo
 
 # The user layer's root, between this host and its repositories: bon's state
 # that outlives a bon process (the verdict cache, the process list) is in its
-# .bon, engineer's alone.
+# .bon, engineer's alone. `bon` outside every repository shows the host: the
+# repositories under this root with a .bon/bon.toml, and any a bon process
+# searches.
 user = "@USER@"
 
 # PATH for agent processes and checks. Nothing else is inherited. Checks drop
@@ -1095,6 +1104,18 @@ path = ["/opt/bon/cargo/bin", "/opt/bon/verus", "/opt/homebrew/bin", "/usr/bin",
 # The toolchain checks judge with, installed by bon setup: root's all the way up.
 rustup_home = "/opt/bon/rustup"
 cargo_home = "/opt/bon/cargo-home"
+
+# Where a transcript dropped in the user layer's folder (<user>/transcripts)
+# goes: a pattern of its meeting title (its WebVTT header's text, else its
+# file name), and the repository, its path under the user layer's root or
+# absolute. A title matches a pattern it contains, ignoring case; a transcript
+# goes where its matching routes name one repository, into that repository's
+# transcripts directory (moved, not committed), when bon pending runs. One no
+# route names, or whose routes name two repositories, stays in the folder,
+# pending, until a route names it or you move it.
+[routes]
+# "Acme" = "acme"
+# "weekly sync" = "bon"
 
 # What each role a repository's [searches] names runs. program: the argv, run
 # as agent in the working directory with the prompt on its stdin; bon appends
@@ -1424,6 +1445,11 @@ mod tests {
         assert_eq!(host["user"].as_str(), Some("@USER@"));
         assert!(host["roles"].get("wide").is_some() && host["roles"].get("deep").is_some());
         assert_eq!(host["prices"]["claude-haiku-5-5"]["tier"]["above"].as_integer(), Some(100_000));
+        // queue 80: the routes are a table of the host's own, empty until the owner names one; every top-level key stays top-level.
+        assert!(host["routes"].as_table().is_some_and(|r| r.is_empty()) && host.get("path").is_some() && host["routes"].get("path").is_none());
+        let routed = HOST_TEMPLATE.replace("# \"Acme\" = \"acme\"", "\"Acme\" = \"acme\"");
+        assert_eq!(best_of_n::trusted::host_shape(&routed), Ok(()));
+        assert_eq!(toml::from_str::<toml::Value>(&routed).unwrap()["routes"]["Acme"].as_str(), Some("acme"));
         // The old shape is refused, naming what replaced it.
         assert!(best_of_n::trusted::host_shape("generation = 8\npath = []").unwrap_err().contains("agent_processes"));
         // queue 56, 58: the verdict cache's place and cleanup are no host keys now.

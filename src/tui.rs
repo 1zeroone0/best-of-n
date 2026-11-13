@@ -1,7 +1,10 @@
 //! `bon` in a terminal: the projection as four tabs, Project, Spec, Queue and
 //! Traces, each a list with the focused item's detail beside it (or, under
-//! 100 columns, opened on ⏎). Trusted code. It reads only the projection and
-//! the files it names; it decides nothing.
+//! 100 columns, opened on ⏎). Outside every repository it is the host
+//! (`host.rs`): what is pending across repositories, what runs against the
+//! host's pools, memory, the journal and each repository; in a repository,
+//! Project shows that repository's part of the same. Trusted code. It reads
+//! only the projections and the files they name; it decides nothing.
 //!
 //! Color has one meaning, position on the chain: red needs attention, violet
 //! is settled. Everything else is ink, muted or faint, light and dark. `Tone`
@@ -21,7 +24,7 @@ use ratatui::widgets::Paragraph;
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::projection::{self, BonProcess, Facts, GoalTrace, Projection, SearchTrace};
-use crate::view::{self, ago, cap, count, dur, money_or as money, outcome_label, short, signed};
+use crate::view::{self, ago, cap, count, dur, money_or as money, outcome_label, short, signed, size};
 
 // ── palette ─────────────────────────────────────────────
 
@@ -162,8 +165,10 @@ fn spread(mut left: Vec<Span<'static>>, right: Vec<Span<'static>>, w: usize) -> 
 
 // ── the model ───────────────────────────────────────────
 
+/// The tabs of a repository; outside every repository, the host is the one
+/// tab (queue 60), and no repository's tabs show.
 #[derive(Clone, Copy, PartialEq)]
-enum Tab { Project, Spec, Queue, Traces }
+enum Tab { Project, Spec, Queue, Traces, Host }
 const TABS: [Tab; 4] = [Tab::Project, Tab::Spec, Tab::Queue, Tab::Traces];
 
 /// What a focusable row stands for, by the item's identity, never its
@@ -203,6 +208,9 @@ struct App {
     p: Projection,
     /// When the projection was first read: before it, nothing is shown as if read.
     loaded: Option<Instant>,
+    /// The host as it shows here: this repository's part of it, or, outside
+    /// every repository (`root` empty), all of it.
+    host: projection::Host,
     root: std::path::PathBuf,
     overlay: Overlay,
     /// Text being typed after /, for find.
@@ -238,14 +246,16 @@ struct App {
     /// Whether the list was last scrolled through its rows rather than moved between items.
     scrolled: bool,
     overlay_rows: usize,
+    /// The host drawn as two panes (100 columns and wider): what happened on the right.
+    split: bool,
 }
 
 impl App {
     fn new() -> App {
         let dark = std::env::var("BON_THEME").map_or(true, |t| t != "light");
-        App { p: Projection::default(), loaded: None, root: ".".into(), overlay: Overlay::None, input: None, range: 0, filter: Default::default(),
+        App { p: Projection::default(), loaded: None, host: Default::default(), root: ".".into(), overlay: Overlay::None, input: None, range: 0, filter: Default::default(),
               error: None, tab: Tab::Traces, held: Default::default(), focus: [0; 4], top: [0; 4], detail_top: 0, detail_open: false,
-              keys: false, palette: if dark { DARK } else { LIGHT }, dark, off: local_offset(), list_w: 200, list_h: 20, detail_h: 20, detail_shown: false, detail_page: 18, body_h: 20, keys_top: 0, scrolled: false, overlay_rows: 0 }
+              keys: false, palette: if dark { DARK } else { LIGHT }, dark, off: local_offset(), list_w: 200, list_h: 20, detail_h: 20, detail_shown: false, detail_page: 18, body_h: 20, keys_top: 0, scrolled: false, overlay_rows: 0, split: false }
     }
     fn ti(&self) -> usize { TABS.iter().position(|t| *t == self.tab).unwrap_or(0) }
     /// Focus row `i` of `list`, and its item; a new focus opens its detail at the top.
@@ -257,8 +267,9 @@ impl App {
         self.focus[ti] = i;
         self.held[ti] = key;
     }
-    /// Switch tab; an open detail closes, so a tab opens on its list.
-    fn switch(&mut self, tab: Tab) { self.tab = tab; self.detail_top = 0; self.detail_open = false; }
+    /// Switch tab; an open detail closes, so a tab opens on its list. The
+    /// host has one tab: there is nothing to switch to.
+    fn switch(&mut self, tab: Tab) { if self.tab == Tab::Host { return; } self.tab = tab; self.detail_top = 0; self.detail_open = false; }
 }
 
 // ── the visual hierarchy ────────────────────────────────
@@ -534,6 +545,16 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
     let header = |t: &str, n: Option<usize>| Row::text(section(pal, 1, t, n));
     let empty = |s: &str| Row::text(Line::from(Span::styled(format!(" {s}"), pal.muted())));
     match app.tab {
+        // Outside every repository: the host, its only tab.
+        Tab::Host => {
+            // Beside the right pane, one blank column before its rule.
+            let pending: Vec<&projection::Interrupt> = app.host.interrupts.iter().filter(|i| i.resolved.is_none()).collect();
+            if pending.is_empty() { out.push(header("Pending", None)); out.push(Row::text(Line::from(Span::styled("   Nothing waits on you", pal.muted())))); }
+            else { out.extend(pending_rows(pal, &pending, app.host.now, None, w)); }
+            // Wide, what happened is the right pane (the detail); each section keeps its side.
+            out.push(blank());
+            out.extend(if app.split { host_now(app, w, true) } else { host_rows(app, w, true) });
+        }
         Tab::Traces => {
             let today = day(p.repo.now, app.off);
             let mut last_day = None;
@@ -570,7 +591,6 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
                 spans.extend(cost_cells(pal, gen, time));
                 out.push(Row::item(Line::from(spans), goal_key(g)));
             }
-            let narrowed = p.filter.since.is_some() || p.filter.until.is_some() || p.filter.find.is_some();
             if p.groups.is_empty() { out.push(empty(none_yet(p))); }
         }
         Tab::Queue => {
@@ -733,33 +753,12 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
             // first, what happened, and each choice with its cost and how it is made.
             let pending: Vec<&projection::Interrupt> = p.interrupts.iter().filter(|i| i.resolved.is_none()).collect();
             if !pending.is_empty() {
-                out.push(header("Pending", Some(pending.len())));
-                let names = pending.iter().flat_map(|i| i.choices.iter().map(|c| c.choice.chars().count() + 4).chain([i.kind.chars().count() + 4])).max().unwrap_or(0) + 2;
-                let at = names.min(w / 3).max(6);
-                let labeled = |out: &mut Vec<Row>, label: Vec<Span<'static>>, text: &str, style: Style| {
-                    let first = width_of(&label) < at;
-                    if !first { out.push(Row::text(Line::from(label.clone()))); }
-                    for (k, l) in hanging(text, at, w, style).into_iter().enumerate() {
-                        let mut v = if k == 0 && first { label.clone() } else { Vec::new() };
-                        let used = width_of(&v);
-                        v.push(Span::raw(" ".repeat(at.saturating_sub(used))));
-                        v.push(Span::styled(l.spans[0].content.chars().skip(at).collect::<String>(), style));
-                        out.push(Row::text(Line::from(v)));
-                    }
-                };
-                for (k, i) in pending.iter().enumerate() {
-                    if k > 0 { out.push(blank()); }
-                    let repo = if i.repository.is_empty() || p.repo.name.as_deref() == Some(i.repository.as_str()) { String::new() } else { format!(" · {}", i.repository) };
-                    labeled(&mut out, vec![Span::styled("  ● ", pal.tone(Tone::Yellow)), Span::styled(cap(&i.kind), pal.ink())],
-                        &format!("{} · raised {}{repo}", i.about, ago(p.repo.now, i.raised)), pal.ink());
-                    for line in &i.what { labeled(&mut out, Vec::new(), line, pal.muted()); }
-                    for c in &i.choices {
-                        labeled(&mut out, vec![Span::styled(format!("    {}", cap(&c.choice)), pal.ink())], &c.cost, pal.ink());
-                        labeled(&mut out, Vec::new(), &c.how, pal.faint());
-                    }
-                }
+                out.extend(pending_rows(pal, &pending, p.repo.now, p.repo.name.as_deref(), w));
                 out.push(blank());
             }
+            // Then what runs now in this repository, against the host's pools, and what happened (queue 60).
+            out.extend(host_rows(app, w, false));
+            out.push(blank());
             let lw = 23;
             let num = |s: String| Span::styled(right(&s, 9), pal.ink());
             let line = |label: &str, value: Vec<Span<'static>>| Row::text(kv(pal, 3, lw, label, value));
@@ -840,6 +839,7 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
                     (view::success_table(t), vec!["Success probability per agent process", "Success probability per attempt", "Attempt a"]),
                     (run, vec!["Time, cost to a push", "Median, 90th percentile"]),
                     (view::per_verified_table(t), vec!["Cost per verified candidate"]),
+                    (view::over_tier_table(t), vec!["Over tier"]),
                     (view::utilization_table(t), vec!["Utilization"]),
                     (view::turnaround_table(t), vec!["Turnaround"]),
                 ];
@@ -901,6 +901,206 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
     out
 }
 
+// ── the host (queue 60) ─────────────────────────────────
+
+/// The pending interrupts, oldest first, under their header: each one's kind,
+/// what it is about and when it was raised (with its repository where it is
+/// not `here`'s), what happened, then each choice with what it costs and,
+/// under it, how it is made.
+fn pending_rows(pal: &Palette, pending: &[&projection::Interrupt], now: i64, here: Option<&str>, w: usize) -> Vec<Row> {
+    let mut out = vec![Row::text(section(pal, 1, "Pending", Some(pending.len())))];
+    let names = pending.iter().flat_map(|i| i.choices.iter().map(|c| c.choice.chars().count() + 4).chain([i.kind.chars().count() + 4])).max().unwrap_or(0) + 2;
+    let at = names.min(w / 3).max(6);
+    let labeled = |out: &mut Vec<Row>, label: Vec<Span<'static>>, text: &str, style: Style| {
+        let first = width_of(&label) < at;
+        if !first { out.push(Row::text(Line::from(label.clone()))); }
+        for (k, l) in hanging(text, at, w, style).into_iter().enumerate() {
+            let mut v = if k == 0 && first { label.clone() } else { Vec::new() };
+            let used = width_of(&v);
+            v.push(Span::raw(" ".repeat(at.saturating_sub(used))));
+            v.push(Span::styled(l.spans[0].content.chars().skip(at).collect::<String>(), style));
+            out.push(Row::text(Line::from(v)));
+        }
+    };
+    for (k, i) in pending.iter().enumerate() {
+        if k > 0 { out.push(Row::text(Line::default())); }
+        let repo = if i.repository.is_empty() || here == Some(i.repository.as_str()) { String::new() } else { format!(" · {}", i.repository) };
+        labeled(&mut out, vec![Span::styled("  ● ", pal.tone(Tone::Yellow)), Span::styled(cap(&i.kind), pal.ink())],
+            &format!("{} · raised {}{repo}", i.about, ago(now, i.raised).to_lowercase()), pal.ink());
+        for line in &i.what { labeled(&mut out, Vec::new(), line, pal.muted()); }
+        for c in &i.choices {
+            labeled(&mut out, vec![Span::styled(format!("    {}", cap(&c.choice)), pal.ink())], &c.cost, pal.ink());
+            labeled(&mut out, Vec::new(), &c.how, pal.faint());
+        }
+    }
+    out
+}
+
+/// A gauge `w` cells wide: `part` of `whole` as ink cells, the rest faint.
+fn gauge(pal: &Palette, part: f64, whole: f64, w: usize) -> Vec<Span<'static>> {
+    let n = if whole > 0.0 { ((part / whole).clamp(0.0, 1.0) * w as f64).round() as usize } else { 0 };
+    // Something held shows at least a cell; nothing held, none.
+    let n = if part > 0.0 { n.max(1) } else { n };
+    vec![Span::styled("█".repeat(n), pal.ink()), Span::styled("░".repeat(w - n), pal.faint())]
+}
+
+
+/// How many journal lines show: in a repository's Project, its latest; on the host, more.
+const JOURNAL_HERE: usize = 8;
+const JOURNAL_HOST: usize = 40;
+
+/// The host's panes after what is pending: what waiting on searches costs
+/// engineer, the two pools and memory (the host's, which a repository shares),
+/// each running bon process (those of one tree together), the journal and,
+/// for the whole host, each repository. In a repository (`whole` false), its
+/// own processes and journal only. Nothing before the first read.
+fn host_rows(app: &App, w: usize, whole: bool) -> Vec<Row> {
+    let mut out = host_now(app, w, whole);
+    out.push(Row::text(Line::default()));
+    out.extend(host_record(app, w, whole));
+    out
+}
+
+/// The host's journal and, for the whole host, each repository: the right
+/// pane at 100 columns and wider, under what runs below that.
+fn host_record(app: &App, w: usize, whole: bool) -> Vec<Row> {
+    let mut out: Vec<Line<'static>> = Vec::new();
+    if app.loaded.is_none() { return Vec::new(); }
+    host_journal(app, whole, &mut out);
+    if whole { host_repositories(app, w, &mut out); }
+    out.into_iter().map(|l| Row::text(clip(l, w))).collect()
+}
+
+/// What engineer's waiting costs, the pools and memory, and each running bon process.
+fn host_now(app: &App, w: usize, whole: bool) -> Vec<Row> {
+    let (pal, h) = (&app.palette, &app.host);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    if app.loaded.is_none() { return Vec::new(); }
+    let lw = 18;
+    let line = |label: &str, value: Vec<Span<'static>>| kv(pal, 3, lw, label, value);
+    let ink = |s: String| Span::styled(s, pal.ink());
+    let muted = |s: &str| Span::styled(s.to_string(), pal.muted());
+
+    // Now: what engineer's waiting costs, and what the host holds.
+    out.push(section(pal, 1, "Now", None));
+    let wt = &h.waiting;
+    if wt.searches > 0 {
+        let mut v = vec![ink(count(wt.searches as usize, "search", "searches")), muted(" · "), ink(format!("{}/h", money(Some(wt.per_hour)))), muted(" of your time")];
+        if wt.host > wt.searches && !whole { v.push(muted(&format!(" · {} on the host", wt.host))); }
+        out.push(line("You wait on", v));
+    }
+    out.push(line("Your time today", vec![ink(money(Some(wt.today)))]));
+    // A gauge where the line has room for one of at least 8 cells, up to 16.
+    let gw = match w.saturating_sub(3 + lw + 2 + 32) { n if n >= 8 => n.min(16), _ => 0 };
+    for (name, s, what) in [("agent_processes", &h.pools.agent_processes, "in flight"), ("check_processes", &h.pools.check_processes, "in checks")] {
+        let mut v = Vec::new();
+        match s.size {
+            Some(n) => {
+                if gw > 0 { v.extend(gauge(pal, s.held as f64, n as f64, gw)); v.push(Span::raw("  ")); }
+                v.push(ink(format!("{} of {n} held", s.held)));
+                if !whole && s.shown > 0 { v.push(muted(&format!(" · {} {what} here", s.shown))); }
+                if name == "check_processes" { if let Some(t) = h.pools.check_threads { v.push(muted(&format!(" · {t} threads each"))); } }
+            }
+            None => v.push(muted("unsized: no host file")),
+        }
+        out.push(line(name, v));
+    }
+    let m = &h.memory;
+    if m.total > 0.0 {
+        let mut v = Vec::new();
+        if gw > 0 { v.extend(gauge(pal, m.total - m.free, m.total, gw)); v.push(Span::raw("  ")); }
+        v.push(ink(format!("{:.1} of {:.1} GB free", m.free, m.total)));
+        if !h.trees.is_empty() { v.push(muted(" · bon ")); v.push(ink(size(m.bon))); }
+        out.push(line("Memory", v));
+    }
+
+    // Each running bon process, those of one tree together.
+    out.push(Line::default());
+    let n: usize = h.trees.iter().map(|g| g.processes.len()).sum();
+    out.push(section(pal, 1, "bon Processes", (n > 0).then_some(n)));
+    if n == 0 { out.push(Line::from(Span::styled("   No bon process is running", pal.muted()))); }
+    for g in &h.trees {
+        let grouped = g.processes.len() > 1;
+        if grouped {
+            out.push(Line::from(vec![Span::styled("   Tree ", pal.muted()), Span::styled(short(g.tree.as_deref().unwrap_or("")), pal.faint()),
+                Span::styled(format!(" · {} bon processes from one tree", g.processes.len()), pal.muted())]));
+        }
+        let ind = if grouped { 5 } else { 3 };
+        for r in &g.processes {
+            let what = match (r.kind.as_deref(), r.goal.as_deref()) {
+                (Some(k), Some(goal)) => format!("{k} {}", if goal.len() == 40 && goal.chars().all(|c| c.is_ascii_hexdigit()) { format!("from {}", short(goal)) } else { goal.to_string() }),
+                (Some(k), None) => k.to_string(),
+                _ => "between searches".to_string(),
+            };
+            let mut left = vec![Span::raw(" ".repeat(ind)), Span::styled("● ", pal.tone(Tone::Orange))];
+            if whole { left.push(Span::styled(format!("{} · ", r.repository), pal.muted())); }
+            left.push(ink(what));
+            if r.background { left.push(muted(" · background")); }
+            // Its age at the right where it fits; its pid and memory after what it does.
+            let age = vec![Span::styled(format!("{} ", ago(h.now, r.start).to_lowercase()), pal.muted())];
+            if width_of(&left) + width_of(&age) + 2 <= w { out.push(spread(left, age, w)); } else { out.push(Line::from(left)); }
+            let counts = view::now_counts(r.in_flight, r.in_checks, r.waiting);
+            let detail = match r.width {
+                Some(n) if r.search.is_some() => format!("{} of {n} returned{}, {} verified so far", r.returned, if counts.is_empty() { String::new() } else { format!(" ({counts})") }, r.verified),
+                _ => r.sentence.clone(),
+            };
+            for l in hanging(&format!("{detail} · pid {} · {}", r.pid, size(r.memory)), ind + 2, w, pal.muted()) { out.push(l); }
+        }
+    }
+
+    out.into_iter().map(|l| Row::text(clip(l, w))).collect()
+}
+
+/// The journal: what happened, in the order it happened, by day; the latest.
+fn host_journal(app: &App, whole: bool, out: &mut Vec<Line<'static>>) {
+    let (pal, h) = (&app.palette, &app.host);
+    out.push(section(pal, 1, "Journal", None));
+    let take = if whole { JOURNAL_HOST } else { JOURNAL_HERE };
+    let shown: Vec<&projection::Event> = h.journal.iter().rev().take(take).collect::<Vec<_>>().into_iter().rev().collect();
+    if shown.is_empty() { out.push(Line::from(Span::styled("   No push, block or interrupt yet", pal.muted()))); }
+    let today = day(h.now, app.off);
+    let mut last_day = None;
+    for e in shown {
+        let d = day(e.time, app.off);
+        if last_day != Some(d) { out.push(Line::from(Span::styled(format!("   {}", day_label(d, today)), pal.muted()))); last_day = Some(d); }
+        let tone = match e.kind.as_str() { "pushed" => pal.tone(Tone::Violet), "blocked" => pal.tone(Tone::Yellow), _ => pal.ink() };
+        let mut v = vec![Span::styled(format!("   {}  ", clock(e.time, app.off)), pal.muted()), Span::styled(fit(&cap(&e.kind), 10), tone)];
+        if whole && !e.repository.is_empty() { v.push(Span::styled(format!("{} · ", e.repository), pal.muted())); }
+        v.push(Span::styled(e.text.clone(), pal.ink()));
+        out.push(Line::from(v));
+    }
+}
+
+/// Each repository the host reaches: what is pending in it, what runs, what it cost today.
+fn host_repositories(app: &App, w: usize, out: &mut Vec<Line<'static>>) {
+    let (pal, h) = (&app.palette, &app.host);
+    let muted = |s: &str| Span::styled(s.to_string(), pal.muted());
+    out.push(Line::default());
+    out.push(section(pal, 1, "Repositories", (!h.repositories.is_empty()).then_some(h.repositories.len())));
+    if h.repositories.is_empty() {
+        let why = match &h.user { None => "No host file names the user layer: bon setup writes one".to_string(),
+            Some(u) => format!("No repository under {u} has a .bon/bon.toml: bon init makes one") };
+        for l in hanging(&why, 3, w, pal.muted()) { out.push(l); }
+    }
+    let nw = h.repositories.iter().map(|r| r.name.chars().count()).max().unwrap_or(0).min(w / 3).max(4);
+    let under = |r: &str| h.user.as_deref().is_some_and(|u| std::path::Path::new(r).parent() == Some(std::path::Path::new(u)));
+    for r in &h.repositories {
+        let mut v = vec![Span::styled(format!("   {}  ", fit(&r.name, nw)), pal.ink())];
+        if !r.configured { v.push(muted("no .bon/bon.toml at trunk's head")); }
+        else {
+            let mut parts: Vec<Span<'static>> = Vec::new();
+            if r.pending > 0 { parts.push(Span::styled(format!("{} pending", r.pending), pal.tone(Tone::Yellow))); }
+            if r.running > 0 { parts.push(Span::styled(format!("{} running", r.running), pal.tone(Tone::Orange))); }
+            parts.push(Span::styled(format!("{} today", money(Some(r.today))), pal.ink()));
+            if let Some(t) = r.latest { parts.push(muted(&format!("last ran {}", ago(h.now, t).to_lowercase()))); }
+            for (k, s) in parts.into_iter().enumerate() { if k > 0 { v.push(muted(" · ")); } v.push(s); }
+        }
+        out.push(Line::from(v));
+        // A repository outside the user layer (a benchmark's sandbox): where it is, under its name.
+        if !under(&r.root) { for l in hanging(&r.root, 5 + nw, w, pal.faint()) { out.push(l); } }
+    }
+}
+
 // ── detail ──────────────────────────────────────────────
 
 /// The focused item.
@@ -959,6 +1159,8 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
     let sec = |t: &mut Vec<Line<'static>>, s: &str| { t.push(Line::default()); t.push(section(&pal, 0, s, None)); };
     let kv = |k: &str, v: Vec<Span<'static>>| kv(&pal, 0, 14, k, v);
     match app.tab {
+        // The host's right pane: what happened, and each repository.
+        Tab::Host => { t.extend(host_record(app, width as usize, true).into_iter().map(|r| r.line)); }
         Tab::Traces => {
             let Some(g) = focused(app).and_then(|k| goal(&app.p, &k)) else { return (Text::default(), marks) };
             let tone = pal.tone(goal_tone(g));
@@ -1032,6 +1234,8 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
                     if !s.behaviors.is_empty() { facts.push(("Agent processes per behavior", s.behaviors.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(" · "))); }
                     if let Some(n) = s.trees.filter(|_| !s.candidates.is_empty()) { facts.push(("Distinct trees", n.to_string())); }
                     if let (Some(c), true) = (s.cost, s.verified > 0 && s.time.is_some()) { facts.push(("Cost per verified candidate", money(Some(c / s.verified as f64)))); }
+                    // Its requests over a model's tier threshold, where any crossed it, and what they cost beyond the base price (queue 82).
+                    if s.requests_over_tier > 0 { facts.push(("Over tier", format!("{} · {} beyond the base price", count(s.requests_over_tier as usize, "request", "requests"), money(Some(s.over_tier))))); }
                     if !facts.is_empty() { t.extend(pairs(&pal, 2, &facts, wd)); }
                     // Where its elapsed time went, by its slowest agent process; and summed over all of them.
                     if let Some(x) = split(s).filter(|x| x.n > 0) {
@@ -1514,6 +1718,11 @@ fn cursor_line(pal: &Palette, line: Line<'static>, w: usize) -> Line<'static> {
 struct Panes { list: Rect, rows_w: u16, detail: Option<Rect>, beside: bool }
 
 fn panes(app: &App, body: Rect) -> Panes {
+    // The host, 100 columns and wider: what waits and runs │ what happened, half each.
+    if app.tab == Tab::Host && body.width >= 100 {
+        let [l, _, d] = Layout::horizontal([Constraint::Length(body.width / 2), Constraint::Length(1), Constraint::Min(30)]).areas(body);
+        return Panes { list: l, rows_w: (body.width / 2).saturating_sub(1), detail: Some(d), beside: true };
+    }
     let beside = has_detail(app.tab) && body.width >= 100;
     if beside {
         // Beside the detail the list is compact (its steps are in the detail), so the detail has room.
@@ -1614,7 +1823,8 @@ fn draw(f: &mut Frame, app: &mut App) {
     // read, where trunk will be.
     let p = &app.p;
     let repo = &p.repo;
-    let name = repo.name.clone().unwrap_or_else(|| app.root.canonicalize().ok().and_then(|r| r.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_default());
+    let host = app.tab == Tab::Host;
+    let name = if host { "Host".to_string() } else { repo.name.clone().unwrap_or_else(|| app.root.canonicalize().ok().and_then(|r| r.file_name().map(|n| n.to_string_lossy().to_string())).unwrap_or_default()) };
     let mut left = vec![Span::styled(format!(" {name}"), pal.strong())];
     let head: Vec<Line> = if !loaded {
         left.push(Span::styled(" · Reading", pal.muted()));
@@ -1622,30 +1832,38 @@ fn draw(f: &mut Frame, app: &mut App) {
         if w < HEAD_ONE_ROW { rows.push(Line::default()); }
         rows
     } else {
-        // What runs now: the bon processes, and their running searches' agent processes by where each is.
-        let running = p.processes.iter().filter(|b| b.running).count();
-        let live: Vec<&SearchTrace> = p.processes.iter().filter(|b| b.running).flat_map(|b| &b.searches).filter(|s| s.running).collect();
-        let sum = |f: fn(&SearchTrace) -> u64| live.iter().map(|s| f(s)).sum::<u64>();
-        let now = view::now_counts(sum(|s| s.in_flight), sum(|s| s.in_checks), sum(|s| s.waiting));
-        // Trunk as bon works on it: the remote's ref.
-        let trunk = view::trunk(repo.remote.as_deref(), repo.trunk.as_deref(), repo.remote_head.as_deref());
-        if !trunk.is_empty() { left.push(Span::styled(format!(" · {trunk}"), pal.muted())); }
+        // What runs now: the bon processes (on the host, across its repositories), and their running searches' agent processes by where each is.
+        let (running, now) = if host {
+            let ps = || app.host.trees.iter().flat_map(|g| &g.processes);
+            (ps().count(), view::now_counts(ps().map(|r| r.in_flight).sum(), ps().map(|r| r.in_checks).sum(), ps().map(|r| r.waiting).sum()))
+        } else {
+            let live: Vec<&SearchTrace> = p.processes.iter().filter(|b| b.running).flat_map(|b| &b.searches).filter(|s| s.running).collect();
+            let sum = |f: fn(&SearchTrace) -> u64| live.iter().map(|s| f(s)).sum::<u64>();
+            (p.processes.iter().filter(|b| b.running).count(), view::now_counts(sum(|s| s.in_flight), sum(|s| s.in_checks), sum(|s| s.waiting)))
+        };
+        // Where: on the host, how many repositories it reaches; in one, trunk as bon works on it, the remote's ref.
+        let at = if host { count(app.host.repositories.len(), "repository", "repositories") } else { view::trunk(repo.remote.as_deref(), repo.trunk.as_deref(), repo.remote_head.as_deref()) };
+        if !at.is_empty() { left.push(Span::styled(format!(" · {at}"), pal.muted())); }
         left.push(Span::raw("   "));
         if running > 0 {
             left.push(Span::styled(format!("● Running {running}"), pal.tone(Tone::Orange)));
             if !now.is_empty() { left.push(Span::styled(format!(" · agent processes {now}"), pal.ink())); }
         } else { left.push(Span::styled("Idle", pal.muted())); }
-        // What waits on engineer: the pending interrupts, which Project lists first.
-        let pending = p.interrupts.iter().filter(|i| i.resolved.is_none()).count();
+        // What waits on engineer: the pending interrupts, which Project (or the host) lists first.
+        let pending = if host { &app.host.interrupts } else { &p.interrupts }.iter().filter(|i| i.resolved.is_none()).count();
         if pending > 0 { left.push(Span::styled(format!("   ● Pending {pending}"), pal.tone(Tone::Yellow))); }
         let t = &p.totals;
         let cost = |gw: &str, rate: bool| {
+            // The host's: engineer's time charged today, across its repositories.
+            if host { return vec![Span::styled(money(Some(app.host.waiting.today)), pal.ink()), Span::styled(if rate { " of your time today " } else { " today " }, pal.muted())]; }
             let mut v = vec![Span::styled(money(Some(t.generation)), pal.ink()), Span::styled(format!(" {gw} + "), pal.muted()),
                 Span::styled(money(Some(t.time_cost)), pal.ink()), Span::styled(" time", pal.muted())];
             if rate && !at_rate(t.rate).is_empty() { v.push(Span::styled(format!(" {}", at_rate(t.rate)), pal.muted())); }
             v.push(Span::styled(format!(" = {} ", money(Some(t.cost))), pal.muted()));
             v
         };
+        // Too narrow for what runs in words: its counts go first, so Pending still shows.
+        if width_of(&left) >= w { left.retain(|s| !s.content.starts_with(" · agent processes")); }
         let fits = |l: usize, r: &Vec<Span>| l + width_of(r) + 2 <= w;
         if w >= HEAD_ONE_ROW {
             // The shortest cost that fits beside what runs; what runs is cut, with …, before cost is.
@@ -1658,7 +1876,7 @@ fn draw(f: &mut Frame, app: &mut App) {
             vec![clip(Line::from(left), w), clip(Line::from(row), w)]
         }
     };
-    let [top, tabs, rule, body, foot] = Layout::vertical([Constraint::Length(head.len() as u16), Constraint::Length(1), Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)]).areas(area);
+    let [top, tabs, rule, body, foot] = Layout::vertical([Constraint::Length(head.len() as u16), Constraint::Length(if host { 0 } else { 1 }), Constraint::Length(1), Constraint::Min(1), Constraint::Length(1)]).areas(area);
     f.render_widget(Paragraph::new(head), top);
 
     // Tabs, with counts where a count says something, once read.
@@ -1669,9 +1887,10 @@ fn draw(f: &mut Frame, app: &mut App) {
         Tab::Traces if loaded => format!("Traces {}", p.groups.len()),
         Tab::Queue => "Queue".into(),
         Tab::Traces => "Traces".into(),
+        Tab::Host => "Host".into(),
     };
     let mut spans = vec![Span::raw(" ")];
-    for tab in TABS {
+    for tab in if host { &[Tab::Host][..] } else { &TABS[..] }.iter().copied() {
         let on = tab == app.tab;
         spans.push(Span::styled(format!(" {} ", label(tab)), if on { pal.strong().add_modifier(Modifier::UNDERLINED) } else { pal.muted() }));
         spans.push(Span::raw("  "));
@@ -1681,6 +1900,7 @@ fn draw(f: &mut Frame, app: &mut App) {
 
     // Body: the list, and the focused item's detail beside it or over it.
     let panes = panes(app, body);
+    app.split = app.tab == Tab::Host && panes.beside;
     if panes.beside {
         let x = panes.list.right();
         for y in body.top()..body.bottom() { f.buffer_mut()[(x, y)].set_symbol("│").set_style(pal.rule()); }
@@ -1834,7 +2054,8 @@ fn draw(f: &mut Frame, app: &mut App) {
                     if !logs_of(app, g).is_empty() { v.push(("l", "Logs".into(), 7)); }
                     if two_behaviors(g).is_some() { v.push(("d", "Compare".into(), 7)); }
                 } }
-                v.push(("⇥", "Tab".into(), 3));
+                // The host is one tab.
+                if app.tab != Tab::Host { v.push(("⇥", "Tab".into(), 3)); }
                 // Find and Range only where there are bon processes to filter, or a filter to undo.
                 let narrowed = filter.find.is_some() || filter.since.is_some() || filter.until.is_some();
                 if filtered(app.tab) && (!app.p.groups.is_empty() || narrowed) {
@@ -1898,9 +2119,10 @@ pub fn frame(root: &str, w: u16, h: u16, tab: usize, focus: usize, light: bool) 
     use ratatui::backend::TestBackend;
     let mut app = App::new();
     app.root = root.into();
-    app.p = projection::read(std::path::Path::new(root), &view::Filter::default())?;
+    (app.p, app.host) = read(std::path::Path::new(root), &view::Filter::default())?;
     app.loaded = Some(Instant::now());
-    app.tab = TABS[tab.min(3)];
+    // Outside every repository, the host is the one tab.
+    app.tab = if root.is_empty() { Tab::Host } else { TABS[tab.min(3)] };
     if light { app.dark = false; app.palette = LIGHT; }
     let mut t = ratatui::Terminal::new(TestBackend::new(w, h)).map_err(|e| e.to_string())?;
     // A first draw sets the list's width; then focus the focus-th focusable row at that width.
@@ -2136,10 +2358,21 @@ pub fn wanted() -> bool { std::io::stdout().is_terminal() && std::io::stdin().is
 
 /// Run the terminal view until q. The projection is read every 2 s on a thread
 /// of its own, so input never waits on the traces.
+/// What the view draws, read once: a repository's projection and its part of
+/// the host; outside every repository (`root` empty), the host alone.
+fn read(root: &std::path::Path, filter: &view::Filter) -> Result<(Projection, projection::Host), String> {
+    let host = |v: serde_json::Value| serde_json::from_value::<projection::Host>(v).map_err(|e| format!("the host's projection does not match its types: {e}"));
+    if root.as_os_str().is_empty() { return Ok((Projection::default(), host(crate::host::state(None))?)); }
+    let v = view::state(root, filter);
+    let h = host(crate::host::slice(root, &v))?;
+    Ok((serde_json::from_value(v).map_err(|e| format!("the projection does not match its types: {e}"))?, h))
+}
+
 pub fn run(root: &str, filter: view::Filter) -> Result<(), String> {
-    let (tx, rx) = mpsc::channel::<Result<Projection, String>>();
+    let (tx, rx) = mpsc::channel::<Result<(Projection, projection::Host), String>>();
     let mut app = App::new();
     app.root = root.into();
+    if root.is_empty() { app.tab = Tab::Host; }
     app.filter = std::sync::Arc::new(std::sync::Mutex::new(filter));
     let (root_t, shared) = (app.root.clone(), app.filter.clone());
     // Read the projection every 2 s, or as soon as find or the range changes.
@@ -2150,7 +2383,7 @@ pub fn run(root: &str, filter: view::Filter) -> Result<(), String> {
             let f = shared.lock().map(|f| f.clone()).unwrap_or_default();
             let now_key = (f.since, f.until, f.find.clone());
             if last.as_ref() != Some(&now_key) || at.elapsed() >= Duration::from_secs(2) {
-                if tx.send(projection::read(&root_t, &f)).is_err() { break; }
+                if tx.send(read(&root_t, &f)).is_err() { break; }
                 last = Some(now_key); at = Instant::now();
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -2164,8 +2397,8 @@ pub fn run(root: &str, filter: view::Filter) -> Result<(), String> {
                 // A read made for a find or range since changed is not shown: the read for the new one follows.
                 let asked = app.filter.lock().map(|f| (f.since, f.until, f.find.clone())).unwrap_or_default();
                 match p {
-                    Ok(p) if (p.filter.since.map(|t| t as u64), p.filter.until.map(|t| t as u64), p.filter.find.clone()) != asked => {}
-                    Ok(p) => { app.p = p; app.error = None; app.loaded = Some(Instant::now()); }
+                    Ok((p, _)) if (p.filter.since.map(|t| t as u64), p.filter.until.map(|t| t as u64), p.filter.find.clone()) != asked => {}
+                    Ok((p, h)) => { app.p = p; app.host = h; app.error = None; app.loaded = Some(Instant::now()); }
                     Err(e) => app.error = Some(e),
                 }
             }
@@ -2198,6 +2431,77 @@ mod tests {
         t.draw(|f| draw(f, &mut app)).unwrap();
         let b = t.backend().buffer().clone();
         (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol().to_string()).collect::<String>().trim_end().to_string()).collect::<Vec<_>>().join("\n")
+    }
+
+    /// A host with something pending, two bon processes from one tree and one between searches, a journal and repositories.
+    fn host() -> projection::Host {
+        let now = 1_800_000_000;
+        let running = |pid: u64, repo: &str| serde_json::json!({ "pid": pid, "repository": repo, "root": format!("/u/{repo}"), "kind": "code", "goal": "a".repeat(40),
+            "search": 0, "start": now - 300, "memory": 1.4, "sentence": "code: 3 of 8 returned", "width": 8, "returned": 3, "verified": 1, "in_flight": 5, "in_checks": 0, "waiting": 0 });
+        serde_json::from_value(serde_json::json!({
+            "user": "/u", "now": now,
+            "repositories": [{ "name": "alpha", "root": "/u/alpha", "configured": true, "pending": 1, "running": 2, "latest": now - 300, "today": 3.2 },
+                             { "name": "sandbox", "root": format!("/far/away/{}/sandbox", "deep".repeat(20)), "configured": true, "running": 1, "today": 0.0 },
+                             { "name": "plain", "root": "/u/plain", "configured": false }],
+            "interrupts": [{ "kind": "transcript", "id": "transcript x", "root": "/u", "about": "call-17.vtt", "raised": now - 240,
+                "what": ["meeting title \"Gamma intro\": no route matches its title"],
+                "choices": [{ "choice": "route", "how": format!("add \"Gamma intro\" = \"<repository>\" to [routes] in /etc/bon/{}host.toml, then bon pending", "x".repeat(90)), "cost": "a queue search" }] }],
+            "waiting": { "searches": 2, "host": 3, "per_hour": 103.33, "today": 12.4 },
+            "pools": { "agent_processes": { "size": 64, "held": 12, "shown": 10 }, "check_processes": { "size": 14, "held": 3, "shown": 1 }, "check_threads": 2 },
+            "memory": { "total": 64.0, "free": 41.2, "bon": 6.1 },
+            "trees": [{ "tree": "b".repeat(40), "processes": [running(11, "alpha"), running(12, "alpha")] }, { "tree": null, "processes": [{ "pid": 13, "repository": "sandbox", "start": now - 30, "sentence": "starting", "background": true }] }],
+            "journal": [{ "time": now - 90000, "repository": "alpha", "kind": "pushed", "text": "code from abc1234: pushed 5ebac2f · $1.20" },
+                        { "time": now - 240, "repository": "", "kind": "raised", "text": format!("transcript call-17.vtt: waits on you {}", "y".repeat(200)) }],
+        })).unwrap()
+    }
+
+    #[test]
+    fn the_host_draws_at_every_width_with_nothing_past_its_pane() {
+        for (w, h) in [(60, 24), (80, 40), (100, 30), (120, 12), (200, 50), (60, 8)] {
+            let mut app = App::new();
+            app.host = host(); app.tab = Tab::Host; app.loaded = Some(Instant::now());
+            let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+            t.draw(|f| draw(f, &mut app)).unwrap();
+            // Every row of both panes fits its pane.
+            let left = rows(&app, app.list_w);
+            assert!(left.iter().all(|r| width_of(&r.line.spans) <= app.list_w as usize), "{w}: a left row is wider than {}", app.list_w);
+            let pane = if app.split { (w - app.list_w - 3) as usize } else { w as usize };
+            assert!(detail(&app, pane as u16).lines.iter().all(|l| width_of(&l.spans) <= pane), "{w}: a right line is wider than {pane}");
+            let b = t.backend().buffer().clone();
+            let s = (0..h).map(|y| (0..w).map(|x| b[(x, y)].symbol().to_string()).collect::<String>()).collect::<Vec<_>>().join("\n");
+            // What waits on engineer leads; the host has no tab row and no find or range.
+            let first = s.lines().skip_while(|l| !l.starts_with('─')).nth(1).unwrap_or("");
+            assert!(s.contains("Host · 3 repositories") && s.contains("● Pending 1") && first.contains("Pending  1"), "{w}x{h}:\n{s}");
+            // The header's line fits, cut with … where it must be.
+            assert!(s.lines().next().is_some_and(|l| l.contains("Running 3")), "{w}x{h}:\n{s}");
+            assert!(!s.contains("Find") && !s.contains("Range") && !s.contains("Traces"), "{w}x{h}:\n{s}");
+            if h >= 40 {
+                assert!(s.contains("Tree bbbbbbb · 2 bon processes from one tree") && s.contains("12 of 64 held") && s.contains("background"), "{w}x{h}:\n{s}");
+                assert!(s.contains("Pushed") && s.contains("Yesterday") && s.contains("no .bon/bon.toml at trunk's head"), "{w}x{h}:\n{s}");
+            }
+            assert_eq!(app.split, w >= 100);
+        }
+    }
+
+    #[test]
+    fn the_host_says_what_is_empty_and_nothing_before_its_first_read() {
+        let mut app = App::new();
+        app.tab = Tab::Host;
+        let mut t = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let b = t.backend().buffer().clone();
+        let s: String = (0..30).map(|y| (0..80).map(|x| b[(x, y)].symbol().to_string()).collect::<String>() + "\n").collect();
+        // Before the first read: no counts, no zeros.
+        assert!(s.contains("Host · Reading") && !s.contains("$0.00") && !s.contains("Idle"), "{s}");
+        app.loaded = Some(Instant::now());
+        t.draw(|f| draw(f, &mut app)).unwrap();
+        let b = t.backend().buffer().clone();
+        let s: String = (0..30).map(|y| (0..80).map(|x| b[(x, y)].symbol().to_string()).collect::<String>() + "\n").collect();
+        for empty in ["Nothing waits on you", "No bon process is running", "No push, block or interrupt yet", "No host file names the user layer"] {
+            assert!(s.contains(empty), "{empty}:\n{s}");
+        }
+        // A pool the host file does not size says so; nothing pretends to a size.
+        assert!(s.contains("unsized: no host file"), "{s}");
     }
 
     #[test]
@@ -2563,7 +2867,7 @@ mod tests {
         assert!(tone_colors(Tone::Yellow).contains(&bar(line("Blocked"))));
         assert!(tone_colors(Tone::Red).contains(&bar(line("Exited"))));
         assert!(tone_colors(Tone::Indigo).contains(&bar(line("None found"))));
-        assert!(!(0..60).any(|y| (0..120).map(|x| b[(x, y)].symbol().to_string()).collect::<String>().contains("No push")));
+        assert!(!(0..60).any(|y| (0..120).map(|x| b[(x, y)].symbol().to_string()).collect::<String>().contains("No push ")));
     }
 
     #[test]

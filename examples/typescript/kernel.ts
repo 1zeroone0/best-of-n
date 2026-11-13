@@ -20,7 +20,7 @@ export type Kind = { queue: { goal: Transcript } } | { code: { goal: Commit } } 
 /** One generated change, as trusted code observed it. */
 export interface Candidate { commit: Commit; base: Commit; accepted: boolean; proved: boolean; changed: Array<Path>; out: Array<Hash>; intents: Array<[Cue, Intent]>; accepts: Array<[number, boolean]>; accepts_foils: Array<[number, boolean]>; rejects_counterexamples: boolean; measured: boolean; added: Array<Path>; rank: number; diff: number }
 /** One search, once every agent process has returned: `results[i]` is what agent process i returned. */
-export interface Search { kind: Kind; base: Commit; n: number; checks: Array<Path>; tests: Array<Path>; trusted: Array<Path>; limit: number; results: Array<Candidate | null> }
+export interface Search { kind: Kind; base: Commit; n: number; checks: Array<Path>; tests: Array<Path>; trusted: Array<Path>; limit: number; results: Array<Candidate | null>; context: Array<Commit> }
 /** One confined user's permissions on each object the policy names, path by path, as trusted code observed them: None where a path does not exist. `build_directories[slot]` is check slot `slot`'s build directory. */
 export interface Observation { checks: Array<Permission | null>; transcripts: Array<Permission | null>; working_directory: Array<Permission | null>; repository: Array<Permission | null>; working_directories: Array<Permission | null>; toolchain: Array<Permission | null>; builds: Array<Permission | null>; state: Array<Permission | null>; build_directories: Array<Array<Permission | null>> }
 /** Everything bon shows, over the time range in `filter`. */
@@ -31,7 +31,7 @@ export interface LastPush { commit: string | null; time: number | null }
 /** Commits on trunk since bon last pushed, and who made them. */
 export interface SincePush { commits: number; authors: Array<string> }
 /** What everything in range cost, and what came of it. */
-export interface Totals { cost: number; generation: number; time_cost: number; pushed: number; not_pushed: number; in_flight: number; rate: number | null; per_verified_candidate: number | null; per_push: number | null; pushes: number; verified: number; candidates: number; attempts: Array<Attempts>; ended: Array<Ended>; reasons: Array<Reason>; exits: Array<Reason>; success: Array<Success>; per_verified: Array<PerVerified>; utilization: Utilization; run_time: Array<RunTime>; turnaround: Array<Turnaround> }
+export interface Totals { cost: number; generation: number; time_cost: number; pushed: number; not_pushed: number; in_flight: number; rate: number | null; per_verified_candidate: number | null; per_push: number | null; pushes: number; verified: number; candidates: number; attempts: Array<Attempts>; ended: Array<Ended>; reasons: Array<Reason>; exits: Array<Reason>; success: Array<Success>; per_verified: Array<PerVerified>; over_tier: Array<OverTier>; utilization: Utilization; run_time: Array<RunTime>; turnaround: Array<Turnaround> }
 /** One kind of interrupt's turnaround: of its interrupts, how many resolved and how many are pending, and the seconds from raised to resolved of those that resolved, as median and 90th percentile. */
 export interface Turnaround { kind: string; resolved: number; pending: number; time: Spread }
 /** Every record a bon process writes, in one shape: what ran (program), what it was given (context), what it returned (output), how it was judged (verdict) and which behavior its output showed (behavior). An agent process: its program, its prompt, its candidate's commit, what its checks said (proved, accepted, rejected), its agree outputs' hashes. A check: its command, the tree it ran on, its output, its exit, its output's hash. A decision: engineer, what the interrupt showed, the commit that answered it, what came of it, the choice it showed. */
@@ -48,10 +48,12 @@ export interface Transcript { path: string; sha256: string }
 export interface Success { kind: string; attempt: number | null; agent_processes: number; successes: number; ended: number; pushed: number }
 /** The agent processes of one kind, program and model that returned, how many were verified, their generation, and their share of their searches' time cost: cost per verified candidate is (generation + time_cost) ÷ verified. */
 export interface PerVerified { kind: string; program: string; model: string; agent_processes: number; verified: number; generation: number; time_cost: number }
+/** The agent processes of one kind, role and model whose output said each request's prompt (`measured` of `agent_processes`), their requests over the model's tier threshold, and what those cost beyond the base price. */
+export interface OverTier { kind: string; role: string; model: string; agent_processes: number; measured: number; requests: number; beyond: number }
 /** The host's agent_processes and check_processes semaphores over the reported searches in range: `wall` is the union of their wall times, in seconds. */
 export interface Utilization { wall: number; searches: number; agent_processes: Pool; check_processes: Pool }
-/** One semaphore: the slot-seconds held, and its size where every search recorded the same one. Utilization is held ÷ (size × wall). */
-export interface Pool { held: number; size: number | null }
+/** One semaphore: the slot-seconds held, its size where every search that records one (`sized` of them) recorded the same, and its utilization over those: their held slot-seconds ÷ (size × the union of their wall times). */
+export interface Pool { held: number; size: number | null; utilization: number | null; sized: number }
 /** One kind's run-time distribution: its pushes' time (seconds) and cost to a push, each as median and 90th percentile; and over `searches` of its reported searches, a search's seconds and cost as a fixed part plus a part per distinct tree, by least squares (inferred), none with too few. */
 export interface RunTime { kind: string; pushes: number; time: Spread; cost: Spread; searches: number; fit: Fit | null }
 /** A median (the middle value, or the mean of the middle two) and a 90th percentile (the ⌈0.9 n⌉-th smallest); none of no values. */
@@ -75,7 +77,7 @@ export interface GoalTrace { kind: string; title: string; about: About; outcome:
 /** One run of a bon command, by its pid. */
 export interface BonProcess { pid: number; trace: string; running: boolean; kind: string; goal: string; title: string; about: About; outcome: string; sentence: string; cost: number; generation: number; time_cost: number; seconds: number; push: Push | null; limit: number | null; time: number; transitions: Array<string>; searches: Array<SearchTrace>; check_seconds: number | null }
 /** One search of a bon process, as its trace recorded it. */
-export interface SearchTrace { search: number; kind: string; goal: string; params: Params; width: number; started: number | null; returned: number; accepted: number; verified: number; selected: number | null; recorded_selected: number | null; recorded_verified: number | null; kernel: string; blocked: string | null; generation: number | null; time_cost: number | null; cost: number | null; rate: number | null; seconds: number | null; time: number | null; running: boolean; background: boolean; waiting: number; in_flight: number; in_checks: number; pools: Pools; trees: number | null; behaviors: Array<number>; candidates: Array<Facts>; end: string | null; reason: string | null; reason_from: string | null }
+export interface SearchTrace { search: number; kind: string; goal: string; params: Params; width: number; started: number | null; returned: number; accepted: number; verified: number; selected: number | null; recorded_selected: number | null; recorded_verified: number | null; kernel: string; blocked: string | null; generation: number | null; time_cost: number | null; cost: number | null; rate: number | null; seconds: number | null; time: number | null; running: boolean; background: boolean; waiting: number; in_flight: number; in_checks: number; pools: Pools; trees: number | null; behaviors: Array<number>; requests_over_tier: number; over_tier: number; candidates: Array<Facts>; end: string | null; reason: string | null; reason_from: string | null }
 /** The sizes of the host's two semaphores. */
 export interface Pools { agent_processes: number | null; check_processes: number | null }
 /** What a search was granted with. */
@@ -83,7 +85,7 @@ export interface Params { goal: GoalRef; base: string; n: number | null; limit: 
 /** A search's goal: a trunk commit, a candidate of a search, or a transcript. */
 export interface GoalRef { trunk: string | null; candidate: string | null; transcript: string | null }
 /** One agent process, from its facts.json. */
-export interface Facts { index: number; program: string | null; model: string | null; generation: number | null; commit: string | null; accepted: boolean; proved: boolean; verified: boolean; rank: number | null; diff: number | null; lines_added: number | null; lines_removed: number | null; tree: string | null; flags: Array<string>; logs: Array<string>; program_seconds: number | null; check_seconds: number | null; changed: Array<string>; out: Array<number>; accepts: Array<[number, boolean]>; accepts_foils: Array<[number, boolean]>; record: Record }
+export interface Facts { index: number; program: string | null; role: string | null; model: string | null; generation: number | null; requests_over_tier: number | null; over_tier: number | null; commit: string | null; accepted: boolean; proved: boolean; verified: boolean; rank: number | null; diff: number | null; lines_added: number | null; lines_removed: number | null; tree: string | null; flags: Array<string>; logs: Array<string>; program_seconds: number | null; check_seconds: number | null; changed: Array<string>; out: Array<number>; accepts: Array<[number, boolean]>; accepts_foils: Array<[number, boolean]>; record: Record }
 /** A queue proposal: a patch adding intents, each with the cue it came from. */
 export interface Proposal { name: string; path: string; source: string; intents: Array<ProposedIntent>; contested: Array<string> }
 export interface ProposedIntent { id: number | null; intent: string; cue: string | null }
@@ -119,3 +121,21 @@ export interface Component { type: string; name: string; version: string; group:
 export interface ComponentHash { alg: string; content: string }
 /** A network service a program calls. */
 export interface Service { name: string; endpoints: Array<string>; group: string | null }
+/** The host as bon shows it (queue 60): every repository the user layer holds, or the one it was read in, and across them what waits on engineer, the host's two pools, its memory, each running bon process and a journal, from the process list, the slot files, the traces and the OS. */
+export interface Host { user: string | null; here: string | null; repositories: Array<Repository>; interrupts: Array<Interrupt>; waiting: Waiting; pools: HostPools; memory: Memory; trees: Array<TreeGroup>; journal: Array<Event>; turnaround: Array<Turnaround>; now: number }
+/** A repository bon reaches: one under the user layer's root with a .bon/bon.toml, one a live bon process searches, or one a route names. */
+export interface Repository { name: string; root: string; configured: boolean; pending: number; running: number; latest: number | null; today: number }
+/** The searches engineer waits on now (running, not background) of the repositories shown, among `host` of them on the host; what his time costs an hour while they run (each search's repository's rate, split among the host's waited-on searches); and his time charged today. */
+export interface Waiting { searches: number; host: number; per_hour: number; today: number }
+/** The host file's two semaphores, their slots held now, and how many of the shown repositories' agent processes are in flight and in checks. */
+export interface HostPools { agent_processes: Slots; check_processes: Slots; check_threads: number | null }
+/** One semaphore: its size, the slots held host-wide, and how many of the shown repositories' agent processes need it now. */
+export interface Slots { size: number | null; held: number; shown: number }
+/** The machine's memory, what is free for checks, and what the running bon processes' trees hold resident, in GB. */
+export interface Memory { total: number; free: number; bon: number }
+/** The running bon processes that start from one tree. */
+export interface TreeGroup { tree: string | null; processes: Array<Running> }
+/** A bon process the process list says is running, and what its trace says. */
+export interface Running { pid: number; repository: string; root: string; trace: string | null; background: boolean; kind: string | null; goal: string | null; search: number | null; attempt: number | null; started: number | null; start: number; memory: number; sentence: string; width: number | null; returned: number; verified: number; in_flight: number; in_checks: number; waiting: number; cost: number }
+/** One thing that happened: when, in which repository (none: the user layer's), what (pushed, blocked, landed, raised, resolved), and a line. */
+export interface Event { time: number; repository: string; kind: string; text: string }

@@ -28,6 +28,24 @@ counts the judge's check logs that ran a command; `checks_cached`, those its
 verdict cache answered. Each result is a JSON file in `$BENCH/results-TAG/`,
 beside the command's stdout, stderr and traces.
 
+## Two programs at one dollar limit
+
+```sh
+sh bench/compare.sh 8                       # the stub against itself
+LIMIT=1.00 sh bench/compare.sh 16 '' 'program = ["/path/bon-sample"], client = "claude", model = "claude-haiku-5-5", context = 80000'
+```
+
+`compare.sh WIDTH [A] [B]` runs `run.sh` twice, in two sandboxes built
+alike (the same trunk tree: the same goal), the code role running program A
+in one and B in the other (role keys, as `PROGRAM`; empty or left out: the
+stub), each bon process under the same `LIMIT` (default $1.00; each agent
+process's limit is `LIMIT` over the widest search, `AGENT_LIMIT` in
+`run.sh`, so every search can reserve its width). It prints, for each, whether
+it pushed, its code searches' agent processes and verified candidates, its
+generation, its wall time and its cost per verified candidate. Stubs cost
+nothing, so with stubs the limit never binds: they measure bon, not the
+programs.
+
 ## The stub
 
 `bench/stub.sh` is the program both roles run (`program = ["/bin/sh",
@@ -50,6 +68,11 @@ processes at its first one's first output).
 The sandbox's `pick(a, b)` may return either (its spec says so); trunk's
 returns `a`, and with `BEHAVIORS=2` half the code stubs make it `b`: two
 behaviors, both verified, for the disagreement path.
+
+With `FEEDBACK=1` (and `ATTEMPTS=2`), a first attempt's code stubs make `max`
+return the smaller, which a test rejects; the second attempt's prompt
+carries those candidates' failing test (the search's context), and a stub
+that sees it writes the fix: the case of feeding a failed check's output back.
 
 A code or foil stub then runs `cargo test` and `cargo verus verify` itself `K`
 times, as an agent iterating does.
@@ -89,6 +112,7 @@ small, so a warm check is seconds.
 | `CX_MODE` | `blind` | kernel: counterexample stubs' tests: `blind` (max only), `split` (pick 1 2 = 2; variant 0 that alone), `few` (only index 0's builds) |
 | `ATTEMPTS` | 1 | attempts `bon code` may make, each WIDTH wide |
 | `TIME` | 1800 | each agent process's time limit |
+| `LIMIT`, `AGENT_LIMIT` | 1000.0, 1.0 | the bon process's and each agent process's dollar limit |
 | `CHECK_TIME` | 1800 | each check's cutoff (`[checks] time`) |
 | `PROGRAM`, `CX_PROGRAM` | the stub | what the code (and compaction, queue) role and the counterexample (and foil) role run: a host role's keys |
 | `PROJECT` | `kernel` | `kernel` (bench/sandbox) or `bon` (bon's own source) |

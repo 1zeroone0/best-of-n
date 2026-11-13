@@ -38,7 +38,7 @@ bon
 
 | | |
 |---|---|
-| `bon [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--find TEXT]` | the view: Project, Spec, Queue, Traces, over that range (piped, plain text) |
+| `bon [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--find TEXT]` | the view: Project, Spec, Queue, Traces, over that range (piped, plain text); outside every repository, the host: what waits on you across repositories, the pools, memory, each bon process, a journal |
 | `bon code` | search for code that trunk's checks accept; push it |
 | `bon counterexample` | look for a behavior on trunk the spec forbids, with tests written blind |
 | `bon compaction` | remove what is stale, behavior unchanged |
@@ -48,7 +48,7 @@ bon
 | `bon types [--check]` | write the types programs are built on, in TypeScript, Go and Python, or fail if one is stale |
 | `bon account [--check]` | write what is proven, trusted, configured and tested, as OSCAL with its SBOM, or fail if it is stale |
 | `bon check` | every check on the working tree, as candidates are judged; whose fix a failure is; each file that breaks a rule on what a search may write |
-| `bon pending [--transcript FILE]` | what only you can answer, oldest first: what happened, the choices and what each costs |
+| `bon pending [--transcript FILE]` | what only you can answer, oldest first: what happened, the choices and what each costs; outside every repository, the host's; first, each transcript dropped in the user layer's folder goes where the host file routes it |
 | `bon new <name>` | set up a project: a spec with the core nouns, its gates, an empty implementation, the manifest and the queue |
 | `bon init` | create a manifest and queue in this git repository |
 | `bon setup [--dry-run] [--for USER]` | create users agent and check0, check1, … (one per check slot) and group bon, and let USER (default: you) run commands as each; run it as an administrator |
@@ -75,7 +75,7 @@ it was given (**context**), what it returned (**output**), how it was judged
 
 | record | program | context | output | verdict | behavior |
 |---|---|---|---|---|---|
-| an agent process, `<pid>/<search>/<index>/facts.json` | its program | `prompt` | its candidate's commit | `proved`, `accepted` or `rejected` | its agree outputs' hashes |
+| an agent process, `<pid>/<search>/<index>/facts.json` | its program | `prompt`, then `+` each commit whose verdicts the prompt carries (the search's context, also its `context` line after `grant`) | its candidate's commit | `proved`, `accepted` or `rejected` | its agree outputs' hashes |
 | a check, its log | `program:` its command | `context:` the tree, and any test written into it | the log's stdout and stderr | `exit:` | `behavior:` its stdout's hash |
 | a decision, `decisions.jsonl` | `engineer` | what the interrupt showed | the commit that answered it | what came of it (derived) | the choice it showed |
 
@@ -88,6 +88,19 @@ commit, or the attempt run again); there is no dismiss. `bon pending` lists
 them and exits 2 while any is pending; when it first sees one resolved it
 writes its decision record, with a pointer to and the SHA-256 of the
 transcript its `--transcript` names, never the transcript itself.
+
+**Transcripts** you drop in the user layer's folder, `<user>/transcripts`
+(`user` in the host file), go where the host file's `[routes]` send their
+meeting title (a WebVTT file's header text, else its file name): each route is
+a title pattern and a repository (its path under the user layer's root), and a
+title matches a pattern it contains, ignoring case. When `bon pending` runs, a
+transcript whose matching routes name one repository moves into that
+repository's transcripts directory (the manifest's `transcripts`), not
+committed: commit it to trunk, then `bon queue`. One that no route names, or
+whose routes name two repositories, stays in the folder as an interrupt until
+a route names it or you move it. Each route is a line of the user layer's
+`.bon/traces/routes.jsonl`, in the one shape (program `route`, the transcript
+as context, the repository as output, why it went nowhere as verdict).
 
 ## What is proven, and what is trusted
 
@@ -133,6 +146,10 @@ once per user layer).
   so a check could leave a file there that a later check reads: a check that
   reads outside its tree and the toolchain is not a function of what its key
   says. Closing those is a sandbox's job (a reference monitor), not bon's.
+  A candidate shapes its own checks' output, and a later attempt's agent
+  processes read it in their prompt (a search's context): it reaches the
+  generators, never how anything is judged or selected, and never a
+  counterexample's or a foil's writer (the spec's `blind`).
 - **Next to Rust's types:** types keep a commit from passing as a path; Verus proves
   what a type cannot say, such as "this is the one candidate the spec selects".
 - **Next to Lean:** Lean checks a proof term in a small kernel, about a model of the
@@ -148,7 +165,7 @@ once per user layer).
 | [`src/gates.rs`](src/gates.rs) | each decision's contract |
 | [`src/exec.rs`](src/exec.rs) | the decisions, proven |
 | [`src/trusted.rs`](src/trusted.rs) | what Verus does not check; no search may change it |
-| [`src/tui.rs`](src/tui.rs), [`src/projection.rs`](src/projection.rs), [`src/interrupt.rs`](src/interrupt.rs) | the view, what it shows as types, and what waits on you |
+| [`src/tui.rs`](src/tui.rs), [`src/projection.rs`](src/projection.rs), [`src/interrupt.rs`](src/interrupt.rs), [`src/host.rs`](src/host.rs), [`src/route.rs`](src/route.rs) | the view, what it shows as types, what waits on you, the host, and where transcripts go |
 | [`template/`](template/) | the project `bon new` sets up |
 | [`examples/`](examples/) | programs on the emitted types: TypeScript, Go, Python with PyTorch |
 | [`.bon/`](.bon/) | the manifest, the queue, the account and its SBOM |

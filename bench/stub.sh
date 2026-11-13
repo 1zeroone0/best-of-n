@@ -20,6 +20,10 @@
 #                    split  pick 1 2 = 2 (variant 0 alone; the rest max too):
 #                           they tell the behaviors apart
 #                    few    blind, but only index 0's builds
+#   FEEDBACK       kernel: 1, a code stub whose prompt carries no earlier
+#                  attempt's verdicts writes min for max, which a test
+#                  rejects; one whose prompt carries them (a second attempt)
+#                  writes the fix [0]
 set -u
 . ./.bon/stub.env
 prompt=$(cat)
@@ -72,6 +76,10 @@ case "$kind" in
       1) fix='    if a >= b { a } else { b }' ;;
       2) fix='    if b > a { b } else { a }' ;;
       *) fix='    if a < b { b } else { a }' ;;
+    esac
+    case "$prompt" in
+      *"of the previous attempt"*) ;;
+      *) if [ "${FEEDBACK:-0}" = 1 ]; then fix='    if a > b { b } else { a }'; fi ;;
     esac
     sed -i '' "s/^    if a > b { a } else { a }\$/$fix/" src/lib.rs
     if [ $((index % ${BEHAVIORS:-1})) -eq 1 ]; then sed -i '' 's/^    a$/    b/' src/lib.rs; fi

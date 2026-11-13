@@ -13,18 +13,17 @@
 //!   a later bon process of its kind on the same goal (run again), or a commit
 //!   on trunk's history that changes the manifest, the queue or a check path
 //!   (widen, raise the limit, change the spec, drop the intent).
-//! - `transcript`: a transcript the host file routes nowhere. Its source is the
-//!   routing of queue 80, which is to write, for each transcript it routes, a
-//!   line of `routes.jsonl` in its bon process's trace, in the one shape:
-//!   `{"program": "route", "context": <transcript path>, "sha256": <its
-//!   hash>, "title": <meeting title>, "output": <repository root, or null>,
-//!   "verdict": null, "behavior": null, "time": <unix seconds>}`. A line whose
-//!   output is null is the interrupt; a later line with the same hash and an
-//!   output resolves it.
+//! - `transcript`: a transcript dropped in the user layer's folder that the
+//!   host file routes nowhere (`route`). Its source is the user layer's
+//!   `routes.jsonl`, one line per route in the one shape (`route.rs`): a line
+//!   whose output is null (and whose verdict, why, is not `moved`) raises it;
+//!   the next line of the same hash resolves it, routed to a repository or
+//!   moved out of the folder by hand. It is the host's, no repository's.
 //!
 //! A counterexample that landed is never an interrupt: it is information, not
 //! a question (D24). The derivation is a function of a set of repositories'
-//! projections, so the host's listing is the same function over more of them.
+//! projections, so the host's listing is the same function over more of them,
+//! with the user layer's transcripts (`transcripts`).
 
 use std::path::Path;
 
@@ -301,28 +300,70 @@ fn of(root: &Path, state: &Value) -> Vec<Value> {
         out.push(i);
     }
 
-    // Transcripts routed nowhere (queue 80's routes.jsonl), each resolved by a later route of the same hash.
-    let routes: Vec<Value> = std::fs::read_dir(root.join(".bon/traces")).into_iter().flatten().flatten()
-        .flat_map(|e| std::fs::read_to_string(e.path().join("routes.jsonl")).unwrap_or_default().lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).collect::<Vec<_>>()).collect();
-    for r in routes.iter().filter(|r| r["output"].is_null()) {
-        let (hash, raised) = (r["sha256"].as_str().unwrap_or(""), r["time"].as_i64().unwrap_or(0));
-        let mut i = base("transcript", format!("transcript {hash}"), r["context"].as_str().unwrap_or("").to_string(), raised);
-        i["what"] = json!([format!("{} (meeting title \"{}\") matches no route in the host file", r["context"].as_str().unwrap_or(""), r["title"].as_str().unwrap_or(""))]);
-        i["choices"] = json!([{ "choice": "route", "how": "add a route for its meeting title to the host file", "cost": "a queue search in the repository it routes to" }]);
-        if let Some(later) = routes.iter().filter(|x| x["sha256"] == hash && !x["output"].is_null() && x["time"].as_i64().is_some_and(|t| t >= raised)).min_by_key(|x| x["time"].as_i64()) {
-            i["resolved"] = later["time"].clone();
-            i["answer"] = json!({ "commit": null, "subject": format!("routed to {}", later["output"].as_str().unwrap_or("")), "choice": "route" });
-        }
-        out.push(i);
-    }
+    with_decisions(root, &mut out);
+    out
+}
 
-    // Each one's decision record, where bon has written it: its verdict is what came of it.
+/// Each interrupt's decision record, where bon has written it under `root`:
+/// its verdict is what came of it.
+fn with_decisions(root: &Path, out: &mut [Value]) {
     let records = decisions(root);
     for i in out.iter_mut() {
         let Some(d) = records.iter().find(|d| d["interrupt"] == i["id"]) else { continue };
         i["decision"] = json!({ "program": d["program"], "context": d["context"], "output": d["output"], "verdict": i["came_of_it"], "behavior": d["behavior"] });
         i["transcript"] = d["transcript"].clone();
     }
+}
+
+/// The user layer's interrupts: each transcript routed nowhere, from its
+/// routes (`route::records`), raised by a line with no repository and
+/// resolved by the next line of its hash, which routed it or found it moved
+/// out of the folder. They are the host's, no repository's: their root is the
+/// user layer's, where their decision records go.
+pub fn transcripts(user: &Path) -> Vec<Value> {
+    let routes = crate::route::records(user);
+    let folder = user.join(crate::route::FOLDER);
+    let host = best_of_n::trusted::host_file().map_or("the host file".into(), |f| f.display().to_string());
+    let mut out: Vec<Value> = Vec::new();
+    let mut raised_of: Vec<String> = Vec::new();
+    for (k, r) in routes.iter().enumerate() {
+        let hash = r["sha256"].as_str().unwrap_or("");
+        if !r["output"].is_null() || r["verdict"] == "moved" { continue; }
+        // Raised only where it was not pending already.
+        let before = routes[..k].iter().rev().find(|x| x["sha256"] == hash);
+        if before.is_some_and(|x| x["output"].is_null() && x["verdict"] != "moved") { continue; }
+        let raised = r["time"].as_i64().unwrap_or(0);
+        let path = r["context"].as_str().unwrap_or("");
+        let name = Path::new(path).file_name().map_or(path.to_string(), |n| n.to_string_lossy().to_string());
+        let title = r["title"].as_str().unwrap_or("");
+        // A transcript raised again (dropped again after it left) is another interrupt.
+        let again = raised_of.iter().filter(|h| *h == hash).count();
+        raised_of.push(hash.to_string());
+        let id = if again == 0 { format!("transcript {hash}") } else { format!("transcript {hash} {again}") };
+        let mut i = json!({ "kind": "transcript", "id": id, "repository": "", "root": user.to_string_lossy(),
+            "about": name, "raised": raised, "resolved": null, "reason": null, "answer": null, "came_of_it": null, "decision": null, "transcript": null });
+        i["what"] = json!([r["verdict"].as_str().map_or(format!("no route matches \"{title}\""), String::from)]);
+        // No route: one is added; else the routes (or the repository they name, or the file) change.
+        let how = match r["verdict"].as_str() {
+            None => true, Some(v) => v.starts_with("no route matches"),
+        }.then(|| format!("add \"{}\" = \"<repository>\" to [routes] in {host}, then bon pending", title.replace('"', "")))
+            .unwrap_or_else(|| format!("change [routes] in {host} so that one bon repository's patterns match \"{title}\", then bon pending"));
+        i["choices"] = json!([
+            { "choice": "route", "how": how,
+              "cost": "a queue search in that repository, once the transcript is committed there" },
+            { "choice": "move it", "how": format!("move {name} out of {}", folder.display()), "cost": "nothing" },
+        ]);
+        if let Some(next) = routes[k + 1..].iter().find(|x| x["sha256"] == hash) {
+            i["resolved"] = next["time"].clone();
+            let (choice, subject) = match next["output"].as_str() {
+                Some(repo) => ("route", format!("routed to {repo}")),
+                None => ("move it", format!("moved out of {}", folder.display())),
+            };
+            i["answer"] = json!({ "commit": null, "subject": subject, "choice": choice });
+        }
+        out.push(i);
+    }
+    with_decisions(user, &mut out);
     out
 }
 
@@ -393,7 +434,7 @@ pub fn text(pending: &[&Interrupt], now: i64, width: usize) -> String {
     for (k, i) in pending.iter().enumerate() {
         if k > 0 { out.push('\n'); }
         // The repository, where the listing spans more than one.
-        let repo = if pending.iter().all(|x| x.root == i.root) { String::new() } else { format!(" · {}", i.repository) };
+        let repo = if pending.iter().all(|x| x.root == i.root) || i.repository.is_empty() { String::new() } else { format!(" · {}", i.repository) };
         put(&crate::view::cap(&i.kind), &format!("{} · raised {}{repo}", i.about, ago(now, i.raised)), &mut out);
         for w in &i.what { put("", w, &mut out); }
         for c in &i.choices {
@@ -419,21 +460,41 @@ fn width() -> usize {
 /// and its hash. Exits 0 when nothing is pending and 2 when something is.
 pub fn run(root: &str, transcript: Option<&str>) -> Result<(), String> {
     if let Some(t) = transcript { if !Path::new(t).is_file() { return Err(format!("--transcript {t}: no such file; name this session's transcript")); } }
-    let path = Path::new(root);
-    let state = crate::view::state(path, &crate::view::Filter::default());
-    let all: Vec<Interrupt> = serde_json::from_value(state["interrupts"].clone()).map_err(|e| format!("the interrupts do not match their types: {e}"))?;
-    let mut recorded = 0;
+    // Outside a repository (root empty), the host's.
+    let here = (!root.is_empty()).then(|| Path::new(root));
+    // First, each transcript dropped in the user layer's folder goes where the host file routes it (queue 80).
+    let layer = best_of_n::trusted::user_layer();
+    if let Some((user, routes)) = &layer {
+        match crate::route::route(user, routes, now()) { Ok(r) => print!("{}", crate::route::text(&r)), Err(e) => eprintln!("bon: transcripts not routed: {e}") }
+    }
+    let (states, user, live) = crate::host::read(here);
+    let host = crate::host::of(&states, here.map(|_| states[0].0.as_path()), user.as_deref(), &live, now());
+    let all: Vec<Interrupt> = serde_json::from_value(host["interrupts"].clone()).map_err(|e| format!("the interrupts do not match their types: {e}"))?;
+    let mut recorded: Vec<String> = Vec::new();
     for (r, record) in unrecorded(&all) {
         best_of_n::trusted::record_decision(Path::new(&r), record, transcript.map(Path::new))?;
-        recorded += 1;
+        recorded.push(r);
     }
-    if recorded > 0 { if let Err(e) = best_of_n::trusted::persist(path) { eprintln!("bon: traces not persisted: {e}"); } }
+    // Each repository's traces that gained a record (the user layer's are no repository).
+    for (root, _) in states.iter().filter(|(r, _)| recorded.iter().any(|x| Path::new(x) == r.as_path())) {
+        if let Err(e) = best_of_n::trusted::persist(root) { eprintln!("bon: traces not persisted: {e}"); }
+    }
     let pending: Vec<&Interrupt> = all.iter().filter(|i| i.resolved.is_none()).collect();
-    let repo = state["repo"]["name"].as_str().unwrap_or("this repository");
-    let noted = if recorded == 0 { String::new() } else { format!("; recorded {} answer{}", recorded, if recorded == 1 { "" } else { "s" }) };
-    if pending.is_empty() { println!("nothing pending in {repo}{noted}"); return Ok(()); }
-    println!("{} pending in {repo}, oldest first{noted}\n", pending.len());
+    let place = match here { Some(_) => states[0].1["repo"]["name"].as_str().unwrap_or("this repository").to_string(), None => "this host".to_string() };
+    let noted = if recorded.is_empty() { String::new() } else { format!("; recorded {} answer{}", recorded.len(), if recorded.len() == 1 { "" } else { "s" }) };
+    // In a repository, the user layer's transcripts are the host's: said in a line.
+    let elsewhere = match (&layer, here) {
+        (Some((u, _)), Some(_)) => {
+            let n = transcripts(u).iter().filter(|i| i["resolved"].is_null()).count();
+            if n == 0 { String::new() } else { format!("\n{n} transcript{} in {} wait{} on a route: bon pending outside a repository lists {}\n",
+                if n == 1 { "" } else { "s" }, u.join(crate::route::FOLDER).display(), if n == 1 { "s" } else { "" }, if n == 1 { "it" } else { "them" }) }
+        }
+        _ => String::new(),
+    };
+    if pending.is_empty() { print!("nothing pending in {place}{noted}\n{elsewhere}"); return Ok(()); }
+    println!("{} pending in {place}, oldest first{noted}\n", pending.len());
     print!("{}", text(&pending, now(), width()));
+    print!("{elsewhere}");
     use std::io::Write;
     let _ = std::io::stdout().flush();
     std::process::exit(2)

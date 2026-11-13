@@ -95,6 +95,8 @@ pub struct Totals {
     pub success: Vec<Success>,
     /// Cost per verified candidate by kind, program and model.
     pub per_verified: Vec<PerVerified>,
+    /// Requests over a model's tier threshold, by kind, role and model.
+    pub over_tier: Vec<OverTier>,
     /// The host's two semaphores against wall time.
     pub utilization: Utilization,
     /// Time and cost to a push, by kind, and each search's as a fixed part
@@ -227,6 +229,21 @@ pub struct PerVerified {
     pub time_cost: f64,
 }
 
+/// The agent processes of one kind, role and model whose output said each
+/// request's prompt (`measured` of `agent_processes`), their requests over the
+/// model's tier threshold, and what those cost beyond the base price.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct OverTier {
+    pub kind: String,
+    pub role: String,
+    pub model: String,
+    pub agent_processes: u64,
+    pub measured: u64,
+    pub requests: u64,
+    pub beyond: f64,
+}
+
 /// The host's agent_processes and check_processes semaphores over the reported
 /// searches in range: `wall` is the union of their wall times, in seconds.
 #[derive(Deserialize, Default, Clone)]
@@ -238,13 +255,16 @@ pub struct Utilization {
     pub check_processes: Pool,
 }
 
-/// One semaphore: the slot-seconds held, and its size where every search
-/// recorded the same one. Utilization is held ÷ (size × wall).
+/// One semaphore: the slot-seconds held, its size where every search that
+/// records one (`sized` of them) recorded the same, and its utilization over
+/// those: their held slot-seconds ÷ (size × the union of their wall times).
 #[derive(Deserialize, Default, Clone)]
 #[serde(default)]
 pub struct Pool {
     pub held: f64,
     pub size: Option<u64>,
+    pub utilization: Option<f64>,
+    pub sized: u64,
 }
 
 /// One kind's run-time distribution: its pushes' time (seconds) and cost to a
@@ -452,6 +472,10 @@ pub struct SearchTrace {
     /// Agent processes per behavior: for each distinct `out` its verified
     /// candidates show, how many show it, in the order each first appears.
     pub behaviors: Vec<u64>,
+    /// Its agent processes' requests over their model's tier threshold, and
+    /// what those cost beyond the base price.
+    pub requests_over_tier: u64,
+    pub over_tier: f64,
     pub candidates: Vec<Facts>,
     /// A code or compaction search: how its attempt ended (pushed, blocked,
     /// landed, exited, running).
@@ -498,8 +522,14 @@ pub struct Facts {
     pub index: u64,
     /// The program it ran (older traces: their `harness`).
     pub program: Option<String>,
+    /// The role it ran as, in traces that record it.
+    pub role: Option<String>,
     pub model: Option<String>,
     pub generation: Option<f64>,
+    /// Its requests over its model's tier threshold, and what they cost
+    /// beyond the base price; none where its output said nothing per request.
+    pub requests_over_tier: Option<u64>,
+    pub over_tier: Option<f64>,
     pub commit: Option<String>,
     pub accepted: bool,
     /// Verus verified it.
@@ -730,6 +760,139 @@ pub struct Service {
     pub name: String,
     pub endpoints: Vec<String>,
     pub group: Option<String>,
+}
+
+/// The host as bon shows it (queue 60): every repository the user layer
+/// holds, or the one it was read in, and across them what waits on engineer,
+/// the host's two pools, its memory, each running bon process and a journal,
+/// from the process list, the slot files, the traces and the OS.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Host {
+    /// The user layer's root, from the host file; none without one.
+    pub user: Option<String>,
+    /// The repository it was read in; none for the whole host.
+    pub here: Option<String>,
+    pub repositories: Vec<Repository>,
+    /// What only engineer can answer, every repository's and the user
+    /// layer's, oldest first: pending and resolved.
+    pub interrupts: Vec<Interrupt>,
+    pub waiting: Waiting,
+    pub pools: HostPools,
+    pub memory: Memory,
+    /// Each running bon process, those of one tree together.
+    pub trees: Vec<TreeGroup>,
+    /// What happened, oldest first: pushes, blocks, landings, interrupts raised and resolved.
+    pub journal: Vec<Event>,
+    pub turnaround: Vec<Turnaround>,
+    pub now: i64,
+}
+
+/// A repository bon reaches: one under the user layer's root with a
+/// .bon/bon.toml, one a live bon process searches, or one a route names.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Repository {
+    pub name: String,
+    pub root: String,
+    /// Whether trunk's head has a .bon/bon.toml.
+    pub configured: bool,
+    pub pending: u64,
+    pub running: u64,
+    /// When its latest bon process started.
+    pub latest: Option<i64>,
+    /// What its bon processes cost since local midnight.
+    pub today: f64,
+}
+
+/// The searches engineer waits on now (running, not background) of the
+/// repositories shown, among `host` of them on the host; what his time costs
+/// an hour while they run (each search's repository's rate, split among the
+/// host's waited-on searches); and his time charged today.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Waiting {
+    pub searches: u64,
+    pub host: u64,
+    pub per_hour: f64,
+    pub today: f64,
+}
+
+/// The host file's two semaphores, their slots held now, and how many of the
+/// shown repositories' agent processes are in flight and in checks.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct HostPools {
+    pub agent_processes: Slots,
+    pub check_processes: Slots,
+    pub check_threads: Option<u64>,
+}
+
+/// One semaphore: its size, the slots held host-wide, and how many of the
+/// shown repositories' agent processes need it now.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Slots {
+    pub size: Option<u64>,
+    pub held: u64,
+    pub shown: u64,
+}
+
+/// The machine's memory, what is free for checks, and what the running bon
+/// processes' trees hold resident, in GB.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Memory {
+    pub total: f64,
+    pub free: f64,
+    pub bon: f64,
+}
+
+/// The running bon processes that start from one tree.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct TreeGroup {
+    pub tree: Option<String>,
+    pub processes: Vec<Running>,
+}
+
+/// A bon process the process list says is running, and what its trace says.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Running {
+    pub pid: u64,
+    pub repository: String,
+    pub root: String,
+    pub trace: Option<String>,
+    pub background: bool,
+    pub kind: Option<String>,
+    pub goal: Option<String>,
+    pub search: Option<u64>,
+    pub attempt: Option<u64>,
+    pub started: Option<i64>,
+    /// When the bon process started.
+    pub start: i64,
+    /// Its process tree's resident memory, in GB.
+    pub memory: f64,
+    pub sentence: String,
+    pub width: Option<u64>,
+    pub returned: u64,
+    pub verified: u64,
+    pub in_flight: u64,
+    pub in_checks: u64,
+    pub waiting: u64,
+    pub cost: f64,
+}
+
+/// One thing that happened: when, in which repository (none: the user
+/// layer's), what (pushed, blocked, landed, raised, resolved), and a line.
+#[derive(Deserialize, Default, Clone)]
+#[serde(default)]
+pub struct Event {
+    pub time: i64,
+    pub repository: String,
+    pub kind: String,
+    pub text: String,
 }
 
 /// The projection for the repository at `root`.

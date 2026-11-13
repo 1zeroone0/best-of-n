@@ -16,7 +16,7 @@
               "hashes": [
                 {
                   "algorithm": "SHA-256",
-                  "value": "72c46e3f083360701913f520ab70c91b16b33cc738631dbf3b8619430cababff"
+                  "value": "eaa7748b11fa881819a1aeac7836c48e8390079aa39101dc990e69dabbec7698"
                 }
               ],
               "href": "sbom.json",
@@ -99,6 +99,12 @@
                     "name": "proven",
                     "ns": "https://github.com/1zeroone0/best-of-n/account",
                     "value": "pushable"
+                  },
+                  {
+                    "class": "invariant",
+                    "name": "proven",
+                    "ns": "https://github.com/1zeroone0/best-of-n/account",
+                    "value": "blind"
                   },
                   {
                     "class": "manifest-key",
@@ -529,6 +535,18 @@
             "class": "file",
             "name": "trusted",
             "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "src/host.rs"
+          },
+          {
+            "class": "file",
+            "name": "trusted",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
+            "value": "src/route.rs"
+          },
+          {
+            "class": "file",
+            "name": "trusted",
+            "ns": "https://github.com/1zeroone0/best-of-n/account",
             "value": "src/tui.rs"
           },
           {
@@ -804,12 +822,12 @@
       }
     ],
     "metadata": {
-      "last-modified": "2026-11-13T07:50:02Z",
+      "last-modified": "2026-11-13T08:51:57Z",
       "oscal-version": "1.2.3",
       "remarks": "proven: in the kernel, verified by Verus. trusted: reviewed by the owner, not verified. configured: a fact of the manifest. tested: program code and every other file, judged by the checks. Every control claim is proposed and awaits GRC review.",
       "title": "best-of-n",
-      "version": "d81a49146051"
+      "version": "0c5eee182f94"
     },
-    "uuid": "f162578d-9168-4bf2-bf68-40a4916c67bd"
+    "uuid": "99e7dc90-0f44-4af8-987d-0cf581346b80"
   }
 }
