@@ -2230,8 +2230,10 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
             match target {
                 Some(t) => {
                     if let Kind::Compaction { goal, .. } = &t.kind { members.push((-1, goal.iter().collect())); }
+                    // The members alone: the kernel reads a test's verdict on a
+                    // verified candidate (spec::member) and on no other.
                     for (j, r) in t.results.iter().enumerate() {
-                        if let Some(c) = r { members.push((j as i64, c.commit.iter().collect())); }
+                        if let Some(c) = r.as_ref().filter(|c| crate::exec::verified(t, c)) { members.push((j as i64, c.commit.iter().collect())); }
                     }
                 }
                 None => members.push((-1, start.to_string())),
@@ -2244,10 +2246,12 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
                 let mut tasks: Vec<(bool, i64, String, PathBuf)> = members.into_iter()
                     .map(|(j, mc)| (false, j, mc, trace.join(format!("accepts-{j}")))).collect();
                 // Each foil: a program trunk's tests accept and Verus rejects. The
-                // spec decides which results are foils; every result is run.
+                // spec decides which results are foils (spec::foil, which also
+                // asks that it changed only what it may); a result the tests
+                // reject, or Verus proves, is none, and is not run.
                 if let Some(f) = foils {
                     for (j, r) in f.results.iter().enumerate() {
-                        let Some(c) = r else { continue };
+                        let Some(c) = r.as_ref().filter(|c| c.accepted && !c.proved) else { continue };
                         tasks.push((true, j as i64, c.commit.iter().collect(), trace.join(format!("accepts-foil-{j}"))));
                     }
                 }
