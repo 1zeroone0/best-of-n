@@ -387,7 +387,7 @@ pub fn ago(now: i64, t: i64) -> String {
 }
 
 /// A fraction as a percentage: `87%`; `<1%` for more than none and under one.
-pub fn percent(x: f64) -> String { if x > 0.0 && x < 0.005 { "<1%".into() } else { format!("{:.0}%", 100.0 * x) } }
+pub fn percent(x: f64) -> String { if x > 0.0 && x < 0.01 { "<1%".into() } else { format!("{:.0}%", 100.0 * x) } }
 
 /// A share with what it is of: `87% (296 of 339)`; — of none.
 pub fn share(k: u64, n: u64) -> String { if n == 0 { "—".into() } else { format!("{} ({k} of {n})", percent(k as f64 / n as f64)) } }
@@ -1297,7 +1297,7 @@ pub fn outcome_lines(t: &crate::projection::Totals) -> Vec<String> {
     let attempts = attempt_table(t);
     if attempts.is_empty() { return Vec::new(); }
     let mut lines = aligned(&attempts);
-    for (label, items) in reason_rows(t) { lines.push(format!("{label}  {}", items.join(" · "))); }
+    for (label, items) in reason_rows(t) { lines.push(wrap(&format!("{label}  {}", items.join(" · ")), 0, 2).trim_end().to_string()); }
     lines.push(String::new());
     lines.extend(aligned(&process_table(t)));
     lines
@@ -1903,6 +1903,10 @@ mod tests {
         assert_eq!((ago(100, 70), ago(1000, 700), ago(10000, 2500), ago(400000, 0)), ("now".into(), "5m ago".into(), "2h05m ago".into(), "4d ago".into()));
         // Shares and percentages; signed counts; commits; trunk.
         assert_eq!((share(296, 339), share(0, 0), percent(0.001), percent(0.0)), ("87% (296 of 339)".into(), "—".into(), "<1%".into(), "0%".into()));
+        assert_eq!((percent(0.0051), percent(0.01)), ("<1%".into(), "1%".into()));
+        // A word longer than the line stands whole on its own; the rest wraps at 80 under its indent.
+        let w = wrap(&format!("see {} now", "x".repeat(90)), 2, 4);
+        assert_eq!(w.lines().map(str::trim).collect::<Vec<_>>(), ["see", &"x".repeat(90)[..], "now"]);
         assert_eq!((signed(3), signed(-19), signed(0)), ("+3".into(), "−19".into(), "±0".into()));
         assert_eq!(short("499a245c0ffee"), "499a245");
         assert_eq!(trunk(Some("origin"), Some("main"), Some("499a245c0ffee")), "trunk origin/main 499a245");

@@ -232,6 +232,8 @@ struct App {
     /// Rows a page of the detail shows, and of an overlay, when last drawn; an overlay's rows once wrapped.
     detail_page: u16,
     body_h: u16,
+    /// The first row of the key reference shown, where it does not fit.
+    keys_top: usize,
     overlay_rows: usize,
 }
 
@@ -240,7 +242,7 @@ impl App {
         let dark = std::env::var("BON_THEME").map_or(true, |t| t != "light");
         App { p: Projection::default(), loaded: None, root: ".".into(), overlay: Overlay::None, input: None, range: 0, filter: Default::default(),
               error: None, tab: Tab::Traces, held: Default::default(), focus: [0; 4], top: [0; 4], detail_top: 0, detail_open: false,
-              keys: false, palette: if dark { DARK } else { LIGHT }, dark, off: local_offset(), list_w: 200, list_h: 20, detail_h: 20, detail_shown: false, detail_page: 18, body_h: 20, overlay_rows: 0 }
+              keys: false, palette: if dark { DARK } else { LIGHT }, dark, off: local_offset(), list_w: 200, list_h: 20, detail_h: 20, detail_shown: false, detail_page: 18, body_h: 20, keys_top: 0, overlay_rows: 0 }
     }
     fn ti(&self) -> usize { TABS.iter().position(|t| *t == self.tab).unwrap_or(0) }
     /// Focus row `i` of `list`, and its item; a new focus opens its detail at the top.
@@ -287,7 +289,7 @@ fn pairs(pal: &Palette, indent: usize, items: &[(&str, String)], w: usize) -> Ve
         if v.len() > 1 && width_of(&v) + 3 + n > w { out.push(Line::from(std::mem::replace(&mut v, vec![Span::raw(" ".repeat(indent))]))); }
         if v.len() > 1 { v.push(Span::styled(" · ", pal.faint())); }
         let at = width_of(&v) + k.chars().count() + 1;
-        if at + 8 > w {
+        if at + val.chars().count().min(8) > w {
             // Its label leaves no room: label and value wrap together, under the label.
             if v.len() > 1 { v.pop(); out.push(Line::from(std::mem::replace(&mut v, vec![Span::raw(" ".repeat(indent))]))); }
             // How much of the label is left to show, line by line, so all of it stays muted.
@@ -609,7 +611,14 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
                     let when = r.time.map_or(String::new(), |x| format!(" · {}", ago(p.repo.now, x)));
                     let first = k == 0 || p.retired[k - 1].commit != r.commit;
                     let subject = if first && !r.subject.is_empty() { format!(" · {}", r.subject) } else { String::new() };
+                    let at = out.len();
                     under(&mut out, "Taken off by", &format!("{}{when}{subject}", short(&r.commit)), pal.muted());
+                    // The commit only locates it: faint.
+                    if let Some(row) = out.get_mut(at) {
+                        let body = row.line.spans.pop().map(|s| s.content.to_string()).unwrap_or_default();
+                        let (commit, rest): (String, String) = (body.chars().take(7).collect(), body.chars().skip(7).collect());
+                        row.line.spans.extend([Span::styled(commit, pal.faint()), Span::styled(rest, pal.muted())]);
+                    }
                 }
             }
         }
@@ -676,7 +685,7 @@ fn rows(app: &App, width: u16) -> Vec<Row> {
                 let mut legend = vec![Span::raw(format!("   {}", " ".repeat(nw))), Span::styled("✓ ", pal.ink()), Span::styled("Present", pal.muted())];
                 if some_absent { legend.extend([Span::styled("   — ", pal.faint()), Span::styled("Absent", pal.muted())]); }
                 out.push(Row::text(Line::from(legend)));
-                if !absent.is_empty() { out.push(Row::text(Line::from(vec![Span::raw(format!("   {}", " ".repeat(nw))), Span::styled(fit(&format!("{}: absent for every one", absent.join(", ")), room), pal.muted())]))); }
+                if !absent.is_empty() { out.extend(hanging(&format!("{}: absent for every one", absent.join(", ")), 3 + nw, w, pal.muted()).into_iter().map(Row::text)); }
             }
             for i in &decided {
                 let ls = layers(&spec.items[*i].name).unwrap();
@@ -949,7 +958,7 @@ fn detail_marked(app: &App, width: u16) -> (Text<'static>, Vec<(usize, Mark)>) {
             let tone = pal.tone(goal_tone(g));
             marks.push((t.len(), Mark::Title));
             t.push(spread(vec![Span::styled(format!("{} {}", cap(&g.kind), g.title), pal.strong())], vec![Span::styled(format!("● {}", outcome_label(&g.outcome)), tone)], wd));
-            if !g.about.subject.is_empty() { t.push(Line::from(Span::styled(fit(&g.about.subject, wd), pal.muted()))); }
+            if !g.about.subject.is_empty() { t.extend(hanging(&g.about.subject, 0, wd, pal.muted())); }
             t.push(blank());
             t.extend(pairs(&pal, 0, &step_parts(g), wd));
             if let Some(c) = g.push.as_ref().and_then(|p| p.commit.as_deref()) { t.push(kv("Pushed commit", vec![Span::styled(short(c), pal.ink())])); }
@@ -1504,6 +1513,17 @@ fn panes(app: &App, body: Rect) -> Panes {
     Panes { list: body, rows_w: body.width, detail: None, beside }
 }
 
+/// Whether a row's key is the held item: the same key; or the same intent,
+/// queued then and retired now (or back); or the goal one of whose bon
+/// processes the held goal began with, when a filter left that one out.
+fn same(p: &Projection, row: &Key, held: &Key) -> bool {
+    match (row, held) {
+        (Key::Queue(a) | Key::Retired(a), Key::Queue(b) | Key::Retired(b)) => a == b,
+        (Key::Goal(_), Key::Goal(t)) => row == held || goal(p, row).is_some_and(|g| g.processes.iter().any(|b| b.trace == *t)),
+        _ => row == held,
+    }
+}
+
 /// The rows that continue row `i` (its wrapped lines), and it: the cursor covers them all.
 fn block_end(list: &[Row], i: usize) -> usize { (i + 1..list.len()).take_while(|&j| list[j].more).last().unwrap_or(i) }
 
@@ -1515,7 +1535,7 @@ fn place(app: &mut App, list: &[Row], h: usize) {
     let ti = app.ti();
     if !list.iter().any(|r| r.focusable()) { app.top[ti] = app.top[ti].min(last_top(list.len(), h)); return; }
     let was = app.focus[ti];
-    let found = app.held[ti].as_ref().and_then(|k| list.iter().position(|r| r.key.as_ref() == Some(k)));
+    let found = app.held[ti].as_ref().and_then(|k| list.iter().position(|r| r.key.as_ref().is_some_and(|r| same(&app.p, r, k))));
     let i = found.unwrap_or_else(|| {
         let from = was.min(list.len() - 1);
         (0..list.len()).filter(|&j| list[j].focusable()).min_by_key(|&j| j.abs_diff(from)).unwrap_or(from)
@@ -1671,27 +1691,33 @@ fn draw(f: &mut Frame, app: &mut App) {
         let (text, marks) = detail_marked(app, inner.width);
         let lines = text.lines;
         let h = inner.height as usize;
-        // Its lines fit the pane, so a line is a row; it scrolls no further than its last line.
-        let s = (app.detail_top as usize).min(lines.len().saturating_sub(1));
-        if !lines.is_empty() { app.detail_top = s as u16; }
+        // Its lines fit the pane, so a line is a row.
         detail_more = lines.len() > h;
-        // Scrolled, the title, the process above, its search and a table's header whose
-        // rows continue stay at the top: each while what it heads is on screen.
-        let last = |m: Mark| marks.iter().rev().find(|(i, k)| *k == m && *i < s).map(|(i, _)| *i);
-        let open = |at: usize, ends: &[Mark]| !marks.iter().any(|(i, k)| *i > at && *i <= s && ends.contains(k));
-        let mut pins: Vec<usize> = Vec::new();
-        if s > 0 {
-            if let Some(i) = last(Mark::Title) { pins.push(i); }
-            if let Some(i) = last(Mark::Process) { pins.push(i); }
-            if let Some(i) = last(Mark::Search).filter(|&i| open(i, &[Mark::Process, Mark::Search, Mark::Notes])) { pins.push(i); }
-            if let Some(i) = last(Mark::Header).filter(|&i| open(i, &[Mark::Process, Mark::Search, Mark::Notes])) { pins.push(i); }
-            pins.retain(|i| *i < s);
-            pins.dedup();
-        }
-        let up = s > 0;
-        let room = h.saturating_sub(pins.len() + up as usize);
-        let down = s + room < lines.len();
-        let room = room.saturating_sub(down as usize);
+        // Scrolled to line s: the title, the process above, its search and a table's header
+        // whose rows continue stay at the top, each while what it heads is on screen (and
+        // only where at least three rows of what scrolls remain under them); then the cues.
+        let layout = |s: usize| -> (Vec<usize>, bool, bool, usize) {
+            let last = |m: Mark| marks.iter().rev().find(|(i, k)| *k == m && *i < s).map(|(i, _)| *i);
+            let open = |at: usize, ends: &[Mark]| !marks.iter().any(|(i, k)| *i > at && *i <= s && ends.contains(k));
+            let mut pins: Vec<usize> = Vec::new();
+            if s > 0 && h >= 8 {
+                if let Some(i) = last(Mark::Title) { pins.push(i); }
+                if let Some(i) = last(Mark::Process) { pins.push(i); }
+                if let Some(i) = last(Mark::Search).filter(|&i| open(i, &[Mark::Process, Mark::Search, Mark::Notes])) { pins.push(i); }
+                if let Some(i) = last(Mark::Header).filter(|&i| open(i, &[Mark::Process, Mark::Search, Mark::Notes])) { pins.push(i); }
+                pins.retain(|i| *i < s);
+                pins.dedup();
+            }
+            let up = s > 0;
+            let room = h.saturating_sub(pins.len() + up as usize);
+            let down = s + room < lines.len();
+            (pins, up, down, room.saturating_sub(down as usize))
+        };
+        // It scrolls no further than the first line from which its last line shows.
+        let end = (0..lines.len().max(1)).find(|&s| !layout(s).2).unwrap_or(0);
+        let s = (app.detail_top as usize).min(end);
+        if !lines.is_empty() { app.detail_top = s as u16; }
+        let (pins, up, down, room) = layout(s);
         // A page of the detail is what it shows under its pinned lines and cues.
         app.detail_page = room.max(1) as u16;
         let mut shown: Vec<Line> = Vec::new();
@@ -1759,8 +1785,9 @@ fn draw(f: &mut Frame, app: &mut App) {
     // something; or an error reading the projection.
     let filter = app.filter.lock().map(|f| f.clone()).unwrap_or_default();
     let fw = foot.width as usize;
-    let foot_line = if let Some(e) = &app.error { clip(Line::from(Span::styled(format!(" {e}"), pal.tone(Tone::Red))), fw) }
-    else if let Some(buf) = &app.input { let mut l = vec![Span::styled(" Find  ", pal.muted()), Span::styled(format!("{buf}▏   "), pal.ink())]; l.extend(key_bar(&pal, &[("⏎", "Apply".into(), 1), ("esc", "Cancel".into(), 1)], fw).spans); clip(Line::from(l), fw) }
+    // What is being typed shows over an error: the error is still there when it is done.
+    let foot_line = if let Some(buf) = &app.input { let mut l = vec![Span::styled(" Find  ", pal.muted()), Span::styled(format!("{buf}▏   "), pal.ink())]; l.extend(key_bar(&pal, &[("⏎", "Apply".into(), 1), ("esc", "Cancel".into(), 1)], fw).spans); clip(Line::from(l), fw) }
+    else if let Some(e) = &app.error { clip(Line::from(Span::styled(format!(" {e}"), pal.tone(Tone::Red))), fw) }
     else {
         let shown = panes.detail.is_some();
         let items: Vec<(&str, String, u8)> = match &app.overlay {
@@ -1812,7 +1839,15 @@ fn draw(f: &mut Frame, app: &mut App) {
             all.push(section(&pal, 1, where_, None));
             for (k, what) in ks.iter() { all.push(clip(Line::from(vec![Span::styled(format!("   {}", fit(k, kw)), pal.ink().add_modifier(Modifier::BOLD)), Span::styled(what.to_string(), pal.muted())]), w.saturating_sub(2) as usize)); }
         }
-        f.render_widget(Paragraph::new(all).block(ratatui::widgets::Block::bordered().border_style(pal.rule()).title(Span::styled(" Keys ", pal.strong()))), r);
+        // Too short for every key: it scrolls, with the panes' cues.
+        let inner = h.saturating_sub(2) as usize;
+        app.keys_top = app.keys_top.min(last_top(all.len(), inner));
+        let (up, avail) = more(all.len(), inner, app.keys_top);
+        let down = app.keys_top + avail < all.len();
+        let mut shown: Vec<Line> = all.into_iter().skip(app.keys_top).take(avail).collect();
+        if up { shown.insert(0, more_line(&pal, true)); }
+        if down { shown.push(more_line(&pal, false)); }
+        f.render_widget(Paragraph::new(shown).block(ratatui::widgets::Block::bordered().border_style(pal.rule()).title(Span::styled(" Keys ", pal.strong()))), r);
     }
 }
 
@@ -1843,7 +1878,12 @@ pub fn frame(root: &str, w: u16, h: u16, tab: usize, focus: usize, light: bool) 
     // A first draw sets the list's width; then focus the focus-th focusable row at that width.
     t.draw(|f| draw(f, &mut app)).map_err(|e| e.to_string())?;
     let list = rows(&app, app.list_w);
-    if let Some((i, _)) = list.iter().enumerate().filter(|(_, r)| r.focusable()).nth(focus) { app.focus_on(&list, i); }
+    let rows_n = list.iter().filter(|r| r.focusable()).count();
+    match list.iter().enumerate().filter(|(_, r)| r.focusable()).nth(focus) {
+        Some((i, _)) => app.focus_on(&list, i),
+        None if focus > 0 => return Err(format!("--focus {focus} is not a row; this tab has {}", count(rows_n, "row to focus, 0", &format!("rows to focus, 0 to {}", rows_n.saturating_sub(1))))),
+        None => {}
+    }
     t.draw(|f| draw(f, &mut app)).map_err(|e| e.to_string())?;
     Ok(frame_html(t.backend().buffer(), light))
 }
@@ -1900,7 +1940,17 @@ pub fn spec_text(root: &str, name: Option<&str>, width: u16) -> Result<String, S
 fn key(app: &mut App, k: KeyEvent) -> bool {
     // Ctrl-C quits, whatever is open: in raw mode it is a key like any other.
     if k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL) { return false; }
-    if app.keys { app.keys = false; return true; }
+    // Keys: ↑↓ and PgUp PgDn scroll it where it does not fit; any other key closes it.
+    if app.keys {
+        match k.code {
+            KeyCode::Up | KeyCode::Char('k') => app.keys_top = app.keys_top.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => app.keys_top += 1,
+            KeyCode::PageUp => app.keys_top = app.keys_top.saturating_sub(5),
+            KeyCode::PageDown => app.keys_top += 5,
+            _ => { app.keys = false; app.keys_top = 0; }
+        }
+        return true;
+    }
     // Typing after /: find, in any case (the filter compares without case).
     if let Some(buf) = app.input.as_mut() {
         match k.code {
@@ -1985,9 +2035,9 @@ fn key(app: &mut App, k: KeyEvent) -> bool {
         // Under 100 columns the detail opens over the list; beside it, it is already open.
         (KeyCode::Enter, _) if has_detail(app.tab) && !focusable.is_empty() && !app.detail_shown => app.detail_open = true,
         (KeyCode::Char('t'), _) => { app.dark = !app.dark; app.palette = if app.dark { DARK } else { LIGHT }; }
-        (KeyCode::Char('/'), _) if filtered(app.tab) => app.input = Some(app.filter.lock().ok().and_then(|f| f.find.clone()).unwrap_or_default()),
+        (KeyCode::Char('/'), _) if filtered(app.tab) && app.loaded.is_some() => app.input = Some(app.filter.lock().ok().and_then(|f| f.find.clone()).unwrap_or_default()),
         // The next range; All time clears both bounds, whatever bon was started with.
-        (KeyCode::Char('r'), _) if filtered(app.tab) => {
+        (KeyCode::Char('r'), _) if filtered(app.tab) && app.loaded.is_some() => {
             app.range = (app.range + 1) % RANGES.len();
             let since = (RANGES[app.range].1 > 0).then(|| (app.p.repo.now - RANGES[app.range].1).max(0) as u64);
             app.filter.lock().map(|mut f| { f.since = since; f.until = None; }).ok();
@@ -2263,22 +2313,25 @@ mod tests {
         app.p.groups = vec![foiled()];
         // Scrolled into the counterexample search's table: the cue, the title, the process,
         // the search's heading and the table's header, then its rows.
-        let mut t = Terminal::new(TestBackend::new(140, 30)).unwrap();
+        let mut t = Terminal::new(TestBackend::new(140, 16)).unwrap();
         t.draw(|f| draw(f, &mut app)).unwrap();
-        let lines = detail_marked(&app, 140 - 63 - 1 - 2).0.lines;
-        let at = lines.iter().position(|l| l.spans.iter().any(|s| s.content.starts_with("  #1 "))).unwrap();
-        app.detail_top = at as u16;
+        // Scrolled as far as it goes (its last page): the cue, the title, the process,
+        // and the counterexample search's heading over its table.
+        app.detail_top = u16::MAX;
         t.draw(|f| draw(f, &mut app)).unwrap();
         let b = t.backend().buffer().clone();
         let row = |y: u16| (63..140).map(|x| b[(x, y)].symbol().to_string()).collect::<String>();
-        let top: Vec<String> = (3..9).map(row).collect();
-        assert!(top[0].contains("↑ more") && top[1].contains("Code from 9bb8a5b") && top[2].contains("Process 7")
-            && top[3].contains("2 Counterexample") && top[4].contains("Test  Verified") && top[5].contains("#1"), "{top:#?}");
+        let top: Vec<String> = (3..8).map(row).collect();
+        assert!(top[0].contains("↑ more") && top[1].contains("Code from 9bb8a5b") && top[2].contains("Process 7"), "{top:#?}");
+        // No further than its last page: its last line is on the pane's last row.
+        let last = detail_marked(&app, 140 - 63 - 1 - 2).0.lines.last().map(|l| l.spans.iter().map(|s| s.content.to_string()).collect::<String>()).unwrap();
+        let pane: Vec<String> = (3..15).map(row).collect();
+        assert!(pane.iter().any(|r| r.trim_end().ends_with(last.trim_end())) && !pane.iter().any(|r| r.contains("↓ more")), "{pane:#?}");
         // Scrolled past it to the end, no search is pinned whose rows are gone.
         app.detail_top = u16::MAX;
         t.draw(|f| draw(f, &mut app)).unwrap();
         let b = t.backend().buffer().clone();
-        let all: String = (3..29).map(|y| (63..140).map(|x| b[(x, y)].symbol().to_string()).collect::<String>() + "\n").collect();
+        let all: String = (4..15).map(|y| (63..140).map(|x| b[(x, y)].symbol().to_string()).collect::<String>() + "\n").collect();
         assert!(!all.contains("Test  Verified") || all.contains("#1    Yes"), "{all}");
     }
 

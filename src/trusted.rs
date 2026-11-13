@@ -2390,9 +2390,9 @@ pub fn programs_logged_in(m: &Manifest) -> (r: Result<(), String>) {
 /// A name is looked for as env looks for it, an executable file in a PATH
 /// directory (a shell builtin is no answer); a relative path is the working
 /// directory's, which exists only once the search runs, so it is not checked.
-pub const PROBE: &str = r#"case "$1" in /*) p="$1";; */*) exit 0;; *) p=; IFS=:; for d in $PATH; do [ -f "$d/$1" ] && [ -x "$d/$1" ] && { p="$d/$1"; break; }; done
-  [ -n "$p" ] || { echo "not found on agent's PATH"; exit 1; };; esac
-[ -e "$p" ] || { echo "$p does not exist"; exit 1; }; [ -f "$p" ] && [ -x "$p" ] || { echo "$p is not executable by agent"; exit 1; }"#;
+pub const PROBE: &'static str = "case \"$1\" in /*) p=\"$1\";; */*) exit 0;; *) p=; IFS=:; for d in $PATH; do [ -f \"$d/$1\" ] && [ -x \"$d/$1\" ] && { p=\"$d/$1\"; break; }; done
+  [ -n \"$p\" ] || { echo \"not found on agent's PATH\"; exit 1; };; esac
+[ -e \"$p\" ] || { echo \"$p does not exist\"; exit 1; }; [ -f \"$p\" ] && [ -x \"$p\" ] || { echo \"$p is not executable by agent\"; exit 1; }";
 
 /// Before a search, before anything is reserved: the program of each role
 /// bon.toml names is found and executable as agent, on agent's PATH, the way

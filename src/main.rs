@@ -237,6 +237,7 @@ fn dispatch(root: &str, name: &str, a: &Parsed) -> Result<(), String> {
         "view" if a.has("--tab") || a.has("--focus") || a.has("--light") => Err("--tab, --focus and --light go with --frame; bon view --help shows its usage".into()),
         "view" => tui::run(&root, view::Filter::default()),
         "queue" => queue(&root),
+        "setup" if a.value("--for").is_some_and(|u| u.trim().is_empty()) => Err("--for needs a user's name; bon setup --help shows its usage".into()),
         "setup" => setup(a.has("--dry-run"), a.value("--for")),
         "account" => account::run(&root, a.has("--check")),
         "types" => types::run(&root, a.has("--check")),

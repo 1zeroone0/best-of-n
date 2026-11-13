@@ -228,7 +228,7 @@ fn of(root: &Path, state: &Value) -> Vec<Value> {
                     Some((l, charged, n, a)) => format!("{} of {} spent; its next search reserves {}", money(Some(charged as f64 / 1e6)), money(Some(l as f64 / 1e6)), money(Some((n * a) as f64 / 1e6))),
                     None => format!("≈ {} an attempt", money(Some(last))),
                 }),
-                "change the spec" => (format!("commit to {checks}"), format!("your time{}, then an attempt ≈ {}", rate.map_or(String::new(), |r| format!(" at ${r:.0}/h")), money(Some(last)))),
+                "change the spec" => (format!("commit to {checks}"), format!("your time{}, then an attempt ≈ {}", rate.filter(|r| *r > 0.0).map_or(String::new(), |r| format!(" at ${r:.0}/h")), money(Some(last)))),
                 _ => ("take its line off .bon/queue.tsv".to_string(), format!("nothing more; the {} spent on it stays spent", money(Some(cost("cost"))))),
             };
             json!({ "choice": c, "how": how, "cost": cost })
@@ -415,7 +415,7 @@ fn width() -> usize {
 /// with FILE, the transcript of the agent session that runs it, as a pointer
 /// and its hash. Exits 0 when nothing is pending and 2 when something is.
 pub fn run(root: &str, transcript: Option<&str>) -> Result<(), String> {
-    if let Some(t) = transcript { if !Path::new(t).is_file() { return Err(format!("--transcript {t}: no such file; name this session's transcript file")); } }
+    if let Some(t) = transcript { if !Path::new(t).is_file() { return Err(format!("--transcript {t}: no such file; name this session's transcript")); } }
     let path = Path::new(root);
     let state = crate::view::state(path, &crate::view::Filter::default());
     let all: Vec<Interrupt> = serde_json::from_value(state["interrupts"].clone()).map_err(|e| format!("the interrupts do not match their types: {e}"))?;
