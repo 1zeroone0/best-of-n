@@ -13,6 +13,9 @@
 #   K              times each stub runs the checks itself [1]
 #   VARIANTS       distinct code edits; the rest are byte-identical [4]
 #   TEST_VARIANTS  distinct counterexample tests [2]
+#   BEHAVIORS      kernel: how many behaviors verified code stubs show [1]
+#   CX_MODE        kernel: the counterexample stubs' tests: blind, split or few [blind]
+#   ATTEMPTS       attempts `bon code` may make, each WIDTH wide [1]
 #   TIME           each agent process's time limit, seconds [1800]
 #   PROJECT        kernel: the small crate in bench/sandbox; bon: bon's own
 #                  source at this commit, one function broken [kernel]
@@ -35,6 +38,10 @@ SLEEP=${SLEEP:-30}
 K=${K:-1}
 VARIANTS=${VARIANTS:-4}
 TEST_VARIANTS=${TEST_VARIANTS:-2}
+BEHAVIORS=${BEHAVIORS:-1}
+CX_MODE=${CX_MODE:-blind}
+ATTEMPTS=${ATTEMPTS:-1}
+NS=$WIDTH; i=1; while [ "$i" -lt "$ATTEMPTS" ]; do NS="$NS, $WIDTH"; i=$((i + 1)); done
 TIME=${TIME:-1800}
 PROJECT=${PROJECT:-kernel}
 STUB='name = "stub", model = "stub", command = ["/bin/sh", ".bon/stub.sh"]'
@@ -77,14 +84,14 @@ case "$PROJECT" in
   *) echo "PROJECT is kernel or bon" >&2; exit 1 ;;
 esac
 cp "$REPO/bench/stub.sh" "$WORK/.bon/stub.sh"
-printf 'PROJECT=%s\nSLEEP=%s\nK=%s\nVARIANTS=%s\nTEST_VARIANTS=%s\n' "$PROJECT" "$SLEEP" "$K" "$VARIANTS" "$TEST_VARIANTS" > "$WORK/.bon/stub.env"
+printf 'PROJECT=%s\nSLEEP=%s\nK=%s\nVARIANTS=%s\nTEST_VARIANTS=%s\nBEHAVIORS=%s\nCX_MODE=%s\n' "$PROJECT" "$SLEEP" "$K" "$VARIANTS" "$TEST_VARIANTS" "$BEHAVIORS" "$CX_MODE" > "$WORK/.bon/stub.env"
 printf '/target\n/.bon/traces/\n' > "$WORK/.gitignore"
 printf 'id\tintent\n' > "$WORK/.bon/queue.tsv"
 cat > "$WORK/.bon/bon.toml" <<EOF
 # The benchmark's sandbox: stub agents, a local bare origin, no traces remote.
 limit = 1000.0
 rate = 0
-harness = [{ $HARNESS, n = [$WIDTH] }]
+harness = [{ $HARNESS, n = [$NS] }]
 
 [agent_process]
 limit = 1.0

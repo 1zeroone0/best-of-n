@@ -11,6 +11,15 @@
 #                  indices agree modulo VARIANTS write byte-identical trees
 #   TEST_VARIANTS  counterexample tests, likewise
 #   PROJECT        kernel (bench/sandbox's max) or bon (bon's own exec::eq)
+#   BEHAVIORS      kernel: code edits also set pick, index % BEHAVIORS of them
+#                  to b (trunk's is a; the spec allows both): verified
+#                  candidates that behave differently [1]
+#   CX_MODE        kernel: the tests counterexample stubs write [blind]
+#                    blind  max only, as the spec says: they accept every
+#                           correct max, whatever pick does
+#                    split  pick 1 2 = 2 (variant 0 alone; the rest max too):
+#                           they tell the behaviors apart
+#                    few    blind, but only index 0's builds
 set -u
 . ./.bon/stub.env
 prompt=$(cat)
@@ -64,6 +73,7 @@ case "$kind" in
       *) fix='    if a < b { b } else { a }' ;;
     esac
     sed -i '' "s/^    if a > b { a } else { a }\$/$fix/" src/lib.rs
+    if [ $((index % ${BEHAVIORS:-1})) -eq 1 ]; then sed -i '' 's/^    a$/    b/' src/lib.rs; fi
     # Past four, a variant is the same fix with its own comment: its own tree.
     if [ "$v" -ge 4 ]; then echo "// variant $v" >> src/lib.rs; fi
     ;;
@@ -73,15 +83,25 @@ case "$kind" in
     ;;
   counterexample)
     v=$((index % TEST_VARIANTS))
+    mode=${CX_MODE:-blind}
     mkdir -p tests
     {
       echo "// A blind test of max (variant $v)."
-      echo "#[test]"
-      echo "fn smaller_first() { assert_eq!(kernel::max(1, 2), 2); }"
+      # split: variant 0 tests pick alone (the smallest test, so the one that
+      # lands); the others max too, so they reject a foil once pick is settled.
+      if [ "$mode" != split ] || [ "$v" -ne 0 ]; then
+        echo "#[test]"
+        echo "fn smaller_first() { assert_eq!(kernel::max(1, 2), 2); }"
+      fi
       if [ "$v" -ne 0 ]; then
         echo "#[test]"
         echo "fn equal() { assert_eq!(kernel::max($v, $v), $v); }"
       fi
+      if [ "$mode" = split ]; then
+        echo "#[test]"
+        echo "fn picks_the_second() { assert_eq!(kernel::pick(1, 2), 2); }"
+      fi
+      if [ "$mode" = few ] && [ "$index" -ne 0 ]; then echo "fn does_not_build() -> u64 { }"; fi
     } > tests/counterexample.rs
     ;;
 esac

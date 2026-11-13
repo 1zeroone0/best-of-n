@@ -351,6 +351,8 @@ fn step_parts(g: &GoalTrace) -> Vec<(&'static str, String)> {
             ("pushed", _) => "None found".into(),
             _ if ce.verified < 2 => format!("{} of 2 tests verified", ce.verified),
             (_, Some(d)) if d < 2 => format!("{d} of 2 tests reject a foil"),
+            // Candidates that disagree, and tests that judged them all without telling them apart.
+            _ if m.reason.as_deref() == Some("undecided") => "None splits them".into(),
             _ => "None found".into(),
         }));
     }

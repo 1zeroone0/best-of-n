@@ -40,7 +40,15 @@ kind:
   `VARIANTS` write byte-identical trees;
 - **foil**: puts the wrong body back: the tests accept it, Verus does not;
 - **counterexample**: writes a test that the right `max` passes and the
-  foil fails, one of `TEST_VARIANTS` ways.
+  foil fails, one of `TEST_VARIANTS` ways (`CX_MODE` says which tests).
+
+Its reply begins at once: it prints a line before it sleeps, as a model's
+first token comes before its last (bon starts a search's other agent
+processes at its first one's first output).
+
+The sandbox's `pick(a, b)` may return either (its spec says so); trunk's
+returns `a`, and with `BEHAVIORS=2` half the code stubs make it `b`: two
+behaviors, both verified, for the disagreement path.
 
 A code or foil stub then runs `cargo test` and `cargo verus verify` itself `K`
 times, as an agent iterating does.
@@ -74,6 +82,9 @@ small, so a warm check is seconds.
 | `K` | 1 | times each stub runs the checks itself |
 | `VARIANTS` | 4 | distinct code edits |
 | `TEST_VARIANTS` | 2 | distinct counterexample tests |
+| `BEHAVIORS` | 1 | kernel: code stubs set `pick` to `b` at every index ≡ 1 (mod it): verified candidates that behave differently |
+| `CX_MODE` | `blind` | kernel: counterexample stubs' tests: `blind` (max only), `split` (pick 1 2 = 2; variant 0 that alone), `few` (only index 0's builds) |
+| `ATTEMPTS` | 1 | attempts `bon code` may make, each WIDTH wide |
 | `TIME` | 1800 | each agent process's time limit |
 | `PROJECT` | `kernel` | `kernel` (bench/sandbox) or `bon` (bon's own source) |
 | `BON` | `target/debug/bon` | the binary (built first when unset) |

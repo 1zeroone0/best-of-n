@@ -474,7 +474,9 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
             generation_all += s["generation"].as_f64().unwrap_or(0.0);
             time_all += s["time_cost"].as_f64().unwrap_or(0.0);
         }
-        let main = searches.iter().find(|s| s["kind"] != "counterexample" && s["kind"] != "foil").or(searches.first());
+        // The code or compaction search of the attempt that ended it (an earlier
+        // attempt's may have disagreed, and landed a test), else the first search.
+        let main = searches.iter().rev().find(|s| s["kind"] != "counterexample" && s["kind"] != "foil").or(searches.first());
         let tally = |s: &Value| format!("{} of {} verified",
             s["verified"].as_u64().unwrap_or(0), count(s["returned"].as_u64().unwrap_or(0) as usize, "candidate", "candidates"));
         // One sentence in plain words, each spec word qualified.
