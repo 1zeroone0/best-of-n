@@ -102,6 +102,8 @@ class Projection(TypedDict):
     queue: list[QueueLine] | None
     # Queue proposals waiting for engineer: patches bon queue wrote.
     proposals: list[Proposal]
+    # What only engineer can answer, oldest first: pending, then resolved.
+    interrupts: list[Interrupt]
     # Intents no longer on the queue, and the commit that took each off, newest first.
     retired: list[Retired]
     # What no search may change: bon's directory, the checks, trusted code.
@@ -168,6 +170,82 @@ class Totals(TypedDict):
     # Time and cost to a push, by kind, and each search's as a fixed part
     # plus a part per distinct tree.
     run_time: list[RunTime]
+    # Interrupt turnaround, by kind.
+    turnaround: list[Turnaround]
+
+# One kind of interrupt's turnaround: of its interrupts, how many resolved
+# and how many are pending, and the seconds from raised to resolved of those
+# that resolved, as median and 90th percentile.
+class Turnaround(TypedDict):
+    kind: str
+    resolved: int
+    pending: int
+    time: Spread
+
+# Every record a bon process writes, in one shape: what ran (program), what
+# it was given (context), what it returned (output), how it was judged
+# (verdict) and which behavior its output showed (behavior). An agent
+# process: its program, its prompt, its candidate's commit, what its checks
+# said (proved, accepted, rejected), its agree outputs' hashes. A check: its
+# command, the tree it ran on, its output, its exit, its output's hash. A
+# decision: engineer, what the interrupt showed, the commit that answered it,
+# what came of it, the choice it showed.
+class Record(TypedDict):
+    program: str | None
+    context: str | None
+    output: str | None
+    verdict: str | None
+    behavior: str | None
+
+# What only engineer can answer, derived from the traces and never stored:
+# pending until the action that answers it, which bon recognises from what is
+# already recorded; there is no dismiss. Kinds: `proposal` (a queue proposal
+# awaiting acceptance), `blocked` (an attempt blocked with its width list or
+# its limit spent), `transcript` (a transcript the host file routes nowhere).
+class Interrupt(TypedDict):
+    kind: str
+    # The kind and what it is about: `blocked <trace>`, `proposal <source>`, `transcript <sha256>`.
+    id: str
+    # The repository's name, and its root.
+    repository: str
+    root: str
+    # What it is about: a goal's title, a proposal's source, a transcript.
+    about: str
+    # A block's reason, by the kernel's word; `limit` for a limit spent.
+    reason: str | None
+    raised: int
+    resolved: int | None
+    # What happened, in a line or two, from the trace.
+    what: list[str]
+    # What engineer may do, and what each costs.
+    choices: list[Choice]
+    # The action that resolved it.
+    answer: Answer | None
+    # What came of it: how the first bon process of its kind after it ended;
+    # for a proposal it accepted, whether its intents are still queued.
+    came_of_it: str | None
+    # Its decision record, once bon has written it; its verdict is what came of it.
+    decision: Record | None
+    # The transcript of the session that answered it, by path and SHA-256.
+    transcript: Transcript | None
+
+# One choice: its name, how it is made, and what it costs, from the traces.
+class Choice(TypedDict):
+    choice: str
+    how: str
+    cost: str
+
+# The action that answered an interrupt: its commit, if it was one, and its
+# subject, or a later attempt's trace; and which choice it showed.
+class Answer(TypedDict):
+    commit: str | None
+    subject: str
+    choice: str
+
+# A pointer to a transcript, and its hash.
+class Transcript(TypedDict):
+    path: str
+    sha256: str
 
 # One kind's success probability, over every attempt (`attempt` none) or
 # over each bon process's attempt-th attempt and the searches on it: per
@@ -437,6 +515,8 @@ class Facts(TypedDict):
     accepts: list[tuple[int, bool]]
     # A test's verdict on each foil it ran on, by index in the foil search.
     accepts_foils: list[tuple[int, bool]]
+    # It, in the one shape every record has.
+    record: Record
 
 # A queue proposal: a patch adding intents, each with the cue it came from.
 class Proposal(TypedDict):

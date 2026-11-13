@@ -1649,7 +1649,7 @@ fn answer(config: &Config, on: &On, command: &str, log: &std::path::Path) -> Opt
     if on.cache != Cache::Use { return None; }
     let key = verdict_key(config, on, command)?;
     let (ok, stdout, text) = cached(&key)?;
-    write_trace(log, format!("cached: {key}\n{text}"));
+    write_trace(log, format!("cached: {key}\n{}", check_record(command, on, &text, &stdout)));
     decided(on, command, ok, &stdout, log);
     Some((ok, stdout))
 }
@@ -1685,7 +1685,7 @@ fn run_check_with(config: &Config, on: &On, threads: usize, dir: &std::path::Pat
     if let Some((ok, out)) = key.as_deref().and_then(|_| answer(config, on, command, log)) { return (ok, out, false); }
     // A judge's build is made now, when a check must run in it.
     if !ensure_build(config, target) {
-        write_trace(log, format!("no build directory: {} could not be made", target.display()));
+        write_trace(log, check_record(command, on, &format!("no build directory: {} could not be made", target.display()), ""));
         return (false, String::new(), false);
     }
     let argv = vec!["/bin/sh".to_string(), "-c".to_string(), command.to_string()];
@@ -1698,13 +1698,30 @@ fn run_check_with(config: &Config, on: &On, threads: usize, dir: &std::path::Pat
         None => Some(Slot::check(config)),
     });
     let started = Instant::now();
-    let r = supervised(c, None, Duration::from_secs(config.checks.time), log, None);
+    let mut r = supervised(c, None, Duration::from_secs(config.checks.time), log, None);
     RAN.with(|s| s.set(started.elapsed().as_secs_f64()));
+    r.log = check_record(command, on, &r.log, &r.stdout);
+    write_trace(log, &r.log);
     if r.exited && on.cache != Cache::Off {
         if let Some(k) = &key { if dependencies(config, &on.tree, true) == before { store(k, r.ok, &r.stdout, &r.log); } }
         decided(on, command, r.ok, &r.stdout, log);
     }
     (r.ok && !r.killed, r.stdout, r.killed)
+}
+
+/// A check's log in the one trace shape (README, "The trace"): its head says
+/// how it was judged (`exit:`, the verdict) and how long it ran, then what ran
+/// (`program:`, the command), what it was given (`context:`, the tree, and the
+/// test written into it) and which behavior its output showed (`behavior:`,
+/// its stdout hashed as an agree check's is); its output follows. A log that
+/// already says them (a cached run's) is left as it is.
+fn check_record(command: &str, on: &On, log: &str, stdout: &str) -> String {
+    if log.lines().take(5).any(|l| l.starts_with("program: ")) { return log.to_string(); }
+    let context = match on.test { Some((path, _)) => format!("{} + {path}", on.tree), None => on.tree.clone() };
+    let shape = format!("program: {}\ncontext: {context}\nbehavior: {}\n", command.split_whitespace().collect::<Vec<_>>().join(" "), hash(stdout));
+    let lines: Vec<&str> = log.split_inclusive('\n').collect();
+    let at = lines.iter().position(|l| l.starts_with("seconds: ")).map_or(0, |i| i + 1);
+    format!("{}{}{shape}{}", lines[..at].concat(), if at > 0 && !lines[at - 1].ends_with('\n') { "\n" } else { "" }, lines[at..].concat())
 }
 
 // ── what decided a candidate ────────────────────────────
@@ -1881,7 +1898,7 @@ fn suite_seconds(config: &Config, on: &On, dir: &std::path::Path, build: &std::p
         let one = key.as_deref().map(flight);
         let _one = one.as_ref().map(|f| f.lock().unwrap_or_else(|e| e.into_inner()));
         if let Some((s, k)) = key.as_ref().and_then(|k| cached(k).and_then(|(_, s, _)| s.parse::<f64>().ok()).map(|s| (s, k))) {
-            write_trace(&log, format!("cached: {k}\nseconds: {s:.3}\n"));
+            write_trace(&log, format!("cached: {k}\n{}", check_record(command, on, &format!("seconds: {s:.3}\n"), "")));
             total += s;
             continue;
         }
@@ -2021,7 +2038,7 @@ const FAILING_BYTES: usize = 12_000;
 fn informative(log: &str) -> String {
     let log = log.strip_prefix("cached: ").map_or(log, |t| t.split_once('\n').map_or("", |(_, r)| r));
     let exit = log.lines().next().unwrap_or("").to_string();
-    let output: Vec<&str> = log.lines().filter(|l| !l.starts_with("seconds: ") && !l.starts_with("exit: ") && !l.starts_with("--- std")).collect();
+    let output: Vec<&str> = log.lines().filter(|l| !["seconds: ", "exit: ", "--- std", "program: ", "context: ", "behavior: "].iter().any(|h| l.starts_with(h))).collect();
     let mut errors: Vec<&str> = Vec::new();
     let mut inside = false;
     for l in &output {
@@ -2899,8 +2916,55 @@ fn agent_process(m: &Manifest, kind: &Kind, search: usize, index: usize, p: &Pro
             "intents": c.intents.iter().map(|(q, i)| (q, text(i))).collect::<Vec<_>>(),
         })),
     });
+    let facts = agent_process_record(facts, candidate.as_ref());
     write_trace(&trace.join("facts.json"), serde_json::to_string_pretty(&facts).unwrap_or_default());
     (candidate, spent)
+}
+
+// ── the one trace shape ─────────────────────────────────
+//
+// Every record a bon process writes says, under these five keys, what ran
+// (program), what it was given (context), what it returned (output), how it
+// was judged (verdict) and which behavior its output showed (behavior); the
+// README's "The trace" says where each lives in each record.
+
+/// An agent process's facts in the one shape: its program (already there),
+/// the prompt it was given (`context`, the trace file), the commit it returned
+/// (`output`), what its checks said (`verdict`: proved, accepted, rejected; none
+/// when it returned no candidate) and its agree outputs' hashes (`behavior`).
+fn agent_process_record(mut facts: serde_json::Value, candidate: Option<&Candidate>) -> serde_json::Value {
+    let verdict = candidate.map(|c| if !c.accepted { "rejected" } else if c.proved { "proved" } else { "accepted" });
+    let behavior = candidate.filter(|c| !c.out.is_empty()).map(|c| c.out.iter().map(|h| h.0.to_string()).collect::<Vec<_>>().join(","));
+    facts["context"] = "prompt".into();
+    facts["output"] = candidate.map(|c| c.commit.iter().collect::<String>()).into();
+    facts["verdict"] = verdict.into();
+    facts["behavior"] = behavior.into();
+    facts
+}
+
+/// Where a repository's decision records are: one line each, in the one shape.
+pub const DECISIONS: &str = ".bon/traces/decisions.jsonl";
+
+/// Record an interrupt's resolution, as the view derived it (`record`, in the
+/// one shape: engineer as its program, what the interrupt showed as its
+/// context, the answering commit as its output, the choice it showed as its
+/// behavior; what came of it, its verdict, is derived later), with a pointer to
+/// the transcript of the session that answered it and the transcript's SHA-256,
+/// never its content: `transcript` is the path the session gave bon pending,
+/// none when engineer answered by hand. Appended to the repository's
+/// decisions.jsonl.
+pub fn record_decision(root: &std::path::Path, mut record: serde_json::Value, transcript: Option<&std::path::Path>) -> Result<(), String> {
+    record["transcript"] = match transcript {
+        Some(t) => {
+            let bytes = std::fs::read(t).map_err(|e| format!("{}: {e}", t.display()))?;
+            let path = std::fs::canonicalize(t).unwrap_or_else(|_| t.to_path_buf());
+            serde_json::json!({ "path": path.to_string_lossy(), "sha256": Sha256::digest(&bytes).iter().map(|b| format!("{b:02x}")).collect::<String>() })
+        }
+        None => serde_json::Value::Null,
+    };
+    record["time"] = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs()).into();
+    append_line(&root.join(DECISIONS), &record.to_string());
+    Ok(())
 }
 
 /// Record the working directory as a commit whose parent is `start`, then
@@ -3339,6 +3403,19 @@ pub fn parse_cue(t: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_check_log_says_the_one_shape_once() {
+        let on = super::On { tree: "t1".into(), test: Some(("tests/x.rs", b"")), cache: super::Cache::Off };
+        let log = "exit: 0\nseconds: 1.0\n--- stdout\nok\n--- stderr\n";
+        let shaped = super::check_record("cargo   test -q", &on, log, "ok\n");
+        assert!(shaped.starts_with(&format!("exit: 0\nseconds: 1.0\nprogram: cargo test -q\ncontext: t1 + tests/x.rs\nbehavior: {}\n--- stdout\nok\n", super::hash("ok\n"))), "{shaped}");
+        // Shaped again (a cached run's log), it is left as it is; a log with no head gets one at its top.
+        assert_eq!(super::check_record("other", &on, &shaped, ""), shaped);
+        assert!(super::check_record("c", &on, "no build directory", "").starts_with("program: c\ncontext: t1 + tests/x.rs\n"));
+        // What reads a log's seconds reads its first two lines: they stay where they were.
+        assert_eq!(shaped.lines().take(2).collect::<Vec<_>>(), ["exit: 0", "seconds: 1.0"]);
+    }
 
     #[test]
     fn slots_are_shared_and_a_dead_holders_slot_is_free() {

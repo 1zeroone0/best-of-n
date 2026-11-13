@@ -7,6 +7,7 @@ use std::process::Command;
 use best_of_n::process;
 
 mod account;
+mod interrupt;
 mod new;
 mod projection;
 mod tui;
@@ -28,6 +29,8 @@ const USAGE: &str = "usage:
                           create user agent and group bon, and let <user> (default: you) run commands as agent;
                           run it as an administrator
   bon account [--check]   write what is proven, trusted, configured and tested, as OSCAL with its SBOM, or fail if it is stale
+  bon pending [--transcript FILE]
+                          what only you can answer, oldest first: what happened, the choices and what each costs
   bon types [--check]     write the types programs are built on, or fail if one is stale
   bon spec [NAME]         the spec's vocabulary and how it reaches the code, or one item
   bon check               every check on the working tree, as agent, the way candidates are judged
@@ -122,6 +125,7 @@ fn dispatch(root: &str, args: &[String]) -> Result<(), String> {
         Some("types") => types::run(&root, args.get(1).map(String::as_str) == Some("--check")),
         Some("spec") => { print!("{}", tui::spec_text(&root, args.get(1).map(String::as_str), 100)?); Ok(()) }
         Some("check") => check(&root),
+        Some("pending") => interrupt::run(&root, args),
         Some("cost") => { let p = projection::read(Path::new(&root), &view::Filter::default())?; let t = cost_toml(&p);
             std::fs::write(Path::new(&root).join(".bon/cost.toml"), &t).map_err(|e| e.to_string())?; print!("{t}"); Ok(()) }
         Some("help" | "-h" | "--help") => { println!("{USAGE}"); Ok(()) }

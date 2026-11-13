@@ -276,6 +276,7 @@ at a time.
 | what reaching trunk cost | `bon cost` writes `.bon/cost.toml` (bon does after each push) |
 | a new project | `bon new <name>` |
 | before a search, a commit or a push | `bon check` |
+| a session starts, or the owner answered something | `bon pending --transcript <this session's transcript file>`: what only the owner can answer, with its choices and costs; exit 2 while any is pending; it records each answer it sees for the first time |
 
 **A run's settings** (`n`, roles, limits) are read from `.bon/bon.toml`
 at trunk's head: edit it, commit and push, then run. Each run's settings stay
@@ -401,6 +402,13 @@ when an earlier bon process of the same pid left a trace.
   and its `evidence`; a candidate kept as evidence is
   `.bon/traces/<pid>/<search>/<index>/candidate.bundle`.
 - `.bon/traces/proposals/<name>.patch`: each queue proposal.
+- Every record has one shape (README, "The trace"): `program`, `context`,
+  `output`, `verdict`, `behavior`; a check log's head says `exit:`,
+  `seconds:`, `program:`, `context:` and `behavior:`.
+- `.bon/traces/decisions.jsonl`: each resolved interrupt's decision record:
+  its `interrupt` id, `raised`, `resolved`, the answering commit (`output`),
+  the choice it showed (`behavior`), and `transcript` (`path`, `sha256`).
+  Interrupts themselves are never stored: `bon view --state` derives them.
 - `bon view --state`: the projection, as JSON.
 
 ## Never
