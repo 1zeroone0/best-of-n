@@ -502,20 +502,30 @@ fn working_directory_except(root: &std::path::Path, config: &Config, commit: &st
     // The checks, their build configuration, the transcripts and .bon/: agent may read them, never change them.
     let transcripts = config.transcripts.clone().unwrap_or("transcripts".into());
     let fixed: Vec<String> = BUILD.iter().map(|p| p.to_string()).chain([transcripts, BON.to_string()]).collect();
+    // Every protected path at once: one chmod each, not one per path.
+    let (mut targets, mut ancestors): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
     for p in config.checks.paths.iter().chain(fixed.iter()).chain(more.iter()) {
         if writable.is_some_and(|w| w.starts_with(p.trim_end_matches('/'))) { continue; }
         let target = dir.join(p.trim_end_matches('/'));
         if !target.exists() { continue; }
-        let t = target.to_string_lossy().to_string();
-        sh(dir, "chmod", &["-R", "g-w", &t])?;
-        sh(dir, "chmod", &["-R", "+a", "user:agent deny write,append,delete,writeattr,writeextattr,writesecurity,chown,add_file,add_subdirectory,delete_child", &t])?;
+        targets.push(target.to_string_lossy().to_string());
         // Its ancestors cannot be renamed or deleted out from under it.
         let mut a = target.parent();
         while let Some(d) = a {
             if d == dir || !d.starts_with(dir) { break; }
-            sh(dir, "chmod", &["+a", "user:agent deny delete", &d.to_string_lossy()])?;
+            let s = d.to_string_lossy().to_string();
+            if !ancestors.contains(&s) { ancestors.push(s); }
             a = d.parent();
         }
+    }
+    if !targets.is_empty() {
+        let t: Vec<&str> = targets.iter().map(String::as_str).collect();
+        sh(dir, "chmod", &[&["-R", "g-w"][..], &t].concat())?;
+        sh(dir, "chmod", &[&["-R", "+a", "user:agent deny write,append,delete,writeattr,writeextattr,writesecurity,chown,add_file,add_subdirectory,delete_child"][..], &t].concat())?;
+    }
+    if !ancestors.is_empty() {
+        let a: Vec<&str> = ancestors.iter().map(String::as_str).collect();
+        sh(dir, "chmod", &[&["+a", "user:agent deny delete"][..], &a].concat())?;
     }
     Ok(())
 }
