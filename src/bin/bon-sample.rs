@@ -1,16 +1,18 @@
-//! bon-sample: an agent process that is one sample. Context in, edits out:
+//! bon-sample: a program that makes one model call. Context in, edits out:
 //! it reads the task on stdin, sends the working directory's files and the task
 //! to a model in one request, applies the edit blocks of the one reply, and
 //! prints the reply and a usage line. bon does all the checking.
 //!
-//! usage: bon-sample --via api|claude|codex --model <id>
-//!                   [--max-context-bytes N] [--max-file-bytes N] [--max-output-tokens N] [--effort LEVEL]
+//! usage: bon-sample --model <id> [--max-file-bytes N] [--max-output-tokens N] [--effort LEVEL]
 //!
-//! Environment: BON_ANTHROPIC_KEY_FILE (default /Users/agent/.config/bon/anthropic.key),
-//! BON_ANTHROPIC_BASE_URL (default https://api.anthropic.com), and, for tests,
-//! BON_SAMPLE_CLAUDE / BON_SAMPLE_CODEX (the program to run for those transports).
+//! What its role says beyond its argv, bon gives it in its environment:
+//! BON_CLIENT, how it reaches the model (api, claude or codex: each through
+//! the program of that name on PATH, curl for the api); BON_CONTEXT, the
+//! largest prompt in tokens its one request may be (the instructions, the
+//! files and the task together); and BON_HOST, the host file, whose
+//! [api] says where the Messages API is and which file holds its key.
 //!
-//! Unverified edge code, like the harness CLIs it stands in for: what it
+//! Unverified edge code, like the CLIs it stands in for: what it
 //! writes is judged by bon's checks, never trusted.
 
 // Nothing here is verified, but `cargo verus verify` builds every target of
@@ -23,16 +25,21 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const USAGE: &str = "usage: bon-sample --via api|claude|codex --model <id> [--max-context-bytes N] [--max-file-bytes N] [--max-output-tokens N] [--effort LEVEL]";
+const USAGE: &str = "usage: bon-sample --model <id> [--max-file-bytes N] [--max-output-tokens N] [--effort LEVEL] (BON_CLIENT, BON_CONTEXT and BON_HOST from bon)";
 const API_VERSION: &str = "2026-10-21";
-const DEFAULT_KEY_FILE: &str = "/Users/agent/.config/bon/anthropic.key";
-const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
-/// Under 100k tokens of code (about 2.4 bytes a token, measured on this
-/// repository): past that, Haiku 5.5's input price steps up fivefold.
-const DEFAULT_CONTEXT_BYTES: usize = 220_000;
+/// The host file when BON_HOST names none.
+const HOST: &str = "/etc/bon/host.toml";
+/// The largest prompt, in tokens, when the role names no context: under
+/// Haiku 5.5's tier line (100,000 tokens, past which every price is five
+/// times) with margin.
+const DEFAULT_CONTEXT_TOKENS: usize = 80_000;
+/// Bytes counted per token of the budget: fewer than the 2.4 measured on this
+/// repository's code, so a prompt held to the budget in bytes stays under it
+/// in tokens (80,000 tokens are 160,000 bytes, about 67,000 measured tokens).
+const BYTES_PER_TOKEN: usize = 2;
 const DEFAULT_FILE_BYTES: usize = 160_000;
 const DEFAULT_OUTPUT_TOKENS: u64 = 16_000;
-/// Where codex runs: empty, and the same for every sample.
+/// Where codex runs: empty, and the same for every agent process.
 const CODEX_DIR: &str = "/var/empty";
 /// Directories never sent: build output, dependencies, version control.
 const SKIP_DIRS: [&str; 6] = [".git", "target", "node_modules", ".venv", "__pycache__", ".cargo"];
@@ -40,7 +47,7 @@ const LOCKFILES: [&str; 10] = ["Cargo.lock", "package-lock.json", "yarn.lock", "
                                "poetry.lock", "uv.lock", "Gemfile.lock", "composer.lock", "flake.lock"];
 
 /// The output format, first in the stable prefix.
-const INSTRUCTIONS: &str = "You are one sample among many. You see a repository's files and a task, and you reply once, \
+const INSTRUCTIONS: &str = "You see a repository's files and a task, and you reply once, \
 with edits. You cannot run commands, open other files or ask questions: whatever the task says about reading or \
 running the checks, they run on your edits after you reply.
 
@@ -56,33 +63,39 @@ Reply with edit blocks in exactly this format, and after them one line saying wh
 - SEARCH must match the file byte for byte, whitespace included, and occur exactly once in it.
 - An empty SEARCH writes the whole file: it creates a new file, or replaces an existing one with exactly the REPLACE text.
 - Several blocks may name one file; they apply in order, each to the result of the one before.
-- If any block does not apply, none does, and the sample counts for nothing.
+- If any block does not apply, none does, and your reply changes nothing.
 - Paths are relative, never absolute, and never contain `..`.
 - Marker lines start with `@@@ ` at the start of a line. Do not put the blocks in code fences.
 - Keep each SEARCH short: a few lines around the change.
 ";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Via { Api, Claude, Codex }
+enum Client { Api, Claude, Codex }
 
 #[derive(Debug)]
-struct Args { via: Via, model: String, max_context: usize, max_file: usize, max_output: u64, effort: Option<String> }
+struct Args { client: Client, model: String, max_context: usize, max_file: usize, max_output: u64, effort: Option<String> }
 
-fn parse_args(argv: &[String]) -> Result<Args, String> {
-    let mut a = Args { via: Via::Api, model: String::new(), max_context: DEFAULT_CONTEXT_BYTES, max_file: DEFAULT_FILE_BYTES,
-                       max_output: DEFAULT_OUTPUT_TOKENS, effort: None };
-    let mut via = None;
+type Env<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+/// The arguments, and what bon gave in the environment: the client and the context budget.
+fn parse_args(argv: &[String], env: Env) -> Result<Args, String> {
+    let client = match env("BON_CLIENT").as_deref() {
+        Some("api") => Client::Api, Some("claude") => Client::Claude, Some("codex") => Client::Codex,
+        Some(c) => return Err(format!("BON_CLIENT: unknown client {c}; api, claude or codex")),
+        None => return Err(format!("BON_CLIENT is not set: bon sets it from the role's client\n{USAGE}")),
+    };
+    let tokens = match env("BON_CONTEXT") {
+        Some(v) => v.parse::<usize>().map_err(|_| format!("BON_CONTEXT: not a number: {v}"))?,
+        None => DEFAULT_CONTEXT_TOKENS,
+    };
+    let max_context = tokens.saturating_mul(BYTES_PER_TOKEN);
+    let mut a = Args { client, model: String::new(), max_context, max_file: DEFAULT_FILE_BYTES, max_output: DEFAULT_OUTPUT_TOKENS, effort: None };
     let mut it = argv.iter();
     while let Some(flag) = it.next() {
         let mut value = || it.next().cloned().ok_or(format!("{flag} needs a value"));
         let number = |v: String| v.parse::<u64>().map_err(|_| format!("{flag}: not a number: {v}"));
         match flag.as_str() {
-            "--via" => via = Some(match value()?.as_str() {
-                "api" => Via::Api, "claude" => Via::Claude, "codex" => Via::Codex,
-                v => return Err(format!("--via: unknown transport {v}")),
-            }),
             "--model" => a.model = value()?,
-            "--max-context-bytes" => a.max_context = number(value()?)? as usize,
             "--max-file-bytes" => a.max_file = number(value()?)? as usize,
             "--max-output-tokens" => a.max_output = number(value()?)?,
             "--effort" => a.effort = Some(value()?),
@@ -90,18 +103,26 @@ fn parse_args(argv: &[String]) -> Result<Args, String> {
             f => return Err(format!("unknown argument {f}\n{USAGE}")),
         }
     }
-    a.via = via.ok_or(format!("--via is required\n{USAGE}"))?;
     if a.model.is_empty() { return Err(format!("--model is required\n{USAGE}")); }
     Ok(a)
+}
+
+/// The host file's [api]: (address, key file).
+fn api(env: Env) -> Result<(String, String), String> {
+    let file = env("BON_HOST").unwrap_or_else(|| HOST.into());
+    let host: toml::Value = toml::from_str(&std::fs::read_to_string(&file).map_err(|e| format!("{file}: {e}"))?).map_err(|e| format!("{file}: {e}"))?;
+    let key = |k: &str| host.get("api").and_then(|a| a.get(k)).and_then(|v| v.as_str()).map(String::from)
+        .ok_or(format!("{file}: [api] has no {k}"));
+    Ok((key("address")?, key("key_file")?))
 }
 
 // ── context ─────────────────────────────────────────────
 
 /// The request's stable part: the format, then the files. A function of the
-/// tree and the paths the task names, so the N samples of a search send it
-/// byte for byte the same.
+/// tree and the paths the task names, so the agent processes of a search send
+/// it byte for byte the same.
 #[derive(Debug, PartialEq)]
-struct Context { repository: String, included: Vec<String>, omitted: Vec<(String, &'static str)> }
+struct Context { repository: String, included: Vec<String>, omitted: Vec<(String, &'static str)>, fixed: Vec<String> }
 
 /// Every file under `root`, relative, '/'-separated, sorted by bytes. Symlinks
 /// and the skipped directories are not followed.
@@ -127,7 +148,8 @@ fn tree(root: &Path) -> Vec<String> {
 
 /// The files the task names (a file, or a directory's files), in the order the
 /// task first names them. Only path-like tokens count, with a `/` or a `.`, so
-/// a word such as "checks" does not pull in a directory of that name.
+/// a word such as "checks" does not pull in a directory of that name; a
+/// location a compiler or Verus prints (`src/exec.rs:1300:5`) names its file.
 fn named(prompt: &str, files: &[String]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let path_char = |c: char| c.is_ascii_alphanumeric() || "_./-".contains(c);
@@ -142,32 +164,52 @@ fn named(prompt: &str, files: &[String]) -> Vec<String> {
     out
 }
 
+/// Whether this process may write `p`: the checks and what else bon protects
+/// are read-only to agent in its working directory. Opened for writing, never written.
+fn writable(p: &Path) -> bool { std::fs::OpenOptions::new().write(true).open(p).is_ok() }
+
+/// The files in the request: the ones the task names first, each in full,
+/// then the rest that fit. A named file is never dropped for the budget while
+/// an unnamed one is kept: once a named file does not fit, no unnamed file
+/// comes; nor does the per-file cap apply to a named file. It says which files
+/// may not be changed.
 fn context(root: &Path, prompt: &str, max_context: usize, max_file: usize) -> Context {
     let files = tree(root);
     let first = named(prompt, &files);
-    let order = first.iter().chain(files.iter().filter(|f| !first.contains(f)));
+    let order = first.iter().map(|f| (f, true)).chain(files.iter().filter(|f| !first.contains(f)).map(|f| (f, false)));
     let (mut included, mut omitted, mut body, mut total) = (Vec::new(), Vec::new(), String::new(), 0usize);
-    for f in order {
+    let mut named_dropped = false;
+    for (f, is_named) in order {
         let name = f.rsplit('/').next().unwrap_or(f);
         if LOCKFILES.contains(&name) { omitted.push((f.clone(), "lockfile")); continue; }
         let size = std::fs::metadata(root.join(f)).map(|m| m.len() as usize).unwrap_or(usize::MAX);
-        if size > max_file { omitted.push((f.clone(), "over the per-file cap")); continue; }
+        if !is_named && size > max_file { omitted.push((f.clone(), "over the per-file cap")); continue; }
         let Ok(bytes) = std::fs::read(root.join(f)) else { omitted.push((f.clone(), "unreadable")); continue };
         let Ok(text) = String::from_utf8(bytes) else { omitted.push((f.clone(), "binary")); continue };
         if text.contains('\0') { omitted.push((f.clone(), "binary")); continue; }
-        if total + text.len() > max_context { omitted.push((f.clone(), "over the context budget")); continue; }
+        if total + text.len() > max_context || (!is_named && named_dropped) {
+            named_dropped |= is_named;
+            omitted.push((f.clone(), "over the context budget"));
+            continue;
+        }
         total += text.len();
         body.push_str(&format!("<file path=\"{f}\">\n{text}{}</file>\n", if text.ends_with('\n') || text.is_empty() { "" } else { "\n" }));
         included.push(f.clone());
     }
+    let fixed: Vec<String> = files.iter().filter(|f| !writable(&root.join(f))).cloned().collect();
     let mut repository = format!("<repository>\nThe working directory's files, each in full ({} shown, {total} bytes).\n{body}", included.len());
     if !omitted.is_empty() {
         repository.push_str("Files not shown: ");
         repository.push_str(&omitted.iter().map(|(f, why)| format!("{f} ({why})")).collect::<Vec<_>>().join(", "));
         repository.push('\n');
     }
+    if !fixed.is_empty() {
+        repository.push_str("You cannot change these files (the checks, and what else bon protects): an edit to any of them is refused: ");
+        repository.push_str(&fixed.join(", "));
+        repository.push('\n');
+    }
     repository.push_str("</repository>\n");
-    Context { repository, included, omitted }
+    Context { repository, included, omitted, fixed }
 }
 
 // ── edits ───────────────────────────────────────────────
@@ -308,8 +350,6 @@ struct Failure { why: String, spent: Option<Reply> }
 
 impl From<String> for Failure { fn from(why: String) -> Self { Failure { why, spent: None } } }
 
-type Env<'a> = &'a dyn Fn(&str) -> Option<String>;
-
 /// The usage line, shaped like the Claude CLI's final `result` event. No
 /// `costUSD`: this transport knows no price, and bon prices the tokens itself.
 /// `requests`: one, so bon can apply a price's tier for a large prompt.
@@ -366,14 +406,21 @@ fn run_streaming(mut c: Command, stdin: &str, line: &mut dyn FnMut(&str)) -> Res
     Ok((status.success(), out, errors.join().unwrap_or_default()))
 }
 
+/// A program on the PATH the environment gives (bon's, or a test's).
+fn on_path(program: &str, env: Env) -> Command {
+    let mut c = Command::new(program);
+    if let Some(p) = env("PATH") { c.env("PATH", p); }
+    c
+}
+
 /// The Messages API through curl: the key and the body go on curl's stdin as
 /// its config, never in argv. The stable prefix is the system prompt, with a
-/// cache breakpoint at its end; the task is the user turn.
+/// cache breakpoint at its end; the task is the user turn. Where the API is
+/// and the key's file are the host file's [api].
 fn via_api(a: &Args, ctx: &Context, prompt: &str, env: Env) -> Result<Reply, Failure> {
-    let key_file = env("BON_ANTHROPIC_KEY_FILE").unwrap_or_else(|| DEFAULT_KEY_FILE.into());
+    let (base, key_file) = api(env)?;
     let key = std::fs::read_to_string(&key_file).map_err(|e| format!("{key_file}: {e}"))?.trim().to_string();
     if key.is_empty() { return Err(format!("{key_file} is empty").into()); }
-    let base = env("BON_ANTHROPIC_BASE_URL").unwrap_or_else(|| DEFAULT_BASE_URL.into());
     let mut body = serde_json::json!({
         "model": a.model, "max_tokens": a.max_output,
         "system": [{ "type": "text", "text": format!("{INSTRUCTIONS}\n{}", ctx.repository), "cache_control": { "type": "ephemeral" } }],
@@ -388,7 +435,7 @@ fn via_api(a: &Args, ctx: &Context, prompt: &str, env: Env) -> Result<Reply, Fai
     let mut last = String::new();
     for attempt in 0..4u32 {
         if attempt > 0 { std::thread::sleep(std::time::Duration::from_secs(2u64 << attempt)); }
-        let mut c = Command::new("curl");
+        let mut c = on_path("curl", env);
         c.args(["-K", "-"]);
         let (ok, out, err) = run_with_stdin(c, &config)?;
         if !ok { last = format!("curl: {}", err.trim()); continue; }
@@ -414,17 +461,16 @@ fn via_api(a: &Args, ctx: &Context, prompt: &str, env: Env) -> Result<Reply, Fai
 
 /// The line bon-sample prints the moment its model's reply begins: the
 /// request was taken, so its prompt is in the provider's cache for the next
-/// sample (bon starts a search's other agent processes at its leader's first
-/// output).
+/// agent process (bon starts a search's other agent processes at its leader's
+/// first output).
 const REPLYING: &str = "bon-sample: replying";
 
 /// The Claude CLI, one shot: no tools, no settings, MCP, slash commands or
 /// session on disk. The format is the system prompt; the files then the task
-/// are the one user turn, so the prefix is the same for every sample. Its
-/// events stream, so REPLYING goes out when the reply starts.
+/// are the one user turn, so the prefix is the same for every agent process.
+/// Its events stream, so REPLYING goes out when the reply starts.
 fn via_claude(a: &Args, ctx: &Context, prompt: &str, env: Env) -> Result<Reply, Failure> {
-    let program = env("BON_SAMPLE_CLAUDE").unwrap_or_else(|| "claude".into());
-    let mut c = Command::new(program);
+    let mut c = on_path("claude", env);
     c.args(["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--model", &a.model, "--tools", "",
             "--system-prompt", INSTRUCTIONS, "--setting-sources", "", "--strict-mcp-config", "--no-session-persistence", "--disable-slash-commands"]);
     if let Some(e) = &a.effort { c.args(["--effort", e]); }
@@ -451,11 +497,10 @@ fn via_claude(a: &Args, ctx: &Context, prompt: &str, env: Env) -> Result<Reply, 
 /// `codex exec`, read-only, no session or user config; the last agent message
 /// is the reply. Codex keeps its own system prompt and tools, so it runs in an
 /// empty directory: it has nothing to look at or write, and its environment
-/// context (which names the directory) is the same for every sample, so the
-/// prefix caches. The edits are applied here, in the working directory.
+/// context (which names the directory) is the same for every agent process,
+/// so the prefix caches. The edits are applied here, in the working directory.
 fn via_codex(a: &Args, ctx: &Context, prompt: &str, env: Env) -> Result<Reply, Failure> {
-    let program = env("BON_SAMPLE_CODEX").unwrap_or_else(|| "codex".into());
-    let mut c = Command::new(program);
+    let mut c = on_path("codex", env);
     c.args(["exec", "--json", "--ephemeral", "--ignore-rules", "--ignore-user-config", "--skip-git-repo-check",
             "--sandbox", "read-only", "--color", "never", "-m", &a.model]);
     if let Some(e) = &a.effort { c.args(["-c", &format!("model_reasoning_effort=\"{e}\"")]); }
@@ -476,7 +521,7 @@ fn via_codex(a: &Args, ctx: &Context, prompt: &str, env: Env) -> Result<Reply, F
     Ok(Reply { text, usage })
 }
 
-// ── one sample ──────────────────────────────────────────
+// ── one call ────────────────────────────────────────────
 
 /// What the process prints and whether it succeeded: stdout (the reply, then
 /// the usage line last) and the reason on failure.
@@ -484,14 +529,15 @@ struct Outcome { stdout: String, error: Option<String> }
 
 fn run(argv: &[String], prompt: &str, root: &Path, env: Env) -> Outcome {
     let fail = |e: String| Outcome { stdout: String::new(), error: Some(e) };
-    let a = match parse_args(argv) { Ok(a) => a, Err(e) => return fail(e) };
-    let ctx = context(root, prompt, a.max_context, a.max_file);
+    let a = match parse_args(argv, env) { Ok(a) => a, Err(e) => return fail(e) };
+    // The files get what the budget leaves after the instructions and the task.
+    let ctx = context(root, prompt, a.max_context.saturating_sub(INSTRUCTIONS.len() + prompt.len()), a.max_file);
     eprintln!("bon-sample: context: {} files shown; not shown: {}", ctx.included.len(),
               if ctx.omitted.is_empty() { "none".to_string() } else { ctx.omitted.iter().map(|(f, why)| format!("{f} ({why})")).collect::<Vec<_>>().join(", ") });
-    let reply = match a.via {
-        Via::Api => via_api(&a, &ctx, prompt, env),
-        Via::Claude => via_claude(&a, &ctx, prompt, env),
-        Via::Codex => via_codex(&a, &ctx, prompt, env),
+    let reply = match a.client {
+        Client::Api => via_api(&a, &ctx, prompt, env),
+        Client::Claude => via_claude(&a, &ctx, prompt, env),
+        Client::Codex => via_codex(&a, &ctx, prompt, env),
     };
     let (text, usage) = match reply {
         Ok(r) => (r.text, r.usage),
@@ -628,12 +674,71 @@ mod tests {
 
     #[test]
     fn arguments() {
+        // queue 55: the client and the context budget come from the role, through bon's environment.
         let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
-        let a = parse_args(&s(&["--via", "claude", "--model", "m", "--max-context-bytes", "10"])).unwrap();
-        assert_eq!((a.via, a.model.as_str(), a.max_context), (Via::Claude, "m", 10));
-        assert!(parse_args(&s(&["--model", "m"])).is_err());
-        assert!(parse_args(&s(&["--via", "x", "--model", "m"])).is_err());
-        assert!(parse_args(&s(&["--via", "api"])).is_err());
+        let role = |k: &str| match k { "BON_CLIENT" => Some("claude".to_string()), "BON_CONTEXT" => Some("10".to_string()), _ => None };
+        let a = parse_args(&s(&["--model", "m"]), &role).unwrap();
+        assert_eq!((a.client, a.model.as_str(), a.max_context), (Client::Claude, "m", 10 * BYTES_PER_TOKEN));
+        let api = |k: &str| (k == "BON_CLIENT").then(|| "api".to_string());
+        assert_eq!(parse_args(&s(&["--model", "m"]), &api).unwrap().max_context, DEFAULT_CONTEXT_TOKENS * BYTES_PER_TOKEN);
+        // The default, at the 2.4 bytes a token measured, is under Haiku's 100,000-token tier line.
+        assert!(DEFAULT_CONTEXT_TOKENS * BYTES_PER_TOKEN * 10 / 24 < 100_000);
+        assert!(parse_args(&s(&["--model", "m"]), &|_| None).unwrap_err().contains("BON_CLIENT"));
+        assert!(parse_args(&s(&["--model", "m"]), &|k| (k == "BON_CLIENT").then(|| "x".to_string())).is_err());
+        assert!(parse_args(&s(&[]), &role).is_err());
+        assert!(parse_args(&s(&["--via", "api", "--model", "m"]), &role).is_err(), "no --via: the role says the client");
+    }
+
+    /// A host file whose [api] is `address`, its key in a file of its own: the file.
+    fn host_with_api(address: &str, key: &str) -> String {
+        let d = scratch();
+        std::fs::write(d.join("key"), key).unwrap();
+        let host = d.join("host.toml");
+        std::fs::write(&host, format!("path = []\n[api]\naddress = {address:?}\nkey_file = {:?}\n", d.join("key").to_string_lossy())).unwrap();
+        host.to_string_lossy().to_string()
+    }
+
+    /// A directory holding `name`, a program that reads its stdin and prints `lines`:
+    /// a PATH on which it is that client, the system's tools after it.
+    fn client_on_path(name: &str, lines: &[String]) -> String {
+        let d = scratch();
+        let quoted: Vec<String> = lines.iter().map(|l| format!("'{l}'")).collect();
+        std::fs::write(d.join(name), format!("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' {}\n", quoted.join(" "))).unwrap();
+        std::fs::set_permissions(d.join(name), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        format!("{}:/usr/bin:/bin", d.display())
+    }
+
+    #[test]
+    fn a_failing_check_s_locations_name_their_files_and_a_named_file_is_never_dropped_for_another() {
+        // queue 74: `src/exec.rs:1300:5` in a check's output names src/exec.rs.
+        let d = scratch();
+        write(&d, "src/a.rs", b"fn a() {}\n");
+        write(&d, "src/exec.rs", &vec![b'x'; 3000]);
+        write(&d, "src/z.rs", b"fn z() {}\n");
+        let prompt = "This check fails on trunk: cargo verus verify\nerror: postcondition not satisfied\n   --> src/exec.rs:1300:5\n";
+        let files = tree(&d);
+        assert_eq!(named(prompt, &files), ["src/exec.rs"]);
+        // Named, it comes first, past the per-file cap.
+        let c = context(&d, prompt, 10_000, 1000);
+        assert_eq!(c.included, ["src/exec.rs", "src/a.rs", "src/z.rs"]);
+        // Over the budget, it is not shown, and then neither is any file the task does not name.
+        let c = context(&d, prompt, 100, 1000);
+        assert!(c.included.is_empty(), "{:?}", c.included);
+        assert!(c.omitted.contains(&("src/exec.rs".to_string(), "over the context budget")));
+        assert!(c.omitted.contains(&("src/a.rs".to_string(), "over the context budget")));
+    }
+
+    #[test]
+    fn the_context_says_which_files_cannot_be_changed() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch();
+        write(&d, "src/spec.rs", b"spec\n");
+        write(&d, "src/lib.rs", b"lib\n");
+        std::fs::set_permissions(d.join("src/spec.rs"), std::fs::Permissions::from_mode(0o444)).unwrap();
+        let c = context(&d, "task", 10_000, 1000);
+        assert_eq!(c.fixed, ["src/spec.rs"]);
+        assert!(c.repository.contains("You cannot change these files (the checks, and what else bon protects): an edit to any of them is refused: src/spec.rs\n"));
+        std::fs::set_permissions(d.join("src/spec.rs"), std::fs::Permissions::from_mode(0o644)).unwrap();
     }
 
     /// One HTTP exchange on a local port: returns the base URL and a handle
@@ -673,9 +778,11 @@ mod tests {
                        "cache_creation": { "ephemeral_5m_input_tokens": 700, "ephemeral_1h_input_tokens": 0 } },
         });
         let (url, server) = mock("200 OK", response.to_string());
-        let key_path = key.to_string_lossy().to_string();
-        let env = move |k: &str| match k { "BON_ANTHROPIC_BASE_URL" => Some(url.clone()), "BON_ANTHROPIC_KEY_FILE" => Some(key_path.clone()), _ => None };
-        let argv: Vec<String> = ["--via", "api", "--model", "claude-haiku-5-5", "--max-output-tokens", "1000"].iter().map(|s| s.to_string()).collect();
+        let _ = key;
+        // queue 55: the address and the key's file are the host file's [api].
+        let host = host_with_api(&url, "sk-test-key\n");
+        let env = move |k: &str| match k { "BON_HOST" => Some(host.clone()), "BON_CLIENT" => Some("api".into()), _ => None };
+        let argv: Vec<String> = ["--model", "claude-haiku-5-5", "--max-output-tokens", "1000"].iter().map(|s| s.to_string()).collect();
         let prompt = "Make f return 2. The checks are [\"checks.rs\"].";
         let o = run(&argv, prompt, &d, &env);
         assert_eq!(o.error, None);
@@ -710,9 +817,10 @@ mod tests {
         let key = scratch().join("key");
         std::fs::write(&key, "k").unwrap();
         let (url, server) = mock("400 Bad Request", r#"{"type":"error","error":{"type":"invalid_request_error","message":"no"}}"#.into());
-        let key_path = key.to_string_lossy().to_string();
-        let env = move |k: &str| match k { "BON_ANTHROPIC_BASE_URL" => Some(url.clone()), "BON_ANTHROPIC_KEY_FILE" => Some(key_path.clone()), _ => None };
-        let argv: Vec<String> = ["--via", "api", "--model", "m"].iter().map(|s| s.to_string()).collect();
+        let _ = key;
+        let host = host_with_api(&url, "k");
+        let env = move |k: &str| match k { "BON_HOST" => Some(host.clone()), "BON_CLIENT" => Some("api".into()), _ => None };
+        let argv: Vec<String> = ["--model", "m"].iter().map(|s| s.to_string()).collect();
         let o = run(&argv, "task", &d, &env);
         server.join().unwrap();
         assert!(o.error.unwrap().contains("HTTP 400"));
@@ -723,14 +831,12 @@ mod tests {
     fn a_reply_that_does_not_apply_still_reports_usage() {
         let d = scratch();
         write(&d, "a.txt", b"a\n");
-        let fake = scratch().join("claude");
         let result = serde_json::json!({ "type": "result", "subtype": "success", "is_error": false, "result": block("a.txt", "nope\n", "b\n"),
                                          "modelUsage": { "claude-haiku-5-5": { "inputTokens": 3, "outputTokens": 5, "costUSD": 0.001 } } });
-        std::fs::write(&fake, format!("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{result}'\n")).unwrap();
-        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let program = fake.to_string_lossy().to_string();
-        let env = move |k: &str| (k == "BON_SAMPLE_CLAUDE").then(|| program.clone());
-        let argv: Vec<String> = ["--via", "claude", "--model", "claude-haiku-5-5"].iter().map(|s| s.to_string()).collect();
+        // queue 55: the claude client is whatever `claude` the PATH finds.
+        let path = client_on_path("claude", &[result.to_string()]);
+        let env = move |k: &str| match k { "PATH" => Some(path.clone()), "BON_CLIENT" => Some("claude".into()), _ => None };
+        let argv: Vec<String> = ["--model", "claude-haiku-5-5"].iter().map(|s| s.to_string()).collect();
         let o = run(&argv, "task", &d, &env);
         assert!(o.error.unwrap().contains("SEARCH not found"));
         assert_eq!(read(&d, "a.txt"), "a\n");
@@ -742,14 +848,11 @@ mod tests {
     fn codex_events_are_read() {
         let d = scratch();
         write(&d, "a.txt", b"a\n");
-        let fake = scratch().join("codex");
         let msg = serde_json::json!({ "type": "item.completed", "item": { "type": "agent_message", "text": block("a.txt", "a\n", "b\n") } });
         let turn = serde_json::json!({ "type": "turn.completed", "usage": { "input_tokens": 100, "cached_input_tokens": 60, "output_tokens": 7 } });
-        std::fs::write(&fake, format!("#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{msg}' '{turn}'\n")).unwrap();
-        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let program = fake.to_string_lossy().to_string();
-        let env = move |k: &str| (k == "BON_SAMPLE_CODEX").then(|| program.clone());
-        let argv: Vec<String> = ["--via", "codex", "--model", "gpt-6.1-sol"].iter().map(|s| s.to_string()).collect();
+        let path = client_on_path("codex", &[msg.to_string(), turn.to_string()]);
+        let env = move |k: &str| match k { "PATH" => Some(path.clone()), "BON_CLIENT" => Some("codex".into()), _ => None };
+        let argv: Vec<String> = ["--model", "gpt-6.1-sol"].iter().map(|s| s.to_string()).collect();
         let o = run(&argv, "task", &d, &env);
         assert_eq!(o.error, None);
         assert_eq!(read(&d, "a.txt"), "b\n");
