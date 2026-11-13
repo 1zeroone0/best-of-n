@@ -288,7 +288,7 @@ fn python(items: &[Declared], from: &str) -> String {
 // ── the command ─────────────────────────────────────────
 
 /// Each declared target and its text.
-fn targets(root: &Path, manifest: &toml::Value) -> Result<Vec<(String, String)>, String> {
+pub fn targets(root: &Path, manifest: &toml::Value) -> Result<Vec<(String, String)>, String> {
     let Some(p) = manifest.get("types") else { return Ok(Vec::new()) };
     let from: Vec<String> = p.get("from").and_then(|v| v.as_array()).ok_or("[types] needs from = [the files holding the kernel's types]")?
         .iter().filter_map(|v| v.as_str().map(String::from)).collect();

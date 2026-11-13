@@ -97,7 +97,7 @@ type Search struct {
 	Checks []Path `json:"checks"`
 	// The paths holding the counterexamples' tests.
 	Tests []Path `json:"tests"`
-	// The trusted code the manifest's SBOM declares; no search may change it.
+	// The trusted code the manifest's account declares; no search may change it.
 	Trusted []Path       `json:"trusted"`
 	Limit   uint64       `json:"limit"`
 	Results []*Candidate `json:"results"`

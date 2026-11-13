@@ -2557,6 +2557,18 @@
         "value": "src/tui.rs"
       },
       {
+        "name": "bon:trusted-file",
+        "value": "src/account.rs"
+      },
+      {
+        "name": "bon:trusted-file",
+        "value": "src/new.rs"
+      },
+      {
+        "name": "bon:trusted-file",
+        "value": "examples/kernel.rs"
+      },
+      {
         "name": "bon:trusted-functions",
         "value": "Manifest,manifest,limit,agent_process_limit,checks,tests,trusted,program,at,logged_in,programs_logged_in,width,attempts,bundle,land,remote_trunk,head,on_trunk,check,trunk_accepted,observe,run,push,append,record_cost,Clock,clock,report,record_selected,record_disagreed,record_initialize,record_grant,record_wait,record_push,record_land,record_blocked,record_not_found,record_proposal,record_over_limit,record,agree_outputs"
       }

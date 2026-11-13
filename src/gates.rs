@@ -136,7 +136,7 @@ pub struct Search {
     pub checks: Vec<Path>,
     /// The paths holding the counterexamples' tests.
     pub tests: Vec<Path>,
-    /// The trusted code the manifest's SBOM declares; no search may change it.
+    /// The trusted code the manifest's account declares; no search may change it.
     pub trusted: Vec<Path>,
     pub limit: u64,
     pub results: Vec<Option<Candidate>>,
