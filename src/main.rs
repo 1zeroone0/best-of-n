@@ -181,6 +181,9 @@ fn check(root: &str) -> Result<(), String> {
         for (id, commit) in &reused { println!("  FAIL .bon/queue.tsv: id {id} was retired in {commit}; ids are never reused"); }
         return Err(format!("renumber from {}: one more than any id the queue has held", next_id(r)));
     }
+    let broken = rules(r, &commit, &m)?;
+    if !broken.is_empty() { println!("what a search may write, and how its candidates are judged:"); }
+    for b in &broken { println!("  FAIL {b}"); }
     println!("checking the working tree ({}) as agent, the way candidates are judged", &commit[..8]);
     let results = best_of_n::trusted::check(&m, &commit.chars().collect())?;
     let mut failed = false;
@@ -200,7 +203,222 @@ fn check(root: &str) -> Result<(), String> {
     }
     if failed { return Err("checks reject the working tree".into()); }
     println!("every check accepts the working tree");
+    if !broken.is_empty() { return Err(format!("the working tree breaks a rule in {} places", broken.len())); }
     Ok(())
+}
+
+// ── what a search may write (queue 67, 68, 69) ──────────
+
+const PROVEN_OR_CHECKED: &str = "every line a search may write is proven, or program code with declared checks";
+const NO_CHECK_WRITABLE: &str = "no check lives in a file a search may write";
+const NOT_JUDGED: &str = "nothing a candidate writes changes how it is judged";
+
+/// Whether a search that reaches trunk (code, compaction, a counterexample)
+/// may write `path`: whether a candidate changing it alone stays within its
+/// authority, as the kernel's `verified` gate decides with the manifest's
+/// checks, tests and trusted code. (Queue and foil candidates never reach trunk.)
+fn may_write(m: &best_of_n::trusted::Manifest, path: &str) -> bool {
+    use best_of_n::gates::{Candidate, Commit, Kind, Search};
+    let p = best_of_n::gates::Path(path.chars().collect());
+    let c = Candidate { commit: Commit(vec![]), base: Commit(vec![]), accepted: true, proved: true, changed: vec![p.clone()], out: vec![],
+        intents: vec![], accepts: vec![], accepts_foils: vec![], rejects_counterexamples: true, measured: true, added: vec![p], rank: 0, diff: 0 };
+    [Kind::Code { goal: Commit(vec![]) }, Kind::Compaction { goal: Commit(vec![]), out: vec![] }, Kind::Counterexample { goal: None }]
+        .into_iter().any(|kind| best_of_n::exec::verified(&Search { kind, base: Commit(vec![]), n: 1, checks: best_of_n::trusted::checks(m),
+            tests: best_of_n::trusted::tests(m), trusted: best_of_n::trusted::trusted(m), limit: 0, results: vec![] }, &c))
+}
+
+/// Where `commit`'s tree breaks a rule, one line each: the file, what is
+/// wrong, and the rule. Read from the tree, the manifest and the kernel's
+/// authority; nothing runs.
+/// - every file a search may write is proven (a module of the root package's
+///   library: the kernel) or program code a declared check reads (a Rust file
+///   of a target a cargo check builds, or one under a path a check names);
+/// - no file a check runs (by its path, its cargo target, or `cargo run`'s
+///   binary) is one a search may write, but the counterexample's own `path`;
+/// - no local crate has a build script or is a proc macro; no file a search
+///   may write holds a unit test, but the counterexamples' tests, which are
+///   judged by their evidence; and the kernel holds nothing outside `verus!`
+///   but `use`, `mod` and `extern crate` declarations.
+fn rules(root: &Path, commit: &str, m: &best_of_n::trusted::Manifest) -> Result<Vec<String>, String> {
+    let files: Vec<String> = git(root, &["ls-tree", "-r", "-z", "--name-only", commit])?.split('\0').filter(|f| !f.is_empty()).map(String::from).collect();
+    let read = |p: &str| git(root, &["cat-file", "blob", &format!("{commit}:{p}")]).unwrap_or_default();
+    let exists = |p: &str| files.iter().any(|f| f == p);
+    let c = &m.config;
+    let mut broken = Vec::new();
+    // Every local crate: no build script, no proc macro.
+    for manifest in files.iter().filter(|f| f.rsplit('/').next() == Some("Cargo.toml")) {
+        let dir = manifest.strip_suffix("Cargo.toml").unwrap_or("");
+        let Ok(t) = toml::from_str::<toml::Value>(&read(manifest)) else {
+            broken.push(format!("{manifest}: not TOML cargo can read ({NOT_JUDGED})"));
+            continue;
+        };
+        let build = match t.get("package").and_then(|p| p.get("build")) {
+            Some(toml::Value::String(b)) => Some(format!("{dir}{b}")),
+            Some(toml::Value::Boolean(false)) => None,
+            _ => exists(&format!("{dir}build.rs")).then(|| format!("{dir}build.rs")),
+        };
+        if let Some(b) = build { broken.push(format!("{manifest}: a local crate with a build script, {b}, which runs when a check builds ({NOT_JUDGED})")); }
+        if ["proc-macro", "proc_macro"].iter().any(|k| t.get("lib").and_then(|l| l.get(*k)).and_then(|v| v.as_bool()) == Some(true)) {
+            broken.push(format!("{manifest}: a local crate that is a proc macro, which runs when a check builds ({NOT_JUDGED})"));
+        }
+    }
+    // The root package's targets, by cargo's defaults and its [lib], [[bin]], [[test]] and [[example]].
+    let package: toml::Value = toml::from_str(&read("Cargo.toml")).unwrap_or(toml::Value::Table(Default::default()));
+    let declared = |key: &str| -> Vec<String> {
+        package.get(key).and_then(|v| v.as_array()).into_iter().flatten().filter_map(|t| t.get("path").and_then(|p| p.as_str()).map(String::from)).collect()
+    };
+    let auto = |dir: &str| -> Vec<String> {
+        files.iter().filter(|f| f.strip_prefix(dir).is_some_and(|r| r.ends_with(".rs") && (!r.contains('/') || r.ends_with("/main.rs")))).cloned().collect()
+    };
+    let lib = package.get("lib").and_then(|l| l.get("path")).and_then(|p| p.as_str()).map(String::from)
+        .or_else(|| exists("src/lib.rs").then(|| "src/lib.rs".to_string()));
+    let kernel: Vec<String> = lib.iter().flat_map(|r| modules(r, &read, &exists, Some(&mut broken))).collect();
+    // Every check: (command, whether it is the counterexample's, which runs the test at its `path`).
+    let commands: Vec<(&str, bool)> = c.checks.test.iter().chain(&c.checks.verify).chain(&c.checks.agree).chain(c.checks.rank.values())
+        .chain(&c.checks.staged).map(|s| (s.as_str(), false))
+        .chain([(c.counterexample.build.as_str(), true), (c.counterexample.run.as_str(), true)]).collect();
+    let runs = |prefix: &str| commands.iter().any(|(w, _)| w.trim_start().starts_with(prefix));
+    let mut compiled: Vec<String> = Vec::new();
+    if runs("cargo ") {
+        let mut roots = declared("bin");
+        roots.extend(auto("src/bin/"));
+        if exists("src/main.rs") { roots.push("src/main.rs".into()); }
+        if runs("cargo test") { roots.extend(declared("test")); roots.extend(declared("example")); roots.extend(auto("tests/")); roots.extend(auto("examples/")); }
+        for r in roots { compiled.extend(modules(&r, &read, &exists, None)); }
+    }
+    let bin = |name: &str| -> Option<String> {
+        package.get("bin").and_then(|v| v.as_array()).into_iter().flatten().find(|b| b.get("name").and_then(|n| n.as_str()) == Some(name))
+            .and_then(|b| b.get("path").and_then(|p| p.as_str()).map(String::from))
+            .or_else(|| [format!("src/bin/{name}.rs"), format!("src/bin/{name}/main.rs")].into_iter().find(|p| exists(p)))
+            .or_else(|| (package.get("package").and_then(|p| p.get("name")).and_then(|n| n.as_str()) == Some(name) && exists("src/main.rs")).then(|| "src/main.rs".into()))
+    };
+    // What each check names: a file by its path, a cargo target, `cargo run`'s binary; and the directories it reads under.
+    let mut named: Vec<(String, &str)> = Vec::new();
+    let mut under: Vec<String> = Vec::new();
+    for (command, own) in &commands {
+        let w: Vec<&str> = command.split_whitespace().map(|w| w.trim_matches(|ch: char| "\"'();&|".contains(ch))).collect();
+        for (k, word) in w.iter().enumerate() {
+            let target = match (k.checked_sub(1).map(|j| w[j]), *word) {
+                (Some("--test"), n) => Some(format!("tests/{n}.rs")),
+                (Some("--example"), n) => Some(format!("examples/{n}.rs")),
+                (Some("--bench"), n) => Some(format!("benches/{n}.rs")),
+                (Some("--bin"), n) => bin(n),
+                (Some("cargo"), "run") if !w.contains(&"--bin") && !w.contains(&"--example") =>
+                    package.get("package").and_then(|p| p.get("default-run")).and_then(|d| d.as_str()).and_then(|d| bin(d)),
+                (_, p) if exists(p) => Some(p.to_string()),
+                (_, p) if !p.is_empty() && files.iter().any(|f| f.starts_with(&format!("{}/", p.trim_end_matches('/')))) => {
+                    under.push(p.trim_end_matches('/').to_string());
+                    None
+                }
+                _ => None,
+            };
+            if let Some(t) = target.filter(|t| !(*own && *t == c.counterexample.path)) { named.push((t, command)); }
+        }
+    }
+    for (t, command) in &named {
+        if may_write(m, t) { broken.push(format!("{t}: the check `{command}` runs it, and a search may write it ({NO_CHECK_WRITABLE})")); }
+    }
+    let landed = |f: &str| c.counterexample.tests.iter().any(|t| f.starts_with(t.as_str()));
+    for f in files.iter().filter(|f| may_write(m, f)) {
+        let read_by_check = compiled.contains(f) || named.iter().any(|(t, _)| t == f) || under.iter().any(|d| f.starts_with(&format!("{d}/")));
+        if !kernel.contains(f) && !read_by_check {
+            broken.push(format!("{f}: a search may write it, and it is neither proven, in the kernel, nor read by a declared check ({PROVEN_OR_CHECKED})"));
+        }
+        if !f.ends_with(".rs") { continue; }
+        let text = read(f);
+        if !landed(f) {
+            if let Some(n) = unit_test(&text) { broken.push(format!("{f}:{n}: a unit test in a file a search may write ({NOT_JUDGED})")); }
+        }
+        if kernel.contains(f) {
+            for n in outside_verus(&text) { broken.push(format!("{f}:{n}: plain Rust outside verus! in the kernel ({NOT_JUDGED})")); }
+        }
+    }
+    Ok(broken)
+}
+
+/// A Rust file and the modules it declares (`mod name;`), each where cargo
+/// looks for it, recursively. A `#[path]` module is not followed: in the
+/// kernel (`broken` Some) it is broken, since its plain Rust would go unread.
+fn modules(file: &str, read: &dyn Fn(&str) -> String, exists: &dyn Fn(&str) -> bool, mut broken: Option<&mut Vec<String>>) -> Vec<String> {
+    let mut out = vec![file.to_string()];
+    let mut k = 0;
+    while k < out.len() {
+        let f = out[k].clone();
+        k += 1;
+        let t = tokens(&read(&f));
+        let at = |i: usize| t.get(i).map_or("", |(s, _)| s.as_str());
+        // A crate root's or a mod.rs's modules sit beside it; another file's, in the directory of its name.
+        let dir = if k == 1 || f.ends_with("/mod.rs") { f.rsplit_once('/').map_or(String::new(), |(d, _)| format!("{d}/")) }
+                  else { format!("{}/", f.trim_end_matches(".rs")) };
+        for i in 0..t.len() {
+            if let Some(b) = broken.as_deref_mut().filter(|_| at(i) == "#" && at(i + 1) == "[" && at(i + 2) == "path") {
+                b.push(format!("{f}:{}: a #[path] module, which bon does not follow ({NOT_JUDGED})", t[i].1));
+            }
+            if at(i) == "mod" && at(i + 2) == ";" {
+                let name = at(i + 1);
+                if let Some(p) = [format!("{dir}{name}.rs"), format!("{dir}{name}/mod.rs")].into_iter().find(|p| exists(p)) {
+                    if !out.contains(&p) { out.push(p); }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The line of the first unit test in Rust source: a `#[test]` attribute (or
+/// `#[a::test]`), or a `cfg` attribute that names `test`.
+fn unit_test(text: &str) -> Option<usize> {
+    let t = tokens(text);
+    let at = |i: usize| t.get(i).map_or("", |(s, _)| s.as_str());
+    (0..t.len()).find(|&i| {
+        if at(i) != "#" || at(i + 1) != "[" { return false; }
+        let body: Vec<&str> = (i + 2..t.len()).map(at).take_while(|w| *w != "]").collect();
+        (body.last() == Some(&"test") && body.iter().all(|w| *w == ":" || w.chars().all(|ch| ch.is_alphanumeric() || ch == '_')))
+            || (body.first() == Some(&"cfg") && body.contains(&"test"))
+    }).map(|i| t[i].1)
+}
+
+/// The lines of Rust source's items outside every `verus! { … }` that are not
+/// a `use`, a `mod name;` or an `extern crate`, with the attributes on them.
+fn outside_verus(text: &str) -> Vec<usize> {
+    let t = tokens(text);
+    let at = |i: usize| t.get(i).map_or("", |(s, _)| s.as_str());
+    // The index past the group that opens at i ({, ( or [).
+    let group = |i: usize| -> usize {
+        let mut depth = 0i64;
+        for j in i..t.len() {
+            match at(j) {
+                "{" | "(" | "[" => depth += 1,
+                "}" | ")" | "]" => { depth -= 1; if depth == 0 { return j + 1; } }
+                _ => {}
+            }
+        }
+        t.len()
+    };
+    let mut lines = Vec::new();
+    let mut i = 0;
+    while i < t.len() {
+        if at(i) == "#" {
+            let a = if at(i + 1) == "!" { i + 2 } else { i + 1 };
+            if at(a) == "[" { i = group(a); continue; }
+        }
+        if at(i) == "verus" && at(i + 1) == "!" { i = group(i + 2); continue; }
+        let mut j = i;
+        if at(j) == "pub" { j += 1; if at(j) == "(" { j = group(j); } }
+        let declaration = at(j) == "use" || (at(j) == "mod" && at(j + 2) == ";") || (at(j) == "extern" && at(j + 1) == "crate");
+        if !declaration { lines.push(t[i].1); }
+        // To the item's end: its `;`, or its body, at depth zero.
+        while j < t.len() {
+            match at(j) {
+                ";" => { j += 1; break; }
+                "{" => { j = group(j); if at(j) == ";" { j += 1; } break; }
+                "(" | "[" => j = group(j),
+                _ => j += 1,
+            }
+        }
+        i = j;
+    }
+    lines
 }
 
 /// The kernel this bon was built from: the spec, the gates and their implementation.
@@ -791,7 +1009,27 @@ fn holes(root: &Path, declared: &[String]) -> Vec<String> {
 /// `assume` or `admit`, an `assume_specification`, or a `verifier::external…`
 /// or `verifier(external…)` attribute. Comments and literals are not code.
 fn skips(text: &str) -> Vec<usize> {
-    // Tokens: identifiers and single punctuation, each with its line.
+    let tokens = tokens(text);
+    let t = |k: usize| tokens.get(k).map_or("", |(s, _)| s.as_str());
+    let mut lines = Vec::new();
+    for (k, (word, n)) in tokens.iter().enumerate() {
+        let call = matches!(word.as_str(), "assume" | "admit") && t(k + 1) == "(" && (k == 0 || t(k - 1) != "fn");
+        let specification = word == "assume_specification";
+        // #[verifier::external…] or #[verifier(external…)], also as an inner #![…].
+        let attribute = word == "#" && {
+            let a = if t(k + 1) == "!" { k + 2 } else { k + 1 };
+            t(a) == "[" && t(a + 1) == "verifier"
+                && ((t(a + 2) == ":" && t(a + 3) == ":" && t(a + 4).starts_with("external"))
+                    || (t(a + 2) == "(" && t(a + 3).starts_with("external")))
+        };
+        if (call || specification || attribute) && lines.last() != Some(n) { lines.push(*n); }
+    }
+    lines
+}
+
+/// Rust source as tokens: identifiers and single punctuation, each with its
+/// line. Comments and literals are not code: they make no token.
+fn tokens(text: &str) -> Vec<(String, usize)> {
     let c: Vec<char> = text.chars().collect();
     let ident = |ch: char| ch.is_alphanumeric() || ch == '_';
     let mut tokens: Vec<(String, usize)> = Vec::new();
@@ -850,21 +1088,7 @@ fn skips(text: &str) -> Vec<usize> {
         }
         else { tokens.push((ch.to_string(), line)); i += 1; }
     }
-    let t = |k: usize| tokens.get(k).map_or("", |(s, _)| s.as_str());
-    let mut lines = Vec::new();
-    for (k, (word, n)) in tokens.iter().enumerate() {
-        let call = matches!(word.as_str(), "assume" | "admit") && t(k + 1) == "(" && (k == 0 || t(k - 1) != "fn");
-        let specification = word == "assume_specification";
-        // #[verifier::external…] or #[verifier(external…)], also as an inner #![…].
-        let attribute = word == "#" && {
-            let a = if t(k + 1) == "!" { k + 2 } else { k + 1 };
-            t(a) == "[" && t(a + 1) == "verifier"
-                && ((t(a + 2) == ":" && t(a + 3) == ":" && t(a + 4).starts_with("external"))
-                    || (t(a + 2) == "(" && t(a + 3).starts_with("external")))
-        };
-        if (call || specification || attribute) && lines.last() != Some(n) { lines.push(*n); }
-    }
-    lines
+    tokens
 }
 
 fn sbom(root: &str, check: bool) -> Result<(), String> {
@@ -1002,6 +1226,71 @@ fn sbom(root: &str, check: bool) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bon_check_names_each_file_that_breaks_a_rule_on_what_a_search_may_write() {
+        // queue 67, 68, 69: read from the tree, the manifest and the kernel's authority.
+        let d = std::env::temp_dir().join(format!("bon-rules-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let manifest = r#"
+            limit = 1.0
+            rate = 0
+            agent_process = { limit = 0.5, time = 60 }
+            checks = { paths = ["src/spec.rs", "tests/engineer.rs"], test = ["cargo test -q", "sh scripts/check.sh", "cargo run -q -- lint"], verify = ["true"], time = 60 }
+            counterexample = { path = "tests/counterexample.rs", build = "cargo test --no-run --test counterexample", run = "cargo test --test counterexample", tests = ["tests/counterexample"] }
+            sbom = { trusted = ["src/main.rs"] }
+            [searches]
+            code = { role = "r", n = [1] }
+            compaction = { role = "r", n = [1] }
+            queue = { role = "r", n = [1] }
+            counterexample = { role = "r", n = [1] }
+            foil = { role = "r", n = [1] }
+        "#;
+        let files: &[(&str, &str)] = &[
+            (".bon/bon.toml", manifest),
+            ("Cargo.toml", "[package]\nname = \"k\"\ndefault-run = \"k\"\n[[bin]]\nname = \"k\"\npath = \"src/main.rs\"\n"),
+            ("src/lib.rs", "//! k\npub mod spec;\npub mod exec;\n"),
+            ("src/spec.rs", "verus! { pub open spec fn s() -> bool { true } }\n#[cfg(test)]\nmod t {}\n"),
+            ("src/exec.rs", "use vstd::prelude::*;\nverus! {\nfn a() {}\nmod inner;\n}\n#[allow(dead_code)]\npub fn plain() -> bool { true }\nimpl X {}\n"),
+            ("src/exec/inner.rs", "fn unproven() {}\n"),
+            ("src/main.rs", "mod view;\nfn main() {}\n#[test]\nfn t() {}\n"),
+            ("src/view.rs", "pub fn v() {}\n"),
+            ("src/bin/tool.rs", "fn main() {}\n#[cfg(test)]\nmod tests { #[test] fn t() {} }\n"),
+            ("tests/counterexample_1.rs", "#[test]\nfn landed() {}\n"),
+            ("tests/engineer.rs", "#[test]\nfn mine() {}\n"),
+            ("scripts/check.sh", "exit 0\n"),
+            ("README.md", "k\n"),
+            ("crates/m/Cargo.toml", "[package]\nname = \"m\"\n[lib]\nproc-macro = true\n"),
+            ("crates/b/Cargo.toml", "[package]\nname = \"b\"\n"),
+            ("crates/b/build.rs", "fn main() {}\n"),
+        ];
+        for (p, text) in files {
+            std::fs::create_dir_all(d.join(p).parent().unwrap()).unwrap();
+            std::fs::write(d.join(p), text).unwrap();
+        }
+        git(&d, &["init", "-q"]).unwrap();
+        git(&d, &["add", "-A"]).unwrap();
+        git(&d, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "k"]).unwrap();
+        let commit = git(&d, &["rev-parse", "HEAD"]).unwrap();
+        let m = best_of_n::trusted::Manifest { config: toml::from_str(manifest).unwrap(), root: d.clone() };
+        let broken = rules(&d, &commit, &m).unwrap();
+        // Each line: where, then the rule it breaks.
+        let found: Vec<(&str, &str)> = broken.iter().map(|b| {
+            let rule = [PROVEN_OR_CHECKED, NO_CHECK_WRITABLE, NOT_JUDGED].into_iter().find(|r| b.ends_with(&format!("({r})"))).unwrap();
+            (b.split(": ").next().unwrap(), rule)
+        }).collect();
+        assert_eq!(found, [
+            ("crates/b/Cargo.toml", NOT_JUDGED), ("crates/m/Cargo.toml", NOT_JUDGED),
+            ("scripts/check.sh", NO_CHECK_WRITABLE),
+            ("Cargo.toml", PROVEN_OR_CHECKED), ("README.md", PROVEN_OR_CHECKED), ("crates/b/Cargo.toml", PROVEN_OR_CHECKED),
+            ("crates/b/build.rs", PROVEN_OR_CHECKED), ("crates/m/Cargo.toml", PROVEN_OR_CHECKED),
+            ("src/bin/tool.rs:2", NOT_JUDGED),
+            ("src/exec.rs:7", NOT_JUDGED), ("src/exec.rs:8", NOT_JUDGED), ("src/exec/inner.rs:1", NOT_JUDGED),
+        ], "{broken:#?}");
+        // Not broken: the protected spec's and trusted main's tests, the landed and engineer's tests, the program's code.
+        assert!(broken[1].starts_with("crates/m/Cargo.toml: a local crate that is a proc macro"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     #[test]
     fn bon_works_on_the_remotes_trunk_and_never_touches_the_working_tree() {

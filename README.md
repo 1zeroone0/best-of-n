@@ -47,7 +47,7 @@ bon
 | `bon spec [NAME]` | the spec's vocabulary and how it reaches the code, or one item |
 | `bon types [--check]` | the types programs are built on, in TypeScript, Go and Python |
 | `bon sbom --check` | fail when what bon trusts changed, or a proof is skipped outside it |
-| `bon check` | every check on the working tree, as candidates are judged; whose fix a failure is |
+| `bon check` | every check on the working tree, as candidates are judged; whose fix a failure is; each file that breaks a rule on what a search may write |
 
 **You decide** the spec and the checks; the [queue](.bon/queue.tsv) holds what
 is wanted and not yet in the spec. **Search decides** the rest, as the POSIX
@@ -68,13 +68,23 @@ goes to a private git remote of its own, never this repository.
   candidate, what git says changed, what the programs cost; plus Rust's standard
   library, git, the toolchain, and Verus and Z3 themselves. It is listed in
   `.bon/sbom.json`, and no search may change it, nor `.cargo/` or `build.rs`.
+  `bon check` fails, naming the file and the rule, on what would let a
+  candidate change how it is judged: a file a search may write that is
+  neither proven nor read by a declared check, a check in such a file, a local
+  crate with a build script or a proc macro, a unit test in such a file, or
+  plain Rust outside `verus!` in the kernel.
   Checks run with a toolchain under `/opt/bon` that no agent process can write,
   behind bon's own `cargo` (a perl script bon writes, first on PATH), which
   takes a slot of the host's check pool and caps threads. A check's result is
   cached by what it sees (its tree, command, test, toolchain and the dependency
   sources its lockfile names), where only engineer can write; what decides a
   push or a landing is checked again from a clean build, never the cache, and a
-  result that differs stops bon with that check named suspect.
+  result that differs stops bon with that check named suspect. Beside it, once,
+  run the expensive checks, `[checks] staged`, which no other candidate runs:
+  one that fails stops bon the same way, and nothing is pushed.
+  A compaction candidate's rank = its `rank` command's integer − its suite's
+  seconds, rounded (each test and verify check run again once built, timed
+  by bon, kept with the verdict, so a tree is timed once per host).
 - **Trusted, and not isolated:** agent processes all run as one user, so one
   could write another's working directory, or build directory. A candidate's
   checks build in a fresh clone of trunk's build, never the one its agent

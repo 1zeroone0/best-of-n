@@ -143,7 +143,8 @@ The repository holds the words; this skill does not repeat them.
   reused: a new id is one more than any the queue has held (`bon check` fails
   on a retired id and names the next).
 - `.bon/bon.toml`, the manifest: checks (`paths`, `test`, `verify`, `agree`,
-  `rank`, and `time`, each check's cutoff), `[searches]` (for each kind, code,
+  `rank`, `staged`, the expensive checks only the selected candidate runs,
+  and `time`, each check's cutoff), `[searches]` (for each kind, code,
   compaction, queue, counterexample and foil, a `role` and its width list
   `n`), limits, `rate`, `[counterexample]` (`path`, `build`, `run`, `tests`,
   `visible`), `[sbom]`, `[types]`, trunk.
@@ -172,7 +173,14 @@ them. Before a search, `bon check`: it runs every check on the working tree as
 agent, without `.git`, the way candidates are judged, decides by exit codes,
 and says whether a failure is in protected files (yours to fix) or in files a
 code search may change. What builds after a failing file is hidden until it
-compiles: check again then.
+compiles: check again then. It also fails, one line per file and rule, where
+a candidate could change how it is judged: a file a search may write (the
+kernel's authority, from the manifest) that is neither proven nor read by a
+declared check; a check in such a file; a local crate with a build script or
+a proc macro; a unit test in such a file (engineer's tests live in a
+protected file under `checks.paths`, never under `[counterexample] tests`);
+plain Rust outside `verus!` in the kernel. Each is the owner's choice:
+protect the file, give it a check, or move it.
 
 **Implementation level: search decides.** You run bon; you never write a
 candidate yourself.
@@ -355,13 +363,18 @@ when an earlier bon process of the same pid left a trace.
   `requests_over_tier`, and its `candidate` (`commit`, `accepted`, `proved`,
   `changed`, `added`, `diff`, `lines_added`, `lines_removed`, `rank`, `out`,
   `accepts`, `rejects_counterexamples`); its program's log is `program`.
+  A compaction candidate's `rank` is its rank command's integer less its
+  suite's `seconds` (that file), rounded: each test and verify check run
+  again once built (`seconds-k`), timed by bon and kept with the verdict.
 - `.bon/traces/<pid>/trunk-test-k`, `trunk-verify-k`, `trunk-build`: trunk's
   check logs. A log whose first line is `cached: <key>` was answered by the
   verdict cache (`/tmp/bon/verdicts`, keyed by tree, command, test,
   toolchain and the dependency sources the lockfile names), not run. What
   decides a push or a landing runs again from a clean build
   (`recheck-<commit>-k`); a result that differs stops bon with the check
-  named suspect, and nothing is pushed. Trunk's build is kept for later bon
+  named suspect, and nothing is pushed. Beside it the staged checks run on
+  the selected candidate alone (`staged-<commit>-k`); one that fails stops
+  bon the same way. Trunk's build is kept for later bon
   processes (`/tmp/bon/trunk-<key>`, engineer's alone), and every build
   directory starts as a clone of it.
 - `.bon/traces/<pid>/pushes.jsonl`: each push's `commit`, `searches`,

@@ -306,6 +306,11 @@ pub struct Checks {
     /// Per kind ("code", "compaction"): prints an integer.
     #[serde(default)]
     pub rank: HashMap<String, String>,
+    /// The expensive checks: each exits 0 on the selected candidate alone,
+    /// run once, from a clean build, beside the re-check of what decided its
+    /// push; a candidate is accepted and proved without them.
+    #[serde(default)]
+    pub staged: Vec<String>,
     /// Seconds a check may run before it is stopped: its own cutoff, apart
     /// from an agent process's time.
     pub time: u64,
@@ -1692,7 +1697,9 @@ fn run_check_with(config: &Config, on: &On, threads: usize, dir: &std::path::Pat
         Some(held) => { if held.is_none() { *held = Some(Slot::check(config)); } None }
         None => Some(Slot::check(config)),
     });
+    let started = Instant::now();
     let r = supervised(c, None, Duration::from_secs(config.checks.time), log, None);
+    RAN.with(|s| s.set(started.elapsed().as_secs_f64()));
     if r.exited && on.cache != Cache::Off {
         if let Some(k) = &key { if dependencies(config, &on.tree, true) == before { store(k, r.ok, &r.stdout, &r.log); } }
         decided(on, command, r.ok, &r.stdout, log);
@@ -1819,6 +1826,73 @@ fn recheck(m: &Manifest, commit: &str) -> Result<(), String> {
 
 /// How many re-checks this bon process has run: names their directories.
 static RECHECKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The staged checks (`[checks] staged`) on `commit`, the selected candidate:
+/// one after another in one checkout of its tree and one build directory that
+/// starts empty, never from the cache. Ok when each exits 0; Err names the
+/// first that does not, which stops the push as a suspect re-check does. Each
+/// run's log is `staged-<commit>-<k>` in the trace.
+fn staged(m: &Manifest, commit: &str) -> Result<(), String> {
+    let config = &m.config;
+    if config.checks.staged.is_empty() { return Ok(()); }
+    let short = &commit[..commit.len().min(12)];
+    let log = trace_dir(&m.root);
+    let name = format!("recheck.{}", RECHECKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
+    let dir = scratch(&format!("{name}/{}", repository_name(&m.root)));
+    let build = scratch(&format!("{name}.build/build"));
+    let tree = tree_of(&m.root, commit);
+    let made = materialize(&m.root, &tree, &dir).and_then(|_| sh(&dir, "chmod", &["-R", "a-w,g+rX", "."])).and_then(|_| writable_dir(&build));
+    let on = On { tree, test: None, cache: Cache::Off };
+    let mut r = made.map_err(|e| format!("the staged checks could not be set up on {short}: {e}; nothing was pushed"));
+    for (k, command) in config.checks.staged.iter().enumerate() {
+        if r.is_err() { break; }
+        let path = log.join(format!("staged-{short}-{k}"));
+        if !run_check(config, &on, &dir, &build, command, &path).0 {
+            r = Err(format!("staged check `{command}` rejects {short}, the selected candidate, from a clean build; nothing was pushed (log: {})", path.display()));
+        }
+    }
+    remove_build(config, &build);
+    for p in [dir.parent(), build.parent()].into_iter().flatten() {
+        let _ = Command::new("chmod").args(["-R", "u+w"]).arg(p).stderr(Stdio::null()).status();
+        let _ = std::fs::remove_dir_all(p);
+    }
+    r
+}
+
+thread_local! {
+    /// The seconds the last check this thread ran took, from its start to its
+    /// exit: never a slot's wait, never a cached answer.
+    static RAN: std::cell::Cell<f64> = const { std::cell::Cell::new(0.0) };
+}
+
+/// A compaction candidate's suite seconds: each test and verify check run
+/// again on its tree once it judged it, in the same build, so what is timed is
+/// the suite, not what its change made cargo rebuild. bon times each run; a
+/// tree's time is kept in the verdict cache beside its verdict (the command's
+/// key with `seconds` added), so a tree is timed once per verdict cache and
+/// every bon process on the host ranks it alike. None if a run fails: then the
+/// rank is not measured. Each run's log is `seconds-<k>` in the trace.
+fn suite_seconds(config: &Config, on: &On, dir: &std::path::Path, build: &std::path::Path, trace: &std::path::Path) -> Option<f64> {
+    let mut total = 0.0;
+    for (k, command) in config.checks.test.iter().chain(&config.checks.verify).enumerate() {
+        let log = trace.join(format!("seconds-{k}"));
+        let key = verdict_key(config, on, &format!("{command}\0seconds"));
+        // Of identical trees timed at once, one is timed and the rest read its figure.
+        let one = key.as_deref().map(flight);
+        let _one = one.as_ref().map(|f| f.lock().unwrap_or_else(|e| e.into_inner()));
+        if let Some((s, k)) = key.as_ref().and_then(|k| cached(k).and_then(|(_, s, _)| s.parse::<f64>().ok()).map(|s| (s, k))) {
+            write_trace(&log, format!("cached: {k}\nseconds: {s:.3}\n"));
+            total += s;
+            continue;
+        }
+        let off = On { tree: on.tree.clone(), test: on.test, cache: Cache::Off };
+        if !run_check(config, &off, dir, build, command, &log).0 { return None; }
+        let s = RAN.with(|r| r.get());
+        if let Some(k) = &key { store(k, true, &format!("{s:.3}"), ""); }
+        total += s;
+    }
+    Some(total)
+}
 
 thread_local! {
     /// While `holding`: Some, and the check slot this thread took at its first
@@ -2060,9 +2134,10 @@ fn prompt(kind: &Kind, config: &Config, aim: &str) -> String {
         "You are working in a copy of a repository, with no git. {goal}{aim}\n\
          The checks are {paths:?}: read and run them, never change them; you cannot.\n\
          Never change {fixed:?} either: a change to any of them is refused or rejected.\n\
-         The tests run with: {test:?}. Verus runs with: {verify:?}.\n\
+         The tests run with: {test:?}. Verus runs with: {verify:?}.{staged}\n\
          {scope} Reply with one line saying what you changed.",
         paths = config.checks.paths, test = config.checks.test, verify = config.checks.verify, fixed = fixed(kind, config),
+        staged = if config.checks.staged.is_empty() { String::new() } else { format!(" Before a push, the selected candidate must also pass: {:?}.", config.checks.staged) },
         // Smallest change is right for every kind but compaction, whose goal is to remove.
         scope = if matches!(kind, Kind::Compaction { .. }) { "" } else { "Make the smallest change that does this." })
 }
@@ -2264,7 +2339,7 @@ pub fn on_trunk(m: &Manifest) -> (r: Result<(), String>) {
     Ok(())
 }
 
-/// Every test check and every verify check on a commit, run as agent in a
+/// Every test, verify and staged check on a commit, run as agent in a
 /// checkout without `.git`, the way candidates are judged; each one's name,
 /// whether it exited 0, and its log. All of them run, not only until one fails.
 #[verifier::external]
@@ -2279,7 +2354,7 @@ pub fn check(m: &Manifest, commit: &Commit) -> Result<Vec<(String, bool, PathBuf
     traced(&log, std::fs::create_dir_all(&log));
     let mut out = Vec::new();
     let on = On::commit(root, &c);
-    for (kind, list) in [("test", &config.checks.test), ("verify", &config.checks.verify)] {
+    for (kind, list) in [("test", &config.checks.test), ("verify", &config.checks.verify), ("staged", &config.checks.staged)] {
         for (k, v) in list.iter().enumerate() {
             let path = log.join(format!("check-{kind}-{k}"));
             // engineer waits on it alone: every core.
@@ -2420,13 +2495,19 @@ pub fn run(m: &Manifest, kind: &Kind, a: usize, start: &Commit, target: Option<&
 /// (its test and verify checks, and its agree and rank checks) is checked
 /// again first, from a clean build and never from the verdict cache: a result
 /// that differs stops the bon process with that check named suspect, and
-/// nothing is pushed. The push is fast-forward only: if the remote's trunk
+/// nothing is pushed. Beside it the staged checks run on it, once: one that
+/// fails stops the bon process the same way. The push is fast-forward only: if the remote's trunk
 /// moved, it is refused and nothing changes. The engineer's branch is left
 /// alone: pull to follow. (TCB: git, the remote)
 #[verifier::external_body]
 pub fn push(m: &Manifest, commit: &Commit) -> (r: Result<(), String>) {
     let c: String = commit.iter().collect();
-    if let Err(e) = recheck(m, &c) { stop(&m.root, &e) }
+    // The staged checks run beside the re-check, each in the one clean build they share.
+    let (rechecked, passed) = std::thread::scope(|s| {
+        let st = s.spawn(|| staged(m, &c));
+        (recheck(m, &c), st.join().unwrap_or_else(|_| Err("a staged check could not run; nothing was pushed".into())))
+    });
+    if let Err(e) = rechecked.and(passed) { stop(&m.root, &e) }
     let (r, t) = (&m.config.remote, &m.config.trunk);
     git(&m.root, &["push", "--quiet", r, &format!("{c}:refs/heads/{t}")])
         .map_err(|e| format!("blocked: {r}/{t} moved during the search, so the push was refused; run it again ({e})"))?;
@@ -2907,6 +2988,11 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
                     match text.trim().parse() { Ok(v) if ok => rank = v, _ => measured = false }
                 }
                 if matches!(kind, Kind::Compaction { .. }) {
+                    // Its suite's seconds as well as the rank command's integer: whole seconds off it.
+                    match suite_seconds(config, &on, &cdir, build, trace) {
+                        Some(s) => { write_trace(&trace.join("seconds"), format!("{s:.3}\n")); rank = rank.saturating_sub(s.round() as i64); }
+                        None => measured = false,
+                    }
                     rejects_counterexamples = rejects_every_counterexample(m, &commit, start, build, trace);
                 }
             }
@@ -4096,6 +4182,59 @@ mod tests {
         let deep = program_of(&c, "deep");
         let result = r#"{"type":"result","requests":1,"modelUsage":{"gpt-6.1-sol":{"inputTokens":1000000,"outputTokens":0}}}"#;
         assert_eq!(generation(&deep, &c, result).unwrap().0, 2_000_000);
+    }
+
+    #[test]
+    fn the_staged_checks_run_on_the_selected_candidate_from_a_clean_build_and_one_that_fails_stops_its_push() {
+        // queue 70: each staged check runs once, never from the cache; the first that fails is named.
+        let (_remote, work, base, _test) = landing_fixture("staged");
+        let mut config = config();
+        let mut m = Manifest { config: config.clone(), root: work.clone() };
+        assert_eq!(staged(&m, &base), Ok(()), "no staged checks: nothing runs");
+        if is_agent() { return; }
+        config.checks.staged = vec!["test -f a".into(), "cat a".into()];
+        m.config = config.clone();
+        assert_eq!(staged(&m, &base), Ok(()));
+        config.checks.staged = vec!["test -f a".into(), "test -f missing".into()];
+        m.config = config;
+        let e = staged(&m, &base).unwrap_err();
+        assert!(e.starts_with("staged check `test -f missing` rejects") && e.contains("nothing was pushed"), "{e}");
+        let short = &base[..12];
+        for k in 0..2 {
+            let log = std::fs::read_to_string(trace_dir(&work).join(format!("staged-{short}-{k}"))).unwrap();
+            assert!(log.starts_with("exit: "), "ran, not answered by the cache: {log}");
+        }
+        let _ = std::fs::remove_dir_all(work.parent().unwrap());
+    }
+
+    #[test]
+    fn a_tree_s_suite_seconds_are_timed_once_and_read_back_alike() {
+        // queue 71: bon times the suite on a judged tree; the verdict cache keeps the figure, so a second ranking agrees.
+        let (_remote, work, base, _test) = landing_fixture("seconds");
+        if is_agent() { return; }
+        let mut config = config();
+        config.checks.test = vec!["sleep 0.3".into()];
+        config.checks.verify = vec!["true".into()];
+        let dir = scratch("seconds-test/work");
+        let build = scratch("seconds-test.build/build");
+        check_directory(&work, &base, &dir).unwrap();
+        writable_dir(&build).unwrap();
+        let trace = std::env::temp_dir().join(format!("bon-seconds-{}", std::process::id()));
+        std::fs::create_dir_all(&trace).unwrap();
+        let on = On::commit(&work, &base);
+        let first = suite_seconds(&config, &on, &dir, &build, &trace).unwrap();
+        assert!(first >= 0.3, "{first}");
+        assert!(std::fs::read_to_string(trace.join("seconds-0")).unwrap().starts_with("exit: "));
+        let second = suite_seconds(&config, &on, &dir, &build, &trace).unwrap();
+        assert_eq!(format!("{first:.3}"), format!("{second:.3}"), "the kept figure, not a second timing");
+        assert!(std::fs::read_to_string(trace.join("seconds-0")).unwrap().starts_with("cached: "));
+        // A run that fails measures nothing.
+        config.checks.verify = vec!["false".into()];
+        assert_eq!(suite_seconds(&config, &on, &dir, &build, &trace), None);
+        for p in [dir.parent().unwrap(), build.parent().unwrap(), &trace, work.parent().unwrap()] {
+            let _ = Command::new("chmod").args(["-R", "u+w"]).arg(p).status();
+            let _ = std::fs::remove_dir_all(p);
+        }
     }
 
     #[test]
