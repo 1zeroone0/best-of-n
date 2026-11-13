@@ -3777,6 +3777,18 @@ fn capture(m: &Manifest, kind: &Kind, search: usize, index: usize, start: &str, 
             let files: Vec<String> = files.iter().map(|f| f.iter().collect()).collect();
             // Verus on the spec's files alone: what proves a spec candidate.
             proved = stands_alone(m, &commit, &files, &format!("{search}.{index}"), trace).is_ok();
+            // B3: a spec proposal may not hide an admitted proof. `assume(false)`
+            // or `external_body` in a proof passes stands_alone; a skip (as the
+            // account's `skips` recognises them) a changed file did not have
+            // before is not proved, so the proposal does not group it with
+            // honest candidates.
+            if proved {
+                let at = |c: &str, f: &str| git(root, &["cat-file", "blob", &format!("{c}:{f}")]).unwrap_or_default();
+                if let Some(f) = files.iter().find(|f| skips(&at(&commit, f)).len() > skips(&at(start, f)).len()) {
+                    write_trace(&trace.join("rules"), format!("{f}: a proof skip (assume/admit/external_body) its base did not have ({NOT_JUDGED})"));
+                    proved = false;
+                }
+            }
             // The whole kernel's verify, as information for the proposal: what still proves with it.
             holding(|| for (k, v) in config.checks.verify.iter().enumerate() { run_check(config, &on, &cdir, build, v, &trace.join(format!("kernel-{k}"))); });
             accepted = false;
@@ -4544,6 +4556,20 @@ pub fn spec_proposal(m: &Manifest, s: &Search, id: u64, wrap: &dyn Fn(&str, usiz
         md.push_str(&para(&format!("The kernel's functions that name what it changes: {} ({} still prove, {} fail, {} not built).",
             deps.len(), with("still proves"), with("fails"), with("not built"))));
         for (f, name, st) in deps.iter().filter(|d| d.2 != "still proves").take(40) { md.push_str(&item(&format!("{f}: `{name}` {st}"))); }
+        // A proof's body is an agent's own words, so it is not part of the
+        // surface and does not count toward a behavior (B3): a change to a
+        // proof's body alone leaves the surface item unchanged. Say, for every
+        // proof whose body changed, that it did, so the review never hides an
+        // admitted proof behind an unchanged contract.
+        let proofs = |commit: &str| -> Vec<(String, String)> {
+            files.iter().flat_map(|f| surface(&git(root, &["show", &format!("{commit}:{f}")]).unwrap_or_default())
+                .into_iter().filter(|it| it.kind == "proof").map(|it| (it.name, it.written))).collect::<Vec<_>>()
+        };
+        let (was, now_) = (proofs(&base), proofs(&commit_of(is[0])));
+        let changed_names: Vec<String> = changes[k].iter().filter_map(|x| x.3.as_ref().or(x.2.as_ref()).map(|i| i.name.clone())).collect();
+        let body_changed: Vec<&String> = now_.iter().filter(|(n, body)| was.iter().any(|(wn, wb)| wn == n && wb != body)
+            && !changed_names.contains(n)).map(|(n, _)| n).collect();
+        for n in &body_changed { md.push_str(&item(&format!("the proof `{n}`'s body changed, though its contract did not: read `{}` to see how it now proves it.", patches[k]))); }
         let rest = surface_count.saturating_sub(changes[k].iter().filter(|x| x.1 != "adds").count());
         md.push('\n');
         md.push_str(&para(&format!("The rest of the spec's surface, {}, is unchanged.", count(rest, "item", "items"))));
@@ -5376,6 +5402,26 @@ mod tests {
     }
 
     #[test]
+    fn a_spec_candidate_that_adds_a_proof_skip_is_caught() {
+        // B3: `assume(false)`/`admit`/`external_body` added to a changed spec
+        // file verifies alone, but the skips its base did not have are seen (the
+        // same `skips` the account uses). The check in capture compares them.
+        let d = std::env::temp_dir().join(format!("bon-b3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("src")).unwrap();
+        std::fs::write(d.join("src/spec.rs"), "verus! {\npub proof fn p() ensures true { assert(true); }\n}\n").unwrap();
+        git(&d, &["init", "-q"]).unwrap();
+        git(&d, &["add", "-A"]).unwrap();
+        git(&d, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "base"]).unwrap();
+        let base = git(&d, &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(d.join("src/spec.rs"), "verus! {\npub proof fn p() ensures true { admit(); }\n}\n").unwrap();
+        git(&d, &["add", "-A"]).unwrap();
+        git(&d, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "cand"]).unwrap();
+        let cand = git(&d, &["rev-parse", "HEAD"]).unwrap();
+        let at = |c: &str| skips(&git(&d, &["cat-file", "blob", &format!("{c}:src/spec.rs")]).unwrap()).len();
+        assert_eq!(at(&base), 0);
+        assert!(at(&cand) > at(&base), "a skip the base did not have");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// The tests' host file: no prices beyond these, a verdict cache of their own (never /tmp/bon's).
