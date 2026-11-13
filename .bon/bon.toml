@@ -12,7 +12,7 @@ time = 3600
 # The spec, the gates' contracts and the agree check: no search changes them.
 paths = ["src/spec.rs", "src/gates.rs", "examples/kernel.rs"]
 # The tests: a candidate is accepted when each exits 0.
-test = ["cargo test -q", "cargo run -q -- sbom --check", "cargo run -q -- types --check"]
+test = ["cargo test -q", "cargo run -q -- account --check", "cargo run -q -- types --check"]
 # Verus: an accepted candidate is proved when each exits 0.
 verify = ["cargo verus verify"]
 agree = ["cargo run -q --example kernel"]
@@ -38,12 +38,57 @@ tests = ["tests/"]
 # What a counterexample's writer sees besides the checks and those tests: never the code (queue 24).
 visible = ["Cargo.toml", "Cargo.lock"]
 
-[sbom]
+# What is true of the code: bon account writes it as .bon/account.json (OSCAL)
+# and .bon/sbom.json (CycloneDX), and account --check fails when either is stale.
+[account]
 name = "best-of-n"
-trusted = ["src/trusted.rs", "src/main.rs", "src/view.rs", "src/types.rs", "src/projection.rs", "src/tui.rs"]
+description = "bon: a kernel, verified by Verus, that searches for code, and the trusted code around it."
+trusted = ["src/trusted.rs", "src/main.rs", "src/view.rs", "src/types.rs", "src/projection.rs", "src/tui.rs", "src/account.rs", "src/new.rs"]
 tools = { rustc = "rustc --version", verus = "verus --version", git = "git --version", sudo = "printf 'macOS '; sw_vers -buildVersion", tar = "tar --version", perl = "perl -e 'print $^V'", claude = "claude --version", codex = "codex --version" }
 # The network services the programs call.
 services = { "Anthropic API" = "https://api.anthropic.com", "OpenAI API" = "https://api.openai.com" }
+# The catalog the claimed controls are from.
+catalog = "https://raw.githubusercontent.com/usnistgov/oscal-content/main/nist.gov/SP800-53/rev5/json/NIST_SP-800-53_rev5_catalog.json"
+
+# Each claimed control: its claim, in words, and its evidence by status. Each
+# name must exist with that status, or bon account fails.
+[account.controls.ac-3]
+claim = "A capability's authority names the paths its agent process may change. A candidate that changes any other path is not verified, and only a verified, selected candidate reaches trunk."
+proven = ["authority", "verified", "trunk_exact"]
+
+[account.controls.ac-5]
+claim = "Three duties are held apart. Agent processes generate candidates; the checks, which no search may change, judge them, and the kernel's gates select among them; only the owner writes the spec and the checks. A candidate is pushed only when at least two independent agent processes agree, and tests written without sight of the code fail to split them."
+proven = ["protected", "agree", "selected", "pushable"]
+configured = ["checks.paths", "counterexample.visible"]
+
+[account.controls.ac-6]
+claim = "Agent processes run as the POSIX user agent. Before every search, agent's permissions on each object the policy names are observed, and they must match the policy, or the search does not start."
+proven = ["policy", "isolated"]
+trusted = ["observe"]
+
+[account.controls.au-12]
+claim = "Each transition is recorded in the traces by its spec name and arguments, with each agent process's program, model, cost and candidate; the traces go to the private remote the manifest names."
+trusted = ["run", "record_grant", "record_wait", "record_push", "record_land", "record_blocked"]
+configured = ["traces"]
+
+[account.controls.cm-8]
+claim = "This document and its SBOM list every dependency the lockfiles pin, with its checksum, and every tool at the version it reports. A check fails when either is stale."
+configured = ["account.tools", "checks.test"]
+
+[account.controls.sa-10]
+claim = "Every commit agent authors on trunk is exactly a selected, pushable candidate of a search on the previous head, or a counterexample's test that landed on it. No search may change bon's directory, the checks or the trusted code."
+proven = ["trunk_exact", "pushed", "landed", "protected"]
+configured = ["checks.paths", "account.trusted"]
+
+[account.controls.sa-11]
+claim = "A candidate is selected only when the tests accept it, Verus verifies it and it stays within its authority. What decides a push is checked again from a clean build, never from a cached verdict."
+proven = ["verified", "selected", "selection_verified"]
+trusted = ["push"]
+configured = ["checks.test", "checks.verify", "checks.agree"]
+
+[account.controls."sa-17.3"]
+claim = "Each gate is proven to return exactly what its spec predicate says, and each of the spec's invariants is proven to hold after every transition."
+proven = ["contested", "first_verified", "found_on_trunk", "isolated", "lands_on", "not_found", "proposed", "selected", "verified", "trunk_nonempty", "capability_open", "accounted", "within_limit", "spent_within_generation", "siblings", "trunk_exact"]
 
 [types]
 # The types programs are built on: bon types emits them from these files, and checks them.

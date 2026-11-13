@@ -83,7 +83,7 @@ class Search(TypedDict):
     checks: list[Path]
     # The paths holding the counterexamples' tests.
     tests: list[Path]
-    # The trusted code the manifest's SBOM declares; no search may change it.
+    # The trusted code the manifest's account declares; no search may change it.
     trusted: list[Path]
     limit: int
     results: list[Candidate | None]

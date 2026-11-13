@@ -183,7 +183,7 @@ pub struct Search {
 // `search_index`, `tested_index`, `counterexample_index`; an index into trunk
 // is `trunk_index` (the head's, `head_index`).
 
-/// bon's directory in the repository: the manifest, the queue, the SBOM and
+/// bon's directory in the repository: the manifest, the queue, the account and
 /// the traces.
 pub open spec fn bon_path() -> Path { Path(seq!['.', 'b', 'o', 'n', '/']) }
 
@@ -197,7 +197,7 @@ pub open spec fn under(paths: Set<Path>, path: Path) -> bool {
 
 /// No search may change path, except a queue search the queue: bon's directory,
 /// a path under a check (the spec, the proofs, engineer's tests), or trusted
-/// code (the files the manifest's SBOM declares trusted), which nothing proves.
+/// code (the files the manifest's account declares trusted), which nothing proves.
 pub open spec fn protected(checks: Set<Path>, trusted: Set<Path>, path: Path) -> bool {
     bon_path().0.is_prefix_of(path.0) || under(checks, path) || under(trusted, path)
 }

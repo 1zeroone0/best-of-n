@@ -286,3 +286,32 @@ cold build of the candidate's checks: about 30 s and 50 CPU-s on the kernel
 sandbox, about 60 s and 160 CPU-s and 2.5 GB more peak memory on bon's own
 source. `bon counterexample` on the pushed trunk: 72 s (kernel) and 116 s
 (bon), its landing never reached (nothing found), so nothing re-checked.
+
+## Results: one-shot Haiku on bon's own source, after round 1
+
+Same host, 2026-11-12, late evening, at 07575ac: the prompt opens with the
+failing check and its output (queue 74), the files it names come first in
+bon-sample's context, and the role's `context` bounds the prompt. The code
+role is bon-sample, `client = "claude"`, `model = "claude-haiku-5-5"`,
+`context = 80000`; foil and counterexample are stubs (`SLEEP=5 K=0`). Wall
+times are noisy (other agents on the CPU); counts are not.
+
+| project | width | verified | distinct trees verified | behaviors | pushed | generation | prompt tokens per call | calls that read the cache | over tier | median call s | code search s | `bon code` s |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| bon | 16 | 15 | 15 | 1 | yes | $0.0353 | 65,682 | 15 | 0 | 7.4 | 99 | 287 |
+| bon | 64 | 64 | 47 | 1 | yes | $0.1021 | 65,682 | 63 | 0 | 9.5 | 273 | 680 |
+| kernel | 8 | 8 | 1 | 1 | yes | $0.0025 | 5,347 | 7 | 0 | 2.5 | 8 | 105 |
+
+Before round 1 the bon rows were 0 of 16 and 0 of 64. The one failure in 80
+(width 16, process 11) is an empty reply: one line of prose describing the
+fix and no edit blocks (66 output tokens beside 1,701 of thinking), so
+nothing applied and the tree was trunk's. No reply failed to apply, to
+compile or to prove, and none named a wrong file: src/exec.rs, named by
+Verus's `--> src/exec.rs:1440:13`, came first and whole. Every verified
+candidate makes `eq` require equal lengths and adds a proof block of its own
+(hence the distinct trees); none is the original one-liner. The first call
+writes the cache ($0.0137); each later one reads 65,348 tokens of it and
+costs about $0.0014, so a verified candidate cost $0.0024 (16) and $0.0016
+(64). The program must be a file user `agent` can execute: a bon-sample under
+a 0700 directory exits 126 at once, and with no usage line bon charges each
+agent process the whole limit (`$16.0000` for 16).

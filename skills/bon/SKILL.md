@@ -126,7 +126,7 @@ POSIX user every agent process runs as; never call yourself that.
 - **Trusted code:** a trusted function carries no `ensures`; verified code
   checks what it returns. A `requires` on one is a checked edge. Trusted code
   and the checks are protected from every search, and a skipped proof outside
-  them (`external_body`, `assume`, `admit`) fails `sbom --check`.
+  them (`external_body`, `assume`, `admit`) fails `account --check`.
 - **Provenance:** an intent enters the spec in the commit that deletes its
   queue line, citing `(queue N)`; a change agreed in chat cites its session.
 - **Views derive only from the source:** the spec's and the code's own names
@@ -146,7 +146,7 @@ The repository holds the words; this skill does not repeat them.
   `rank`, and `time`, each check's cutoff), `[searches]` (for each kind, code,
   compaction, queue, counterexample and foil, a `role` and its width list
   `n`), limits, `rate`, `[counterexample]` (`path`, `build`, `run`, `tests`,
-  `visible`), `[sbom]`, `[types]`, trunk.
+  `visible`), `[account]`, `[types]`, trunk.
 - `/etc/bon/host.toml`, the host file: agent's `path`, the toolchain's homes,
   `[roles]` (each role's `program`, an argv bon appends `--model` to; its
   `client`, claude, codex or api; its `model`; a one-shot program's
@@ -213,26 +213,34 @@ at a time.
    validate, schedule) versus do effects (I/O, UI, network). *Existing:*
    language and build; what is already checked, and how long checks take;
    what decides and what does effects; the remote and trunk.
-3. **The seam.** *New:* the kernel from the start: a spec, its gates, an
-   empty implementation (Rust and Verus); effects become programs over it.
+3. **The seam.** *New:* the kernel from the start: `bon new <name>` sets up
+   a spec with the core nouns, its gates, an empty implementation (Rust and
+   Verus), the manifest and the queue, the same bytes for the same name, as
+   the first commit; effects become programs over it.
    *Existing:* what decides becomes the kernel, one gate at a time, each a
    search; what does effects becomes programs.
 4. **The queue.** *New:* intents from the owner's transcripts. *Existing:*
    intents from what the code does, its README and any transcripts, minus
    what the spec already states. The owner's words; the owner commits it.
-5. **The checks.** *New:* the spec and the gates' contracts; on trunk they
-   fail, and `bon code` closes the gap. *Existing:* the spec, the contracts
+5. **The checks.** *New:* the spec and the gates' contracts; they pass as
+   `bon new` creates them, each spec change makes trunk's fail, and
+   `bon code` closes the gap. *Existing:* the spec, the contracts
    and the current tests; they pass on trunk, except the gap the first code
    search closes.
-6. **The manifest:** `bon init` writes `.bon/bon.toml` (a template that is
+6. **The manifest:** *New:* `bon new` wrote it; set the limits and the
+   rate. *Existing:* `bon init` writes `.bon/bon.toml` (a template that is
    not search-ready), `.bon/queue.tsv` and the `.gitignore` line. Fill it in:
    wide width lists, limits sized to the work (proofs cost more), and a
    counterexample section.
-7. **The SBOM.** `bon sbom` finds dependencies from the lockfiles on its own;
-   the trusted code and the tools in the TCB it lists only as `[sbom]` in
-   `.bon/bon.toml` declares them. `bon init` pre-fills that table with the
-   files that have `#[verifier::external*]` and a version command per
-   lockfile's toolchain: confirm both with the owner, then `bon sbom`.
+7. **The account.** `bon account` writes what is true of the code: each file,
+   tool, dependency and claimed control proven, trusted, configured or tested,
+   as `.bon/account.json` (OSCAL) and `.bon/sbom.json` (CycloneDX); dependencies
+   come from the lockfiles on their own. `[account]` in `.bon/bon.toml`
+   declares the rest: `trusted`, `tools`, `services`, and each claimed control
+   (`[account.controls.<id>]`: a `claim`, and its evidence named under the
+   status each must have; `catalog` names the catalog). `bon init` pre-fills it
+   with the files that have `#[verifier::external*]` and a version command per
+   lockfile's toolchain: confirm both with the owner, then `bon account`.
    Commit `.bon/` and push.
 8. **First search:** write the smallest queued intent into the spec, then
    `bon code`. Read its trace with the owner.
@@ -249,8 +257,9 @@ at a time.
 | trunk should lose what is stale | `bon compaction` |
 | a new transcript arrived | `bon queue`; show the owner the patch it names and the contested cues; they accept it with `git am` |
 | spare capacity should work | `bon background` (`--plist` for launchd) |
-| a dependency, tool or trusted function changed | `bon sbom`; commit `.bon/sbom.json` |
+| a dependency, tool, trusted function or claimed control changed | `bon account`; commit `.bon/account.json` and `.bon/sbom.json` |
 | what reaching trunk cost | `bon cost` writes `.bon/cost.toml` (bon does after each push) |
+| a new project | `bon new <name>` |
 | before a search, a commit or a push | `bon check` |
 
 **A run's settings** (`n`, roles, limits) are read from `.bon/bon.toml`

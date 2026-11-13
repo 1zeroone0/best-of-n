@@ -297,7 +297,7 @@ fn by_sentence(sentence: &str, tested: &Value, counterexample: Option<&Value>) -
 }
 
 /// A unix time as its UTC date, YYYY-MM-DD.
-fn date(t: u64) -> String {
+pub fn date(t: u64) -> String {
     let z = (t / 86400) as i64 + 719468;
     let era = z.div_euclid(146097);
     let doe = z - era * 146097;
@@ -707,7 +707,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
         // What no search may change: bon's directory, the checks, trusted code.
         "protected": ([".bon/"].iter().map(|s| s.to_string())
             .chain(manifest.get("checks").and_then(|c| c.get("paths")).and_then(|p| p.as_array()).into_iter().flatten().filter_map(|v| v.as_str().map(String::from)))
-            .chain(manifest.get("sbom").and_then(|c| c.get("trusted")).and_then(|p| p.as_array()).into_iter().flatten().filter_map(|v| v.as_str().map(String::from)))
+            .chain(manifest.get("account").and_then(|c| c.get("trusted")).and_then(|p| p.as_array()).into_iter().flatten().filter_map(|v| v.as_str().map(String::from)))
             .collect::<Vec<_>>()),
         "sbom": sbom(root),
         "spec": spec(root, &manifest),
@@ -1289,7 +1289,12 @@ fn spec(root: &Path, manifest: &toml::Value) -> Value {
     let file = paths.iter().filter(|p| p.ends_with(".rs"))
         .find(|p| git(root, &["show", &format!("HEAD:{p}")]).contains("state_machine!"));
     let Some(file) = file else { return Value::Null };
-    let text = git(root, &["show", &format!("HEAD:{file}")]);
+    outline(file, &git(root, &["show", &format!("HEAD:{file}")]))
+}
+
+/// The spec file's outline: its state machine's fields, and each item (type,
+/// predicate, transition, property, invariant) with its doc, as Verus expresses it.
+pub fn outline(file: &str, text: &str) -> Value {
     let lines: Vec<&str> = text.lines().collect();
     let mut items = Vec::new();
     let mut fields = Vec::new();
@@ -1468,15 +1473,15 @@ fn hunks(diff: &str) -> std::collections::HashMap<String, Vec<(usize, usize)>> {
 /// state machine; the gates are each `pub trait` in `checks.paths` whose contracts
 /// cite `spec::`; an implementation is an `impl <gate trait> for` anywhere; a driver
 /// is a function that fires a transition; entry points and targets are the
-/// `[sbom] trusted` files that reach a driver or a gate; trusted functions are the
+/// `[account] trusted` files that reach a driver or a gate; trusted functions are the
 /// `external_body` ones a driver calls; emitted types are `[types] from`'s
 /// declarations, and programs are the files that import a `[types] types`
 /// target. Read from the working tree; each item is marked where it differs from trunk.
-fn system(root: &Path, base: &str, manifest: &toml::Value) -> Value {
+pub fn system(root: &Path, base: &str, manifest: &toml::Value) -> Value {
     let read = |f: &str| std::fs::read_to_string(root.join(f)).unwrap_or_default();
     let list = |v: Option<&toml::Value>| -> Vec<String> { v.and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect()).unwrap_or_default() };
     let checks = list(manifest.get("checks").and_then(|c| c.get("paths")));
-    let trusted_files = list(manifest.get("sbom").and_then(|s| s.get("trusted")));
+    let trusted_files = list(manifest.get("account").and_then(|s| s.get("trusted")));
     let from = list(types_table(manifest).and_then(|p| p.get("from")));
     let targets: Vec<String> = types_table(manifest).and_then(|p| p.get("types")).and_then(|t| t.as_table())
         .map(|t| t.values().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default();
