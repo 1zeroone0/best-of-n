@@ -159,7 +159,7 @@ fn exit_error(line: &str) -> Option<&str> { line.strip_prefix("exited: ").map(st
 
 /// The sizes of the host's two semaphores a search ran under, where its line
 /// in searches.jsonl records them: `host.agent_processes` and `host.check_processes`.
-/// No trace records them yet.
+/// Traces from before queue 59 record none.
 fn pool_sizes(summary: &Value) -> (Option<u64>, Option<u64>) {
     (summary["host"]["agent_processes"].as_u64(), summary["host"]["check_processes"].as_u64())
 }
@@ -439,7 +439,9 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
                 let (lines_added, lines_removed) = line_counts(c);
                 let record = record_of(&facts, &logs);
                 Some((i, json!({
-                    "index": i, "program": program_of(&facts), "model": facts["model"],
+                    "index": i, "program": program_of(&facts), "role": facts["role"], "model": facts["model"],
+                    // Its requests over its model's tier threshold, and what they cost beyond the base price.
+                    "requests_over_tier": facts["requests_over_tier"], "over_tier": facts["over_tier_microdollars"].as_f64().map(|m| m / 1e6),
                     "generation": facts["generation_microdollars"].as_f64().map(|m| m / 1e6),
                     "commit": c["commit"], "accepted": accepted, "verified": verified,
                     "rank": c["rank"], "diff": c["diff"], "changed": c["changed"],
@@ -513,6 +515,8 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
                 "waiting": stages["waiting"], "in_flight": stages["in_flight"], "in_checks": stages["in_checks"],
                 "pools": { "agent_processes": agent_pool, "check_processes": check_pool },
                 "behaviors": behaviors(&candidates.iter().map(|(_, c)| c.clone()).collect::<Vec<_>>()),
+                "requests_over_tier": candidates.iter().filter_map(|(_, c)| c["requests_over_tier"].as_u64()).sum::<u64>(),
+                "over_tier": candidates.iter().filter_map(|(_, c)| c["over_tier"].as_f64()).sum::<f64>(),
                 "candidates": candidates.into_iter().map(|(_, c)| c).collect::<Vec<_>>(),
             }));
             decoded.push((!summary.is_null()).then_some(kernel).flatten());
@@ -715,7 +719,7 @@ pub fn state(root: &Path, filter: &Filter) -> Value {
             "pushes": push_costs.len(),
             "verified": verified_all, "candidates": candidates_all,
             "attempts": attempts(&processes), "ended": ended(&processes), "reasons": reasons(&processes, "blocked"), "exits": reasons(&processes, "exited"),
-            "success": success(&processes), "per_verified": per_verified(&processes),
+            "success": success(&processes), "per_verified": per_verified(&processes), "over_tier": over_tier(&processes),
             "utilization": utilization(&processes), "run_time": run_time(&processes, &groups),
         },
         "processes": processes,
@@ -940,6 +944,27 @@ fn per_verified(processes: &[Value]) -> Vec<Value> {
         "agent_processes": n, "verified": v, "generation": g, "time_cost": t })).collect()
 }
 
+/// Requests over a model's tier threshold, by kind, role and model: each row's
+/// agent processes that returned facts, how many of those said each request's
+/// prompt (`measured`; codex's running total cannot), their requests over the
+/// threshold and what those cost beyond the base price. Rows of a role that
+/// reaches a model and said its requests' prompts, whether or not one crossed
+/// the line (a stub has no line to cross).
+fn over_tier(processes: &[Value]) -> Vec<Value> {
+    let mut by: BTreeMap<(String, String, String), (u64, u64, u64, f64)> = BTreeMap::new();
+    for s in all_searches(processes) {
+        for c in s["candidates"].as_array().into_iter().flatten() {
+            let word = |v: &Value| v.as_str().unwrap_or("").to_string();
+            let e = by.entry((word(&s["kind"]), word(&c["role"]), word(&c["model"]))).or_default();
+            e.0 += 1;
+            if let Some(n) = c["requests_over_tier"].as_u64() { e.1 += 1; e.2 += n; }
+            e.3 += c["over_tier"].as_f64().unwrap_or(0.0);
+        }
+    }
+    by.into_iter().filter(|((_, _, model), (_, measured, _, _))| !model.is_empty() && *measured > 0).map(|((kind, role, model), (n, measured, requests, beyond))| json!({ "kind": kind, "role": role, "model": model,
+        "agent_processes": n, "measured": measured, "requests": requests, "beyond": beyond })).collect()
+}
+
 /// The length of the union of intervals [start, end].
 fn union_length(mut spans: Vec<(f64, f64)>) -> f64 {
     spans.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -956,18 +981,22 @@ fn union_length(mut spans: Vec<(f64, f64)>) -> f64 {
 /// range: wall is the union of their wall times; agent_processes' held
 /// slot-seconds are each agent process's program seconds, check_processes'
 /// each check's seconds (a cached verdict held none). A semaphore's size is
-/// the one every search recorded, else none.
+/// the one every search that records a size recorded (traces before queue 59
+/// record none), else none; its utilization is over those searches alone:
+/// their held slot-seconds ÷ (size × the union of their wall times).
 fn utilization(processes: &[Value]) -> Value {
     let searches: Vec<&Value> = all_searches(processes).filter(|s| reported(s)).collect();
-    let wall = union_length(searches.iter().filter_map(|s| Some((s["started"].as_f64()?, s["started"].as_f64()? + s["seconds"].as_f64()?))).collect());
-    let held = |k: &str| searches.iter().flat_map(|s| s["candidates"].as_array().into_iter().flatten()).filter_map(|c| c[k].as_f64()).sum::<f64>();
-    let size = |k: &str| {
-        let sizes: Vec<Option<u64>> = searches.iter().map(|s| s["pools"][k].as_u64()).collect();
-        sizes.first().copied().flatten().filter(|_| sizes.windows(2).all(|w| w[0] == w[1]))
+    let wall_of = |of: &[&Value]| union_length(of.iter().filter_map(|s| Some((s["started"].as_f64()?, s["started"].as_f64()? + s["seconds"].as_f64()?))).collect());
+    let held_of = |of: &[&Value], k: &str| of.iter().flat_map(|s| s["candidates"].as_array().into_iter().flatten()).filter_map(|c| c[k].as_f64()).sum::<f64>();
+    let pool = |k: &str, held: &str| {
+        let sized: Vec<&Value> = searches.iter().copied().filter(|s| s["pools"][k].as_u64().is_some()).collect();
+        let size = sized.first().and_then(|s| s["pools"][k].as_u64()).filter(|n| sized.iter().all(|s| s["pools"][k].as_u64() == Some(*n)));
+        let wall = wall_of(&sized);
+        let utilization = size.filter(|n| *n > 0 && wall > 0.0).map(|n| held_of(&sized, held) / (n as f64 * wall));
+        json!({ "held": held_of(&searches, held), "size": size, "utilization": utilization, "sized": sized.len() })
     };
-    json!({ "wall": wall, "searches": searches.len(),
-        "agent_processes": { "held": held("program_seconds"), "size": size("agent_processes") },
-        "check_processes": { "held": held("check_seconds"), "size": size("check_processes") } })
+    json!({ "wall": wall_of(&searches), "searches": searches.len(),
+        "agent_processes": pool("agent_processes", "program_seconds"), "check_processes": pool("check_processes", "check_seconds") })
 }
 
 /// The median: the middle value, or the mean of the two middle ones.
@@ -1062,6 +1091,19 @@ pub fn per_verified_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
     out
 }
 
+/// The over-tier table, its header first: one row per kind, role and model
+/// whose output said each request's prompt: its requests over the model's
+/// tier threshold and what they cost beyond the base price.
+pub fn over_tier_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
+    if t.over_tier.is_empty() { return Vec::new(); }
+    let mut out = vec![["Over tier", "Requests over", "Beyond base", "Agent processes"].map(String::from).to_vec()];
+    for r in &t.over_tier {
+        let measured = if r.measured == r.agent_processes { r.agent_processes.to_string() } else { format!("{} of {}", r.measured, r.agent_processes) };
+        out.push(vec![format!("{} · {} · {}", cap(&r.kind), r.role, r.model), r.requests.to_string(), money(r.beyond), measured]);
+    }
+    out
+}
+
 /// The run-time distribution table, its header first: each kind that pushed,
 /// its time and cost to a push; then each kind's fit per search, or why there is none.
 pub fn run_time_table(t: &crate::projection::Totals) -> (Vec<Vec<String>>, Vec<String>) {
@@ -1089,10 +1131,18 @@ pub fn run_time_table(t: &crate::projection::Totals) -> (Vec<Vec<String>>, Vec<S
 pub fn utilization_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
     let u = &t.utilization;
     if u.searches == 0 || u.wall <= 0.0 { return Vec::new(); }
-    let mut out = vec![["Utilization", "Held", "Wall", "Held ÷ wall", "Size", "Utilization"].map(String::from).to_vec()];
+    // Size and utilization only where a trace records a size; over the searches that do, said when not every one.
+    let sized = [&u.agent_processes, &u.check_processes].iter().any(|p| p.size.is_some());
+    let mut head = vec!["Utilization", "Held", "Wall", "Held ÷ wall"];
+    if sized { head.extend(["Size", "Utilization"]); }
+    let mut out = vec![head.into_iter().map(String::from).collect::<Vec<_>>()];
     for (name, p) in [("agent_processes", &u.agent_processes), ("check_processes", &u.check_processes)] {
-        out.push(vec![name.to_string(), dur(p.held), dur(u.wall), format!("{:.2}", p.held / u.wall),
-            p.size.map_or("—".into(), |s| s.to_string()), p.size.map_or("—".into(), |s| format!("{:.0}%", 100.0 * p.held / (s as f64 * u.wall)))]);
+        let mut row = vec![name.to_string(), dur(p.held), dur(u.wall), format!("{:.2}", p.held / u.wall)];
+        if sized {
+            row.push(p.size.map_or("—".into(), |s| s.to_string()));
+            row.push(p.utilization.map_or("—".into(), |x| if p.sized < u.searches { format!("{:.0}% ({} of {} searches)", 100.0 * x, p.sized, u.searches) } else { format!("{:.0}%", 100.0 * x) }));
+        }
+        out.push(row);
     }
     out
 }
@@ -1109,16 +1159,17 @@ pub fn turnaround_table(t: &crate::projection::Totals) -> Vec<Vec<String>> {
 }
 
 /// What the measures' words mean: each measure's formula, said once.
-pub const MEASURE_NOTES: [(&str, &str); 10] = [
+pub const MEASURE_NOTES: [(&str, &str); 11] = [
     ("Success probability per agent process", "verified ÷ agent processes, over reported searches; a foil search's foils ÷ its agent processes"),
     ("Success probability per attempt", "pushed ÷ attempts that ended (pushed, blocked, landed)"),
     ("Attempt a", "the same, over each bon process's a-th attempt and the searches on it"),
     ("Agent processes per behavior", "a search's verified candidates showing each distinct out"),
     ("Cost per verified candidate", "(Σ generation + Σ time × the row's share of each search's agent processes) ÷ verified"),
-    ("Time, cost to a push", "Σ seconds, Σ generation + time, of its kind's bon processes since its last push"),
+    ("Over tier", "requests whose prompt passed the model's tier threshold (`above` in the host's prices), and Σ (their cost at the tier − at the base price)"),
+    ("Time, cost to a push","Σ seconds, Σ generation + time, of its kind's bon processes since its last push"),
     ("Median, 90th percentile", "the middle value (the mean of the middle two); the ⌈0.9 n⌉-th smallest"),
     ("Per search (inferred)", "least squares: seconds or cost = fixed + per tree × distinct trees, over reported searches"),
-    ("Utilization", "held slot-seconds ÷ (size × wall); held: programs' seconds, checks' seconds (none for a cached verdict); wall: the union of the searches' wall times"),
+    ("Utilization", "held slot-seconds ÷ (size × wall); held: programs' seconds, checks' seconds (none for a cached verdict); wall: the union of the searches' wall times; over the searches whose trace records the size"),
     ("Turnaround", "an interrupt's raise to the action that resolved it"),
 ];
 
@@ -1236,7 +1287,7 @@ pub fn outcome_lines(t: &crate::projection::Totals) -> Vec<String> {
 pub fn measure_lines(t: &crate::projection::Totals) -> Vec<String> {
     let mut lines = Vec::new();
     let (run, fits) = run_time_table(t);
-    for table in [success_table(t), per_verified_table(t), run] {
+    for table in [success_table(t), per_verified_table(t), over_tier_table(t), run] {
         if table.is_empty() { continue; }
         lines.extend(aligned(&table));
         lines.push(String::new());
@@ -1987,6 +2038,29 @@ mod tests {
         // Sizes that differ between searches are no one size.
         let v = utilization(&[json!({ "searches": [sr(0.0, 20.0, Some(4)), sr(10.0, 20.0, Some(8))] })]);
         assert!(v["agent_processes"]["size"].is_null());
+        // A trace from before sizes were recorded: utilization over the searches that record one, said so.
+        let w = utilization(&[json!({ "searches": [sr(0.0, 20.0, None), sr(40.0, 10.0, Some(4))] })]);
+        assert_eq!((w["agent_processes"]["size"].as_u64(), w["agent_processes"]["sized"].as_u64(), w["agent_processes"]["utilization"].as_f64()), (Some(4), Some(1), Some(1.0)));
+        let t: crate::projection::Totals = serde_json::from_value(json!({ "utilization": w })).unwrap();
+        assert_eq!(utilization_table(&t)[1][5], "100% (1 of 2 searches)");
+        // No size recorded anywhere: no Size or Utilization column.
+        let t: crate::projection::Totals = serde_json::from_value(json!({ "utilization": utilization(&[json!({ "searches": [sr(0.0, 20.0, None)] })]) })).unwrap();
+        assert_eq!(utilization_table(&t)[0].len(), 4);
+    }
+
+    #[test]
+    fn requests_over_a_tier_are_counted_by_kind_role_and_model_with_what_they_cost_beyond_the_base() {
+        let c = |role: &str, model: Option<&str>, over: Option<u64>, beyond: Option<f64>| json!({ "role": role, "model": model, "requests_over_tier": over, "over_tier": beyond });
+        let p = [json!({ "searches": [
+            { "kind": "code", "candidates": [c("wide", Some("claude-haiku-5-5"), Some(2), Some(0.03)), c("wide", Some("claude-haiku-5-5"), Some(0), Some(0.0)), c("wide", Some("claude-haiku-5-5"), None, None)] },
+            { "kind": "code", "candidates": [c("deep", Some("gpt-6.1-sol"), None, None), c("stub", None, Some(0), Some(0.0))] },
+        ] })];
+        let rows = over_tier(&p);
+        // A stub has no line to cross; a role whose output never says its requests (codex) is not measured.
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!((rows[0]["role"].as_str(), rows[0]["agent_processes"].as_u64(), rows[0]["measured"].as_u64(), rows[0]["requests"].as_u64()), (Some("wide"), Some(3), Some(2), Some(2)));
+        let t: crate::projection::Totals = serde_json::from_value(json!({ "over_tier": rows })).unwrap();
+        assert_eq!(over_tier_table(&t)[1], ["Code · wide · claude-haiku-5-5", "2", "$0.03", "2 of 3"]);
     }
 
     #[test]

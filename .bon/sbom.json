@@ -2546,6 +2546,14 @@
       },
       {
         "name": "bon:trusted-file",
+        "value": "src/host.rs"
+      },
+      {
+        "name": "bon:trusted-file",
+        "value": "src/route.rs"
+      },
+      {
+        "name": "bon:trusted-file",
         "value": "src/tui.rs"
       },
       {

@@ -185,6 +185,8 @@ class Totals(TypedDict):
     success: list[Success]
     # Cost per verified candidate by kind, program and model.
     per_verified: list[PerVerified]
+    # Requests over a model's tier threshold, by kind, role and model.
+    over_tier: list[OverTier]
     # The host's two semaphores against wall time.
     utilization: Utilization
     # Time and cost to a push, by kind, and each search's as a fixed part
@@ -292,6 +294,18 @@ class PerVerified(TypedDict):
     generation: float
     time_cost: float
 
+# The agent processes of one kind, role and model whose output said each
+# request's prompt (`measured` of `agent_processes`), their requests over the
+# model's tier threshold, and what those cost beyond the base price.
+class OverTier(TypedDict):
+    kind: str
+    role: str
+    model: str
+    agent_processes: int
+    measured: int
+    requests: int
+    beyond: float
+
 # The host's agent_processes and check_processes semaphores over the reported
 # searches in range: `wall` is the union of their wall times, in seconds.
 class Utilization(TypedDict):
@@ -300,11 +314,14 @@ class Utilization(TypedDict):
     agent_processes: Pool
     check_processes: Pool
 
-# One semaphore: the slot-seconds held, and its size where every search
-# recorded the same one. Utilization is held ÷ (size × wall).
+# One semaphore: the slot-seconds held, its size where every search that
+# records one (`sized` of them) recorded the same, and its utilization over
+# those: their held slot-seconds ÷ (size × the union of their wall times).
 class Pool(TypedDict):
     held: float
     size: int | None
+    utilization: float | None
+    sized: int
 
 # One kind's run-time distribution: its pushes' time (seconds) and cost to a
 # push, each as median and 90th percentile; and over `searches` of its
@@ -473,6 +490,10 @@ class SearchTrace(TypedDict):
     # Agent processes per behavior: for each distinct `out` its verified
     # candidates show, how many show it, in the order each first appears.
     behaviors: list[int]
+    # Its agent processes' requests over their model's tier threshold, and
+    # what those cost beyond the base price.
+    requests_over_tier: int
+    over_tier: float
     candidates: list[Facts]
     # A code or compaction search: how its attempt ended (pushed, blocked,
     # landed, exited, running).
@@ -507,8 +528,14 @@ class Facts(TypedDict):
     index: int
     # The program it ran (older traces: their `harness`).
     program: str | None
+    # The role it ran as, in traces that record it.
+    role: str | None
     model: str | None
     generation: float | None
+    # Its requests over its model's tier threshold, and what they cost
+    # beyond the base price; none where its output said nothing per request.
+    requests_over_tier: int | None
+    over_tier: float | None
     commit: str | None
     accepted: bool
     # Verus verified it.
@@ -678,3 +705,109 @@ class Service(TypedDict):
     name: str
     endpoints: list[str]
     group: str | None
+
+# The host as bon shows it (queue 60): every repository the user layer
+# holds, or the one it was read in, and across them what waits on engineer,
+# the host's two pools, its memory, each running bon process and a journal,
+# from the process list, the slot files, the traces and the OS.
+class Host(TypedDict):
+    # The user layer's root, from the host file; none without one.
+    user: str | None
+    # The repository it was read in; none for the whole host.
+    here: str | None
+    repositories: list[Repository]
+    # What only engineer can answer, every repository's and the user
+    # layer's, oldest first: pending and resolved.
+    interrupts: list[Interrupt]
+    waiting: Waiting
+    pools: HostPools
+    memory: Memory
+    # Each running bon process, those of one tree together.
+    trees: list[TreeGroup]
+    # What happened, oldest first: pushes, blocks, landings, interrupts raised and resolved.
+    journal: list[Event]
+    turnaround: list[Turnaround]
+    now: int
+
+# A repository bon reaches: one under the user layer's root with a
+# .bon/bon.toml, one a live bon process searches, or one a route names.
+class Repository(TypedDict):
+    name: str
+    root: str
+    # Whether trunk's head has a .bon/bon.toml.
+    configured: bool
+    pending: int
+    running: int
+    # When its latest bon process started.
+    latest: int | None
+    # What its bon processes cost since local midnight.
+    today: float
+
+# The searches engineer waits on now (running, not background) of the
+# repositories shown, among `host` of them on the host; what his time costs
+# an hour while they run (each search's repository's rate, split among the
+# host's waited-on searches); and his time charged today.
+class Waiting(TypedDict):
+    searches: int
+    host: int
+    per_hour: float
+    today: float
+
+# The host file's two semaphores, their slots held now, and how many of the
+# shown repositories' agent processes are in flight and in checks.
+class HostPools(TypedDict):
+    agent_processes: Slots
+    check_processes: Slots
+    check_threads: int | None
+
+# One semaphore: its size, the slots held host-wide, and how many of the
+# shown repositories' agent processes need it now.
+class Slots(TypedDict):
+    size: int | None
+    held: int
+    shown: int
+
+# The machine's memory, what is free for checks, and what the running bon
+# processes' trees hold resident, in GB.
+class Memory(TypedDict):
+    total: float
+    free: float
+    bon: float
+
+# The running bon processes that start from one tree.
+class TreeGroup(TypedDict):
+    tree: str | None
+    processes: list[Running]
+
+# A bon process the process list says is running, and what its trace says.
+class Running(TypedDict):
+    pid: int
+    repository: str
+    root: str
+    trace: str | None
+    background: bool
+    kind: str | None
+    goal: str | None
+    search: int | None
+    attempt: int | None
+    started: int | None
+    # When the bon process started.
+    start: int
+    # Its process tree's resident memory, in GB.
+    memory: float
+    sentence: str
+    width: int | None
+    returned: int
+    verified: int
+    in_flight: int
+    in_checks: int
+    waiting: int
+    cost: float
+
+# One thing that happened: when, in which repository (none: the user
+# layer's), what (pushed, blocked, landed, raised, resolved), and a line.
+class Event(TypedDict):
+    time: int
+    repository: str
+    kind: str
+    text: str

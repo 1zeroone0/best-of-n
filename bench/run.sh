@@ -17,6 +17,8 @@
 #   CX_MODE        kernel: the counterexample stubs' tests: blind, split or few [blind]
 #   ATTEMPTS       attempts `bon code` may make, each WIDTH wide [1]
 #   TIME           each agent process's time limit, seconds [1800]
+#   LIMIT          the bon process's dollar limit (bon.toml limit) [1000.0]
+#   AGENT_LIMIT    each agent process's dollar limit ([agent_process] limit) [1.0]
 #   CHECK_TIME     each check's cutoff, seconds [1800]
 #   PROJECT        kernel: the small crate in bench/sandbox; bon: bon's own
 #                  source at this commit, one function broken [kernel]
@@ -48,6 +50,8 @@ CX_MODE=${CX_MODE:-blind}
 ATTEMPTS=${ATTEMPTS:-1}
 NS=$WIDTH; i=1; while [ "$i" -lt "$ATTEMPTS" ]; do NS="$NS, $WIDTH"; i=$((i + 1)); done
 TIME=${TIME:-1800}
+LIMIT=${LIMIT:-1000.0}
+AGENT_LIMIT=${AGENT_LIMIT:-1.0}
 CHECK_TIME=${CHECK_TIME:-1800}
 PROJECT=${PROJECT:-kernel}
 STUB='program = ["/bin/sh", ".bon/stub.sh"]'
@@ -98,11 +102,11 @@ printf '/target\n/.bon/traces/\n' > "$WORK/.gitignore"
 printf 'id\tintent\n' > "$WORK/.bon/queue.tsv"
 cat > "$WORK/.bon/bon.toml" <<EOF
 # The benchmark's sandbox: stub agents, a local bare origin, no traces remote.
-limit = 1000.0
+limit = $LIMIT
 rate = 0
 
 [agent_process]
-limit = 1.0
+limit = $AGENT_LIMIT
 time = $TIME
 
 [checks]
